@@ -1,0 +1,721 @@
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { api, pollJob } from "../api.js";
+import { useApp } from "../state.jsx";
+import { usePlay } from "../screens/playContext.jsx";
+import { Slider, Select, Num, Disclose } from "./ui.jsx";
+import {
+  buildSamplePayload, buildInpaintPayload, changeToParams, effectiveSteps, fillSizeFor,
+} from "../sampleSettings.jsx";
+import {
+  contrastPreview, compositePostprocWithMask, countMaskPixels,
+} from "../contrastMask.js";
+import { bendPresetSynopsis, bendPresetSummary } from "../bendSynopsis.js";
+
+const DEFAULT_PP = { contrast: 1, gamma: 1, saturation: 1, eqhist: 0, unsharp: 0, noise: 0 };
+
+const SPLIT_METHODS = [
+  { value: "luminance", label: "Brightness" },
+  { value: "contrast", label: "Local contrast" },
+];
+
+// The two sides of a split. "Foreground/Background" claimed more than the maths
+// delivers — a luminance split separates dark from light, nothing more.
+const SPLIT_SIDES = [
+  { id: "foreground", label: "Side A", luminance: "Darker", contrast: "Detailed" },
+  { id: "background", label: "Side B", luminance: "Lighter", contrast: "Flat" },
+];
+
+const LIVE_PARAM_KEYS = ["steps", "seed", "eta", "noise_level"];
+
+function isIdentityPostproc(pp) {
+  if (!pp) return true;
+  return (
+    (pp.contrast ?? 1) === 1
+    && (pp.gamma ?? 1) === 1
+    && (pp.saturation ?? 1) === 1
+    && (pp.eqhist ?? 0) === 0
+    && (pp.unsharp ?? 0) === 0
+    && (pp.noise ?? 0) === 0
+  );
+}
+
+function loadStored(key) {
+  try { return localStorage.getItem(key) || ""; } catch { return ""; }
+}
+
+function resolveBends(presets, name) {
+  if (!name) return null;
+  return presets.find((b) => b.name === name)?.bends || null;
+}
+
+export default function CreatePanel() {
+  const { toast, modelPath, models, ops } = useApp();
+  const {
+    initImage, setInitImage, commitFrame, pushHistory, setFrame, setProgress, frame, frameRaw,
+    canvasImage, sampleParams,
+    brushSize, setBrushSize, brushHard, setBrushHard, eraser, setEraser,
+    maskTool, setMaskTool, wandTolerance, setWandTolerance,
+    clearMask, getMaskDataUrl, applyContrastMask, maskRef, maskVersion, frameCard,
+    undoMask, clearMaskUndo, canUndoMask, tab,
+    job, setJob, genRunning, genPaused,
+  } = usePlay();
+
+  const [ppOn, setPpOn] = useState(false);
+  const [pp, setPp] = useState(DEFAULT_PP);
+  const [bendPresets, setBendPresets] = useState([]);
+  const [genBendPreset, setGenBendPreset] = useState(() => loadStored("kiln.genBendPreset"));
+  const [regionBendPreset, setRegionBendPreset] = useState(() => loadStored("kiln.regionBendPreset"));
+  const [srFactor, setSrFactor] = useState(2);
+  const [srSharpen, setSrSharpen] = useState(0.5);
+  const [srBusy, setSrBusy] = useState(false);
+  const [genChange, setGenChange] = useState(0.7);
+  const [regionChange, setRegionChange] = useState(0.65);
+  const [feather, setFeather] = useState(8);
+  const [variations, setVariations] = useState(1);
+  const [splitMethod, setSplitMethod] = useState("luminance");
+  const [brightnessThreshold, setBrightnessThreshold] = useState(128);
+  const [contrastThreshold, setContrastThreshold] = useState(0);
+  const [splitSoften, setSplitSoften] = useState(2);
+  const [smoothOn, setSmoothOn] = useState(false);
+  const [smoothRadius, setSmoothRadius] = useState(2);
+  const [maskSide, setMaskSide] = useState("foreground");
+  const [splitPreview, setSplitPreview] = useState(null);
+  const [splitBusy, setSplitBusy] = useState(false);
+  const pausedSnapshot = useRef(null);
+  const ppSource = frameRaw || frame;
+  const ppGen = useRef(0);
+  const [canvasSize, setCanvasSize] = useState(null);
+
+  // Region fill runs at the canvas's own resolution, so the user needs to see it.
+  useEffect(() => {
+    if (!canvasImage) { setCanvasSize(null); return undefined; }
+    let live = true;
+    const im = new Image();
+    im.onload = () => { if (live) setCanvasSize({ w: im.naturalWidth, h: im.naturalHeight }); };
+    im.src = canvasImage;
+    return () => { live = false; };
+  }, [canvasImage]);
+
+  useEffect(() => {
+    api.get("/library/bends").then(setBendPresets).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (tab !== "create") return undefined;
+    const onKey = (e) => {
+      const z = e.key === "z" || e.key === "Z";
+      if (!z || !(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+      const t = e.target;
+      const tag = t?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t?.isContentEditable) return;
+      if (!canUndoMask) return;
+      e.preventDefault();
+      undoMask();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [tab, canUndoMask, undoMask]);
+
+  useEffect(() => {
+    localStorage.setItem("kiln.genBendPreset", genBendPreset);
+  }, [genBendPreset]);
+
+  useEffect(() => {
+    localStorage.setItem("kiln.regionBendPreset", regionBendPreset);
+  }, [regionBendPreset]);
+
+  const splitOpts = useMemo(() => {
+    const base = splitMethod === "luminance"
+      ? { method: "luminance", autoThreshold: false, threshold: brightnessThreshold, soften: splitSoften }
+      : { method: "contrast", autoThreshold: true, thresholdBias: contrastThreshold, soften: splitSoften };
+    return { ...base, presmooth: smoothOn ? smoothRadius : 0 };
+  }, [splitMethod, brightnessThreshold, contrastThreshold, splitSoften, smoothOn, smoothRadius]);
+
+  // Invalidate calculated preview when inputs change so Apply requires Calculate again.
+  useEffect(() => {
+    setSplitPreview(null);
+  }, [canvasImage, splitOpts]);
+
+  const maskPixels = useMemo(
+    () => countMaskPixels(maskRef.current),
+    [maskVersion, maskRef],
+  );
+  const hasMask = maskPixels > 0;
+
+  useEffect(() => {
+    if (!ppSource) return;
+    // Off, or defaults that leave the image unchanged — never hit the API.
+    if (!ppOn || isIdentityPostproc(pp)) {
+      setFrame(ppSource, frameRaw);
+      return;
+    }
+    const gen = ++ppGen.current;
+    // Preserve the unprocessed source so live postproc cannot feed on itself.
+    const raw = frameRaw || ppSource;
+    const t = setTimeout(async () => {
+      try {
+        const mask = getMaskDataUrl();
+        const r = await api.post("/perform/postproc", { image: raw, postproc: pp });
+        let image = r.image;
+        if (mask) {
+          image = await compositePostprocWithMask(raw, r.image, mask);
+        }
+        if (gen === ppGen.current) setFrame(image, raw);
+      } catch { /* ignore transient errors while dragging sliders */ }
+    }, 220);
+    return () => clearTimeout(t);
+  }, [pp, ppOn, ppSource, frameRaw, setFrame, getMaskDataUrl, maskVersion]);
+
+  const onJob = (j) => {
+    setJob(j);
+    if (j.detail?.frame) setFrame(j.detail.frame, j.detail.frame_raw, j.detail.card);
+    setProgress(j.status === "running" ? { value: j.progress, message: j.message } : null);
+  };
+
+  const regionForSide = (side) => {
+    if (splitMethod === "contrast") {
+      return side === "foreground" ? "high" : "low";
+    }
+    return side === "foreground" ? "dark" : "light";
+  };
+
+  const applySplit = async (side = maskSide) => {
+    if (!canvasImage) { toast("Put an image on the canvas first", "error"); return; }
+    if (!splitPreview) { toast("Calculate contrast regions first", "error"); return; }
+    setSplitBusy(true);
+    try {
+      const ok = await applyContrastMask(canvasImage, { ...splitOpts, region: regionForSide(side) });
+      if (ok) {
+        setMaskSide(side);
+        const def = SPLIT_SIDES.find((x) => x.id === side);
+        const label = splitMethod === "luminance" ? def?.luminance : def?.contrast;
+        toast(`Masked the ${(label || side).toLowerCase()} side`, "success");
+      } else {
+        toast("Could not apply mask", "error");
+      }
+    } catch (e) {
+      toast(e.message, "error");
+    } finally {
+      setSplitBusy(false);
+    }
+  };
+
+  const calculateSplit = async () => {
+    if (!canvasImage) { toast("Put an image on the canvas first", "error"); return; }
+    setSplitBusy(true);
+    try {
+      const p = await contrastPreview(canvasImage, splitOpts);
+      setSplitPreview(p);
+    } catch (e) {
+      setSplitPreview(null);
+      toast(e.message || "Contrast calculate failed", "error");
+    } finally {
+      setSplitBusy(false);
+    }
+  };
+
+  const clearInit = () => {
+    setInitImage(null);
+    setFrame(null, null);
+    clearMask({ skipUndo: true });
+    clearMaskUndo();
+    setSplitPreview(null);
+  };
+
+  const finishJob = (done, clearAfter) => {
+    setProgress(null);
+    if (done.status === "error") toast(done.message, "error");
+    if (done.status === "done" || done.status === "cancelled") {
+      const frames = done.detail?.frames;
+      const framesRaw = done.detail?.frames_raw;
+      const cards = done.detail?.cards;
+      const cardFor = (i) => cards?.[i] ?? done.detail?.card ?? null;
+      if (frames?.length > 1) {
+        frames.forEach((img, i) => {
+          const raw = framesRaw?.[i] ?? null;
+          if (i === frames.length - 1) commitFrame(img, raw, cardFor(i));
+          else pushHistory(img, raw, cardFor(i));
+        });
+        if (done.status === "done") toast(`${frames.length} variations saved to Results`, "success");
+        else toast(`Stopped — ${frames.length} variation(s) saved`, "success");
+      } else if (done.detail?.frame) {
+        commitFrame(done.detail.frame, done.detail.frame_raw, cardFor(0));
+        if (done.status === "cancelled") toast("Stopped — saved to Results", "success");
+      }
+      if (clearAfter && (frames?.length || done.detail?.frame)) {
+        clearMask({ skipUndo: true });
+        clearMaskUndo();
+      }
+    }
+    setJob(null);
+    pausedSnapshot.current = null;
+  };
+
+  const run = async () => {
+    if (!modelPath) { toast("Pick a model first", "error"); return; }
+    const mask = getMaskDataUrl();
+
+    if (mask && !frame) {
+      toast("Put an image on the canvas to fill a region", "error");
+      return;
+    }
+
+    const batchSize = Math.max(1, Math.min(4, Math.round(variations) || 1));
+
+    try {
+      if (mask) {
+        const genBends = resolveBends(bendPresets, regionBendPreset)
+          || resolveBends(bendPresets, genBendPreset);
+        const mapped = changeToParams(brushHard ? 1 : regionChange, sampleParams.steps, true);
+        const body = buildInpaintPayload(sampleParams, {
+          model_path: modelPath,
+          init_image: frame,
+          mask,
+          bends: genBends,
+          bend_preset: regionBendPreset || genBendPreset || "",
+          feather: brushHard ? 0 : feather,
+          overrides: mapped,
+          batch_size: batchSize,
+        });
+        const { job: j } = await api.post("/perform/inpaint", body);
+        onJob(j);
+        const done = await pollJob(j.id, onJob, 300);
+        finishJob(done, true);
+      } else {
+        const genBends = resolveBends(bendPresets, genBendPreset);
+        const mapped = changeToParams(genChange, sampleParams.steps, !!initImage);
+        const body = buildSamplePayload(sampleParams, {
+          model_path: modelPath,
+          bends: genBends,
+          bend_preset: genBendPreset || "",
+          init_image: initImage,
+          postproc: ppOn ? pp : {},
+          overrides: mapped,
+          batch_size: batchSize,
+        });
+        const { job: j } = await api.post("/perform/sample", body);
+        onJob(j);
+        const done = await pollJob(j.id, onJob, 300);
+        finishJob(done, false);
+      }
+    } catch (e) { toast(e.message, "error"); setProgress(null); setJob(null); }
+  };
+
+  const pause = async () => {
+    if (!job) return;
+    pausedSnapshot.current = {
+      steps: sampleParams.steps,
+      seed: sampleParams.seed,
+      eta: sampleParams.eta,
+      noise_level: sampleParams.noise_level,
+    };
+    try {
+      await api.post(`/jobs/${job.id}/pause`);
+      toast("Paused — edit Steps, Seed, Eta, or Noise level, then Resume", "success");
+    } catch (e) { toast(e.message, "error"); }
+  };
+
+  const resume = async () => {
+    if (!job) return;
+    const snap = pausedSnapshot.current || {};
+    const updates = {};
+    for (const k of LIVE_PARAM_KEYS) {
+      if (sampleParams[k] !== snap[k]) updates[k] = sampleParams[k];
+    }
+    if (updates.seed === "") updates.seed = null;
+    try {
+      await api.post(`/jobs/${job.id}/resume`, updates);
+      pausedSnapshot.current = {
+        steps: sampleParams.steps,
+        seed: sampleParams.seed,
+        eta: sampleParams.eta,
+        noise_level: sampleParams.noise_level,
+      };
+    } catch (e) { toast(e.message, "error"); }
+  };
+
+  const stopAndSave = async () => {
+    if (job) await api.post(`/jobs/${job.id}/cancel`);
+  };
+
+  const upscale = async () => {
+    const src = frame;
+    if (!src) return;
+    setSrBusy(true);
+    try {
+      const r = await api.post("/tools/superres", { image: src, factor: srFactor, sharpen: srSharpen });
+      commitFrame(r.image, null, frameCard ? { ...frameCard, upscaled: srFactor } : null);
+      toast(`Upscaled to ${r.size[0]}×${r.size[1]}`, "success");
+    } catch (e) { toast(e.message, "error"); }
+    setSrBusy(false);
+  };
+
+  const setPpField = (k, v) => setPp((s) => ({ ...s, [k]: v }));
+
+  const runSteps = hasMask
+    ? effectiveSteps(brushHard ? 1 : regionChange, sampleParams.steps, true)
+    : effectiveSteps(genChange, sampleParams.steps, !!initImage);
+  const stepsTrimmed = runSteps < sampleParams.steps;
+
+  const activeMults = (models || []).find((m) => m.path === modelPath)?.mults;
+  const fill = hasMask && canvasSize
+    ? fillSizeFor(canvasSize.w, canvasSize.h, activeMults)
+    : null;
+  const scaledFill = fill && canvasSize && (fill.w !== canvasSize.w || fill.h !== canvasSize.h);
+
+  const stepText = stepsTrimmed
+    ? `${runSteps} of ${sampleParams.steps} steps`
+    : `${runSteps} steps`;
+  const generateHint = hasMask
+    ? `Painted region · ${maskPixels.toLocaleString()} px · ${stepText}`
+    : initImage
+      ? `Full canvas · from init · ${sampleParams.image_size}px · ${stepText}`
+      : `Full canvas · new generation · ${sampleParams.image_size}px · ${stepText}`;
+
+  // Each option carries its own stack summary, so hovering one in the dropdown
+  // says what it will actually do rather than just naming it.
+  const bendOptions = [
+    { value: "", label: "— none —", title: "No layer bending." },
+    ...bendPresets.map((b) => ({
+      value: b.name,
+      label: `${b.name} — ${bendPresetSummary(b, ops)}`,
+      title: bendPresetSynopsis(b, ops),
+    })),
+  ];
+  const presetByName = (n) => bendPresets.find((b) => b.name === n);
+  const bendTip = (selected, base) => {
+    const p = presetByName(selected);
+    return p ? `${base}\n\n${bendPresetSynopsis(p, ops)}` : base;
+  };
+
+  return (
+    <div className="col create-panel">
+      {/* ——— 1. Generate ——————————————————————————————— */}
+      <div className="card">
+        <h3>Generate</h3>
+        <p className="hint mb-2">
+          {hasMask
+            ? "A mask is painted — Generate fills that region on the canvas."
+            : "Makes a new image, or reworks an init image. Paint a region below to fill only that area instead."}
+        </p>
+
+        {initImage && !hasMask && (
+          <>
+            <Slider
+              label="Change"
+              value={genChange}
+              min={0}
+              max={1}
+              step={0.05}
+              onChange={setGenChange}
+              fmt={(v) => `${v < 0.3 ? "subtle" : v < 0.7 ? "medium" : "strong"} · ${effectiveSteps(v, sampleParams.steps, true)} steps`}
+              tip="How far to move from the init image. Subtle keeps more of it; strong invents more. It also sets how far down the noise schedule the run starts, so lower values run fewer steps."
+            />
+            <div className="row center gap-2 mb-2">
+              <div className="thumb-sm"><img src={initImage} alt="init" /></div>
+              <span className="sub grow">Init image set</span>
+              <button type="button" className="btn ghost sm" onClick={clearInit}>Clear init</button>
+            </div>
+          </>
+        )}
+        {hasMask && initImage && (
+          <p className="hint mb-2">Region fill uses the canvas. Clear the mask to generate from init instead.</p>
+        )}
+
+        <div className="row gap-2 wrap">
+          <div className="w-100">
+            <Num
+              label="Variations"
+              value={variations}
+              onChange={(v) => setVariations(Math.max(1, Math.min(4, Math.round(v) || 1)))}
+              min={1}
+              max={4}
+              step={1}
+              tip="How many seeds to sample in one GPU run (1–4). With a fixed Seed, uses seed, seed+1, …. All land in Results."
+            />
+          </div>
+          {bendPresets.length > 0 && (
+            <div className="grow">
+              <Select
+                label="Bend preset"
+                value={genBendPreset}
+                onChange={setGenBendPreset}
+                options={bendOptions}
+                tip={bendTip(
+                  genBendPreset,
+                  "Optional layer tweaks saved in Play ▸ Bend, applied to the whole canvas.",
+                )}
+              />
+            </div>
+          )}
+        </div>
+        {genBendPreset && presetByName(genBendPreset) && (
+          <p className="hint mb-2 mono-hint">
+            {bendPresetSynopsis(presetByName(genBendPreset), ops)}
+          </p>
+        )}
+
+        <div className="create-generate-box">
+          <span className="sub">
+            {genPaused
+              ? `Paused · step ${job?.detail?.step || "?"} / ${job?.detail?.total || "?"}`
+              : variations > 1
+                ? `${generateHint} · ${variations} variations`
+                : generateHint}
+          </span>
+          {stepsTrimmed && (
+            <span className="sub block mt-1">
+              Keeping part of the image means starting partway down the schedule, so
+              {" "}{sampleParams.steps - runSteps} early steps are skipped. Raise Change to use more.
+            </span>
+          )}
+          {fill && canvasSize && (
+            <span className="sub block mt-1">
+              Fills at {fill.w}×{fill.h}
+              {scaledFill
+                ? ` (canvas ${canvasSize.w}×${canvasSize.h}, scaled back on return)`
+                : " — your canvas's own size"}
+            </span>
+          )}
+          {genRunning ? (
+            <div className="row gap-2 mt-2">
+              {genPaused ? (
+                <button type="button" className="btn primary grow" onClick={resume}>Resume</button>
+              ) : (
+                <button type="button" className="btn grow" onClick={pause}>Pause</button>
+              )}
+              <button type="button" className="btn danger grow" onClick={stopAndSave}>Stop &amp; save</button>
+            </div>
+          ) : (
+            <button type="button" className="btn primary w-full mt-2" onClick={run} disabled={!modelPath}>
+              Generate
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* ——— 2. Region ————————————————————————————————— */}
+      <Disclose
+        title="Region"
+        defaultOpen
+        className="create-section"
+        extra={hasMask ? <span className="pill on">{maskPixels.toLocaleString()} px</span> : null}
+        tip="Select part of the canvas so Generate reworks only that area."
+      >
+        <div className="row between center wrap gap-2 mb-2">
+          <p className="hint mb-0 grow">
+            Brush, wand, or split by contrast, then Generate fills only that area.
+          </p>
+          <div className="row center gap-2">
+            <button
+              type="button"
+              className="btn ghost sm"
+              onClick={undoMask}
+              disabled={!canUndoMask}
+              title="Undo last mask edit (Ctrl+Z)"
+            >
+              Undo
+            </button>
+            <button type="button" className="btn ghost sm" onClick={() => clearMask()} disabled={!hasMask}>
+              Clear
+            </button>
+          </div>
+        </div>
+
+        <div className="section-title">Tool</div>
+        <div className="row gap-2 mb-2 wrap center">
+          <div className="seg" role="group" aria-label="Mask tool">
+            <button type="button" className={maskTool === "brush" ? "on" : ""} onClick={() => setMaskTool("brush")}>Brush</button>
+            <button type="button" className={maskTool === "wand" ? "on" : ""} onClick={() => setMaskTool("wand")}>Wand</button>
+          </div>
+          <div className="seg" role="group" aria-label="Paint or erase">
+            <button type="button" className={!eraser ? "on" : ""} onClick={() => setEraser(false)}>Paint</button>
+            <button type="button" className={eraser ? "on" : ""} onClick={() => setEraser(true)}>Erase</button>
+          </div>
+          {maskTool === "brush" && (
+            <div className="seg" role="group" aria-label="Brush edge">
+              <button type="button" className={!brushHard ? "on" : ""} onClick={() => setBrushHard(false)}>Soft</button>
+              <button type="button" className={brushHard ? "on" : ""} onClick={() => setBrushHard(true)}>Hard</button>
+            </div>
+          )}
+        </div>
+
+        {maskTool === "wand" ? (
+          <Slider
+            label="Tolerance"
+            value={wandTolerance}
+            min={0}
+            max={100}
+            step={1}
+            onChange={setWandTolerance}
+            tip="How similar a neighbouring pixel's colour must be to join the selection. Click the canvas to select."
+          />
+        ) : (
+          <Slider label="Size" value={brushSize} min={8} max={160} step={2} onChange={setBrushSize}
+            tip="Brush diameter in canvas pixels." />
+        )}
+
+        {!brushHard && (
+          <div className="row gap-2">
+            <div className="grow">
+              <Slider
+                label="Change"
+                value={regionChange}
+                min={0}
+                max={1}
+                step={0.05}
+                onChange={setRegionChange}
+                fmt={(v) => `${v < 0.3 ? "subtle" : v < 0.7 ? "medium" : "strong"} · ${effectiveSteps(v, sampleParams.steps, true)} steps`}
+                tip="How strongly the model restyles the painted region. It also sets how far down the noise schedule the fill starts, so lower values run fewer steps."
+              />
+            </div>
+            <div className="grow">
+              <Slider label="Feather" value={feather} min={0} max={32} step={1} onChange={setFeather}
+                tip="Soft edge blend for the inpaint mask." />
+            </div>
+          </div>
+        )}
+
+        <div className="section-title mt-2">Select by contrast</div>
+        <p className="hint mb-2">Set the split, press Calculate, then apply one side to the mask.</p>
+        <div className="row gap-2">
+          <div className="grow">
+            <Select label="Split by" value={splitMethod} onChange={setSplitMethod} options={SPLIT_METHODS}
+              tip="Brightness splits light from dark; local contrast splits busy areas from flat ones." />
+          </div>
+          <div className="grow">
+            {splitMethod === "luminance" ? (
+              <Slider label="Threshold" value={brightnessThreshold} min={1} max={255} step={1}
+                onChange={setBrightnessThreshold}
+                tip="Brightness level (1–255) that separates the two sides." />
+            ) : (
+              <Slider label="Threshold" value={contrastThreshold} min={-40} max={40} step={1}
+                onChange={setContrastThreshold}
+                tip="Nudge the auto-detected local-contrast split." />
+            )}
+          </div>
+        </div>
+        <div className="row gap-2">
+          <div className="grow">
+            <Slider label="Edge soften" value={splitSoften} min={0} max={8} step={1} onChange={setSplitSoften}
+              tip="Softens the edge of the generated region mask." />
+          </div>
+          <div className="grow">
+            <label className="row center gap-2 mb-2 mt-2">
+              <input type="checkbox" checked={smoothOn} onChange={(e) => setSmoothOn(e.target.checked)} />
+              <span className="sub">Blur first (fewer speckles)</span>
+            </label>
+            {smoothOn && (
+              <Slider label="Blur radius" value={smoothRadius} min={1} max={6} step={1} onChange={setSmoothRadius}
+                tip="Blur the canvas before calculating the split, to reduce speckles." />
+            )}
+          </div>
+        </div>
+        <div className="row gap-2 mb-2 center">
+          <button type="button" className="btn sm" onClick={calculateSplit} disabled={!canvasImage || splitBusy}>
+            {splitBusy && !splitPreview ? "Calculating…" : "Calculate"}
+          </button>
+          {splitPreview && (
+            <span className="sub">Split at {splitPreview.cut}{splitMethod === "luminance" ? " brightness" : " contrast"}</span>
+          )}
+        </div>
+        <div className="contrast-split-previews">
+          {SPLIT_SIDES.map((side) => (
+            <button
+              key={side.id}
+              type="button"
+              className={`contrast-split-tile ${maskSide === side.id ? "on" : ""}`}
+              onClick={() => setMaskSide(side.id)}
+              disabled={!splitPreview}
+            >
+              {splitPreview?.[side.id]
+                ? <img src={splitPreview[side.id]} alt={`${side.label} preview`} />
+                : <span className="sub">{side.label}</span>}
+              <span className="contrast-split-label">
+                {splitMethod === "luminance" ? side.luminance : side.contrast}
+              </span>
+            </button>
+          ))}
+        </div>
+        <button
+          type="button"
+          className="btn sm primary mt-2"
+          onClick={() => applySplit(maskSide)}
+          disabled={!splitPreview || splitBusy}
+        >
+          {splitBusy && splitPreview ? "Applying…" : "Apply to mask"}
+        </button>
+
+        {bendPresets.length > 0 && (
+          <div className="mt-2">
+            <Select
+              label="Bend preset for the region"
+              value={regionBendPreset}
+              onChange={setRegionBendPreset}
+              options={[
+                { value: "", label: "Same as generation", title: "Reuse the bend chosen above." },
+                ...bendOptions.slice(1),
+              ]}
+              tip={bendTip(
+                regionBendPreset,
+                "Optional bend used only when a mask is painted. “Same as generation” reuses the one above.",
+              )}
+            />
+            {regionBendPreset && presetByName(regionBendPreset) && (
+              <p className="hint mb-0 mt-1 mono-hint">
+                {bendPresetSynopsis(presetByName(regionBendPreset), ops)}
+              </p>
+            )}
+          </div>
+        )}
+      </Disclose>
+
+      {/* ——— 3. Finish ————————————————————————————————— */}
+      <Disclose
+        title="Finish"
+        defaultOpen
+        className="create-section"
+        extra={ppOn ? <span className="pill on">post-process on</span> : null}
+        tip="Adjustments applied to the finished image, not to sampling."
+      >
+        <div className="row between center wrap gap-2 mb-2">
+          <p className="hint mb-0 grow">
+            {hasMask
+              ? "Post-process follows the painted mask; upscale always uses the whole canvas."
+              : "Applied to the whole canvas."}
+          </p>
+          <label className="row center gap-2">
+            <input type="checkbox" checked={ppOn} onChange={(e) => setPpOn(e.target.checked)} />
+            <span className="sub">Post-process</span>
+          </label>
+        </div>
+
+        <Slider label="Contrast" value={pp.contrast} min={0.5} max={2} step={0.05}
+          onChange={(v) => setPpField("contrast", v)} disabled={!ppOn}
+          tip="Boost or flatten contrast after sampling." />
+        <Slider label="Gamma" value={pp.gamma} min={0.5} max={2} step={0.05}
+          onChange={(v) => setPpField("gamma", v)} disabled={!ppOn}
+          tip="Brighten (lower) or darken (higher) midtones." />
+        <Slider label="Sharpen" value={pp.unsharp} min={0} max={4} step={0.1}
+          onChange={(v) => setPpField("unsharp", v)} disabled={!ppOn}
+          tip="Unsharp-mask strength on the finished image." />
+
+        <div className="section-title mt-2">Upscale</div>
+        <p className="hint mb-2">Enlarges the finished image with Lanczos resampling. Ignores the mask.</p>
+        <div className="row gap-2 center">
+          <div className="w-100">
+            <Num label="Scale" value={srFactor} onChange={setSrFactor} min={2} max={4} step={1}
+              tip="Upscale factor for the canvas image." />
+          </div>
+          <div className="grow">
+            <Slider label="Sharpen" value={srSharpen} min={0} max={3} step={0.1} onChange={setSrSharpen}
+              tip="Unsharp-mask strength applied after enlarging." />
+          </div>
+          <button type="button" className="btn sm self-end mb-2" onClick={upscale} disabled={srBusy || !frame}>
+            {srBusy ? "…" : "Upscale"}
+          </button>
+        </div>
+      </Disclose>
+    </div>
+  );
+}

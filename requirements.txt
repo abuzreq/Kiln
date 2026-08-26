@@ -1,0 +1,33 @@
+# Kiln backend dependencies
+# Core web server
+flask>=3.0
+flask-cors>=4.0
+pywebview>=5.0
+
+# Deep learning / diffusion engine (xurdif)
+# NOTE: `torch` here resolves to the CPU-only wheel on Windows, which cannot
+# train or sample. install.py detects an NVIDIA GPU and installs the CUDA build
+# from https://download.pytorch.org/whl/cu121 *before* this file is applied, so
+# these pins only ever act as a floor. To do it by hand:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+torch>=2.0
+torchvision>=0.15
+diffusers>=0.27
+einops>=0.7
+pytorch-msssim>=1.0
+lpips>=0.1.4
+kornia>=0.7
+
+# CLIP guidance (OpenAI CLIP)
+ftfy
+regex
+git+https://github.com/openai/CLIP.git
+
+# Image / media
+Pillow>=10.0
+opencv-python>=4.8
+numpy>=1.24
+
+# Utilities
+tqdm>=4.66
+requests>=2.31

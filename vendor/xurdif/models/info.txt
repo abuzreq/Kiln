@@ -1,0 +1,1 @@
+Place your pretrained models in this folder for use in the gradio app.

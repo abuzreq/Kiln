@@ -1,0 +1,28 @@
+# Dependencies for the vendored xurdif engine (training, sampling, post-processing,
+# and the standalone gradio reference apps).
+#
+# IMPORTANT: torch/torchvision must match your GPU. Install a CUDA build first, e.g.
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# They are listed unpinned below so an already-installed CUDA build is left untouched
+# (pip treats it as already satisfied and will NOT downgrade it to a CPU wheel).
+torch>=2.0
+torchvision>=0.15
+
+# --- core training + sampling ---
+pytorch-msssim>=1.0      # SSIM loss (xurdif.py)
+lpips>=0.1.4             # perceptual loss (xurdiftrainer.py, xurdif.py)
+einops>=0.7             # tensor rearrange (xurdif.py)
+numpy>=1.24
+Pillow>=10.0
+tqdm>=4.66
+
+# --- DDIM sampling, CLIP guidance, post-processing (xurdifapp*.py / postproc*.py) ---
+diffusers>=0.27         # DDIMScheduler
+kornia>=0.7             # enhance/filters used by postproc
+opencv-python>=4.8      # cv2 post-processing
+ftfy                    # CLIP tokenizer dependency
+regex                   # CLIP tokenizer dependency
+git+https://github.com/openai/CLIP.git   # `import clip` (OpenAI CLIP)
+
+# --- standalone gradio apps only (xurdifapp.py / xurdifapp3.py); Kiln does not need these ---
+gradio>=4.0
