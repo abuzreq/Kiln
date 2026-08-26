@@ -326,7 +326,7 @@ export default function Prepare() {
                   {trimmedName && (!nameAvailable || localNameTaken) && "Name already taken"}
                   {trimmedName && nameAvailable && !localNameTaken && "Name available"}
                 </p>
-                <Text label="Folder or file path" value={importPath} onChange={setImportPath} placeholder="C:\path\to\images"
+                <Text label="Folder or file path" value={importPath} onChange={setImportPath} placeholder="Path to a folder of images, or a video file"
                   tip="Copied into this dataset draft only." />
                 <div className="row gap-2">
                   <button type="button" className="btn" onClick={doImport} disabled={!importPath || !trimmedName}>Import</button>
@@ -336,7 +336,7 @@ export default function Prepare() {
               </div>
 
               <div className="card">
-                <h3>Pre-Processing</h3>
+                <h3>Pre-processing</h3>
                 <Select label="Resize" value={mode} onChange={setMode} options={RESIZE_MODES} />
                 <div className="row gap-2">
                   <div className="grow"><Num label="Width" value={w} onChange={setW} min={32} max={2048} step={32} /></div>

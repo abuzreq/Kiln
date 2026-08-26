@@ -56,6 +56,39 @@ def serve(app, port: int):
     app.run(host="127.0.0.1", port=port, threaded=True, use_reloader=False)
 
 
+def port_is_free(port: int) -> bool:
+    """Can we bind this port right now?
+
+    The server runs on a daemon thread, so a bind failure there is invisible:
+    the thread dies, wait_for_server times out, and we would go on to open a
+    window pointing at nothing. Check up front instead.
+    """
+    import socket
+
+    # Deliberately no SO_REUSEADDR: on Windows it lets a bind succeed against a
+    # port that is already LISTENING, which would make this probe always say
+    # "free" — the exact opposite of what it is for.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+
+
+def pick_port(preferred: int, tries: int = 20) -> int:
+    """The preferred port, or the next free one above it."""
+    for candidate in range(preferred, preferred + tries):
+        if port_is_free(candidate):
+            return candidate
+    raise SystemExit(
+        f"Could not find a free port in {preferred}-{preferred + tries - 1}.\n"
+        "Something else is using them. Free one up, or pick your own with:\n"
+        "    python start.py --port <number>\n"
+        "(or set the KILN_PORT environment variable)"
+    )
+
+
 def wait_for_server(port: int, timeout: float = 20.0) -> bool:
     import urllib.request
 
@@ -81,14 +114,21 @@ def main():
 
     from app.backend.app import create_app
 
-    app = create_app()
-    url = f"http://127.0.0.1:{args.port}"
+    port = pick_port(args.port)
+    if port != args.port:
+        log.warning("port %s is in use — using %s instead", args.port, port)
 
-    server = threading.Thread(target=serve, args=(app, args.port), daemon=True)
+    app = create_app()
+    url = f"http://127.0.0.1:{port}"
+
+    server = threading.Thread(target=serve, args=(app, port), daemon=True)
     server.start()
 
-    if not wait_for_server(args.port):
-        log.error("server did not start in time")
+    if not wait_for_server(port):
+        raise SystemExit(
+            f"The Kiln server did not come up on port {port} within 20 seconds.\n"
+            "Check the messages above for the reason."
+        )
     log.info("Kiln is running at %s", url)
 
     if args.no_window:
@@ -106,7 +146,7 @@ def main():
         webview.start()
     except Exception as e:  # noqa: BLE001
         log.warning("Native window unavailable (%s).", e)
-        log.info("Open Kiln in your browser at %s . Ctrl+C to stop.", url)
+        log.info("Open Kiln in your browser at %s — Ctrl+C to stop.", url)
         try:
             while True:
                 time.sleep(1)

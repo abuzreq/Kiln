@@ -22,11 +22,11 @@ def op_catalog():
 def introspect():
     body = request.get_json(force=True, silent=True) or {}
     (model_path,) = require(body, "model_path")
-    from app.core.craft.introspect import introspect as _intro
-
     bundle = manager.load(model_path, ema=body.get("ema", True))
-    graph = _intro(bundle["model"], image_size=int(body.get("ref_size", 64)))
+    graph = bundle["backend"].layer_graph(
+        bundle["model"], image_size=int(body.get("ref_size", 64)))
     graph["model"] = bundle["meta"].to_dict()
+    graph["capabilities"] = bundle["backend"].capabilities.to_dict()
     return ok(graph)
 
 
@@ -149,7 +149,8 @@ def bend_sweep():
         from app.core.craft.bending import build_runtime
 
         try:
-            meta = manager.load(model_path, ema=bool(body.get("ema", True)))["meta"]
+            bundle = manager.load(model_path, ema=bool(body.get("ema", True)))
+            meta = bundle["meta"]
             frames = []
             for i, v in enumerate(values):
                 if job.cancelled():
@@ -160,7 +161,8 @@ def bend_sweep():
                               "params": {**(mod[index].get("params") or {}), param: v}}
                 runtime = None
                 try:
-                    runtime = build_runtime([b for b in mod if b.get("active", True)], meta)
+                    runtime = build_runtime([b for b in mod if b.get("active", True)], meta,
+                                            backend=bundle["backend"])
                 except Exception as e:  # noqa: BLE001
                     log.warning("bend sweep: bends ignored (%s)", e)
                 last = None

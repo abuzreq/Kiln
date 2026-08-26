@@ -1,0 +1,11 @@
+# Normalize line endings on commit so the shell launchers stay LF on every
+# platform. kiln.sh / kiln.command break with `bad interpreter: ^M` if a
+# Windows editor CRLF-ifies them.
+* text=auto eol=lf
+
+# Binary assets: never touch.
+*.pt      binary
+*.png     binary
+*.jpg     binary
+*.gif     binary
+*.safetensors binary

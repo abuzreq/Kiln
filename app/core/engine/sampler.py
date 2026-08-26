@@ -12,7 +12,6 @@ Ported and generalized from the vendored ``xurdifapp3.py`` gradio sampler:
 Everything is device-aware (``cuda`` if available, else ``cpu``) so the module can
 be imported and exercised without a GPU.
 """
-import math
 from dataclasses import dataclass, field
 
 from PIL import Image
@@ -86,6 +85,7 @@ SAMPLERS = {
         "cls": "DDIMScheduler",
         "eta": True,
         "multistep": False,
+        "resample": True,
         "help": "The original. Predictable, supports Eta and live step changes; needs the most steps.",
     },
     "unipc": {
@@ -93,6 +93,9 @@ SAMPLERS = {
         "cls": "UniPCMultistepScheduler",
         "eta": False,
         "multistep": True,
+        # No state reset is wired for UniPC, so a backward jump would feed it
+        # stale history.
+        "resample": False,
         "help": "Predictor-corrector solver. Usually matches DDIM quality in about a third of the steps.",
     },
     "dpmpp": {
@@ -100,6 +103,7 @@ SAMPLERS = {
         "cls": "DPMSolverMultistepScheduler",
         "eta": False,
         "multistep": True,
+        "resample": True,
         "help": "High-order solver. Very good at 15-25 steps; a close cousin of UniPC.",
     },
     "deis": {
@@ -107,6 +111,7 @@ SAMPLERS = {
         "cls": "DEISMultistepScheduler",
         "eta": False,
         "multistep": True,
+        "resample": False,
         "help": "Exponential integrator. Similar speed to DPM-Solver++, slightly different character.",
     },
 }
@@ -126,7 +131,8 @@ RECOMMENDED_SAMPLER = "unipc"
 def sampler_catalog() -> list[dict]:
     return [
         {"name": k, "label": v["label"], "help": v["help"],
-         "eta": v["eta"], "multistep": v["multistep"]}
+         "eta": v["eta"], "multistep": v["multistep"],
+         "resample": v.get("resample", False)}
         for k, v in SAMPLERS.items()
     ]
 
@@ -161,17 +167,17 @@ class SampleParams:
     postproc: dict = field(default_factory=dict)
     device: str = "auto"
     sampler: str = DEFAULT_SAMPLER
+    # RePaint resampling, used by region fill only (see engine/inpaint.py).
+    # 1 keeps the single-pass behaviour every existing recipe was made with.
+    resample: int = 1
+    jump_length: int = 0        # 0 = derive from step count
 
 
 def _make_betas(timesteps: int):
-    torch = _torch()
-    s = 0.008
-    steps = timesteps + 1
-    x = torch.linspace(0, timesteps, steps)
-    ac = torch.cos(((x / steps) + s) / (1 + s) * math.pi * 0.5) ** 2
-    ac = ac / ac[0]
-    betas = 1 - (ac[1:] / ac[:-1])
-    return torch.clip(betas, 0, 0.999).numpy()
+    """xurdif's cosine betas. Kept as a re-export; the schedule is backend-owned."""
+    from app.core.backends.xurdif import cosine_betas
+
+    return cosine_betas(timesteps)
 
 
 class _Clip:
@@ -203,17 +209,118 @@ def _postproc_fn():
         return None
 
 
+RESAMPLE_SOLVERS = tuple(k for k, v in SAMPLERS.items() if v.get("resample"))
+
+
+def resample_supported(name: str) -> bool:
+    """Can this solver survive RePaint's jumps back up the schedule?
+
+    Multistep solvers carry outputs from previous timesteps; a jump invalidates
+    them. DPM++ is included because its history can be cleared (see
+    ``_reset_solver_state``) at the cost of a first-order step on resume.
+    """
+    return bool(sampler_spec(name).get("resample"))
+
+
+def _reset_solver_state(sched):
+    """Drop any multistep history so a jump cannot reuse stale outputs."""
+    if not hasattr(sched, "model_outputs"):
+        return
+    order = getattr(sched.config, "solver_order", len(sched.model_outputs))
+    sched.model_outputs = [None] * order
+    if hasattr(sched, "lower_order_nums"):
+        sched.lower_order_nums = 0
+    if hasattr(sched, "_step_index"):
+        # step() only re-derives the index when it is None; without this the
+        # solver would keep counting forward through a schedule that just moved
+        # backwards.
+        sched._step_index = None
+
+
+def repaint_positions(n: int, jump_length: int, jump_n_sample: int) -> list[int]:
+    """Positions into a descending timestep list, with RePaint's jumps.
+
+    Mirrors ``RePaintScheduler.set_timesteps`` (verified identical across six
+    configurations) but yields *positions* rather than absolute timesteps, so it
+    applies to whatever grid the chosen solver produced instead of only to
+    RePaint's own.
+
+    A position moving *backwards* in the returned list is a jump back up the
+    schedule. Do not collapse those into a single solver step -- every
+    intermediate timestep has to be re-traversed, or the result is a blank fill.
+    """
+    jumps = {}
+    for j in range(0, n - jump_length, jump_length):
+        jumps[j] = jump_n_sample - 1
+    out: list[int] = []
+    t = n
+    while t >= 1:
+        t -= 1
+        out.append(n - 1 - t)
+        if jumps.get(t, 0) > 0:
+            jumps[t] -= 1
+            for _ in range(jump_length):
+                t += 1
+                out.append(n - 1 - t)
+    return [p for p in out if 0 <= p < n]
+
+
+def undo_step(sched, x, t, stride, torch):
+    """One jump back up the schedule: RePaint Algorithm 1, line 10.
+
+    ``x <- sqrt(1-beta)*x + sqrt(beta)*noise``, applied once per training
+    timestep the jump spans.
+    """
+    last = len(sched.betas) - 1
+    for k in range(max(int(stride), 1)):
+        beta = sched.betas[min(int(t) + k, last)].to(x.device)
+        x = (1 - beta).sqrt() * x + beta.sqrt() * torch.randn_like(x)
+    return x
+
+
+def split_prediction(out, x, alphas_cumprod, t_batch, pred, device):
+    """Return ``(eps, x0)`` from a raw model output, whatever the model predicts.
+
+    Both are always needed: the scheduler step is fed epsilon (which is why the
+    scheduler's own ``prediction_type`` is always "epsilon" -- see
+    ``backends/hfdiffusers``), while x0 is what gets displayed. Shared with the
+    region-fill loop in ``engine/inpaint.py`` so the two cannot drift apart.
+    """
+    torch = _torch()
+    out = out.float()
+    x_f = x.float()
+    ac = alphas_cumprod[t_batch.cpu()].to(device=device, dtype=torch.float32)
+    alpha = ac.view(-1, 1, 1, 1)
+    beta = (1 - ac).view(-1, 1, 1, 1).clamp(min=1e-8)
+    if pred == "eps":
+        eps = out
+        x0 = (x_f - beta.sqrt() * eps) / alpha.sqrt()
+    else:
+        x0 = out
+        eps = (x_f - alpha.sqrt() * x0) / beta.sqrt()
+    return eps.to(x.dtype), x0
+
+
 class Sampler:
-    def _scheduler(self, train_steps: int, steps: int, device: str, name: str = "ddim"):
+    def _scheduler(self, train_steps: int, steps: int, device: str, name: str = "ddim",
+                   schedule=None):
+        """Build one of the catalogue's solvers over a backend's noise schedule.
+
+        ``schedule`` is where the two backends genuinely differ. xurdif trained
+        every checkpoint on a cosine schedule; Hugging Face DDPM models are
+        usually linear. Getting this wrong does not raise -- it just tells the
+        model it is at the wrong noise level and quietly degrades the image.
+        """
         import diffusers
 
         spec = sampler_spec(name)
         cls = getattr(diffusers, spec["cls"])
-        sched = cls(
-            num_train_timesteps=train_steps,
-            prediction_type="epsilon",
-            trained_betas=_make_betas(train_steps),
-        )
+        if schedule is None:
+            # Direct callers predating the backend split meant xurdif.
+            from app.core.backends.xurdif import XurdifBackend
+
+            schedule = XurdifBackend().schedule(None, train_steps)
+        sched = cls(**schedule.scheduler_kwargs())
         sched.set_timesteps(steps, device=device)
         if hasattr(sched, "alphas_cumprod"):
             sched.alphas_cumprod = sched.alphas_cumprod.to(device)
@@ -257,6 +364,8 @@ class Sampler:
         bundle = manager.load(params.model_path, device=device, ema=params.ema)
         model = bundle["model"]
         meta = bundle["meta"]
+        backend = bundle["backend"]
+        schedule = backend.schedule(bundle["ref"], params.train_steps)
         pred = meta.pred
 
         eta = float(params.eta)
@@ -266,10 +375,35 @@ class Sampler:
         bs = max(1, min(4, int(params.batch_size or 1)))
 
         spec = sampler_spec(params.sampler)
-        sched = self._scheduler(params.train_steps, steps, device, params.sampler)
-        remaining = list(sched.timesteps[skip:])
+        sched = self._scheduler(params.train_steps, steps, device, params.sampler, schedule)
+        timeline = list(sched.timesteps[skip:])
+        stride = max(1, int(sched.config.num_train_timesteps) // max(steps, 1))
+        # A "plan" is the order positions in `timeline` are visited. Normally
+        # that is 0,1,2,... — RePaint resampling revisits earlier positions so
+        # the model can reconcile a fill with its surroundings, which is the one
+        # thing that makes the walk non-monotonic.
+        resample = max(1, int(getattr(params, "resample", 1) or 1))
+        repaint = resample > 1 and mask is not None
+        if repaint:
+            if not resample_supported(params.sampler):
+                raise EngineError(
+                    f"'{params.sampler}' cannot resample: it carries solver state "
+                    f"between steps, which a jump back up the schedule would "
+                    f"invalidate. Use {' or '.join(RESAMPLE_SOLVERS)}.")
+            jump_length = int(getattr(params, "jump_length", 0) or 0)
+            if jump_length <= 0:
+                # RePaintScheduler only creates jump points in
+                # range(0, n - jump_length, jump_length), so a fixed 10 gives one
+                # jump point at 20 steps and none at 10. The paper uses 250
+                # steps; Kiln runs 15-50, so scale with the step count.
+                jump_length = max(2, len(timeline) // 5)
+            jump_length = max(1, min(jump_length, max(len(timeline) - 1, 1)))
+            plan = repaint_positions(len(timeline), jump_length, resample)
+        else:
+            plan = list(range(len(timeline)))
+        remaining = list(timeline)
         done = 0
-        total = len(remaining)
+        total = sum(1 for a, b in zip([-1] + plan, plan) if b > a)
 
         # ``height``/``width`` let a caller work at the canvas's own aspect (region
         # fill); plain generation still uses the square ``image_size``.
@@ -287,7 +421,7 @@ class Sampler:
             if bs > 1:
                 orig = orig.expand(bs, -1, -1, -1).contiguous()
             x = noise_level * sched.add_noise(
-                orig, init_noise, _noise_timestep(remaining[0], device)
+                orig, init_noise, _noise_timestep(timeline[0], device)
             )
         else:
             x = noise_level * init_noise * sched.init_noise_sigma
@@ -301,7 +435,7 @@ class Sampler:
                 mask_t = mask_t.expand(bs, -1, -1, -1).contiguous()
             # start fully noised only inside the mask
             noised = noise_level * sched.add_noise(
-                orig, init_noise, _noise_timestep(remaining[0], device)
+                orig, init_noise, _noise_timestep(timeline[0], device)
             )
             x = mask_t * noised + (1 - mask_t) * orig
 
@@ -355,7 +489,8 @@ class Sampler:
                 if new_steps != steps:
                     steps = new_steps
                     skip = min(int(params.skip), steps)
-                    sched = self._scheduler(params.train_steps, steps, device, params.sampler)
+                    sched = self._scheduler(params.train_steps, steps, device, params.sampler,
+                                            schedule)
                     full = list(sched.timesteps[skip:])
                     remaining = full[done:]
                     total = done + len(remaining)
@@ -363,7 +498,9 @@ class Sampler:
                         bend_runtime.set_total(total)
 
         try:
-            while remaining:
+            pos_prev = -1
+            plan_i = 0
+            while plan_i < len(plan):
                 if _is_cancelled():
                     break
 
@@ -373,11 +510,27 @@ class Sampler:
                     if _is_cancelled():
                         break
                     _apply_updates(control.pop_updates())
-                    if not remaining:
+                    if plan_i >= len(plan):
                         break
 
-                i = remaining.pop(0)
-                step_idx = done
+                pos = plan[plan_i]
+                plan_i += 1
+                if pos <= pos_prev:
+                    # A jump back up the schedule. No model evaluation, so it
+                    # does not advance progress; the solver's multistep history
+                    # (if any) is now stale and has to go.
+                    x = undo_step(sched, x, timeline[pos], stride, torch)
+                    _reset_solver_state(sched)
+                    pos_prev = pos
+                    continue
+                pos_prev = pos
+
+                i = timeline[pos]
+                remaining = timeline[pos + 1:]
+                # Bends are scheduled over the descending schedule position, not
+                # the evaluation counter: with jumps the latter is not monotonic
+                # in t, and a scheduled bend would fire erratically.
+                step_idx = pos if repaint else done
                 if bend_runtime is not None:
                     bend_runtime.set_step(step_idx)
 
@@ -394,18 +547,8 @@ class Sampler:
                     )
                     with autocast:
                         out = model(x, t_batch)
-                    out = out.float()
-                    x_f = x.float()
-                    ac = sched.alphas_cumprod[t_batch.cpu()].to(device=device, dtype=torch.float32)
-                    alpha = ac.view(-1, 1, 1, 1)
-                    beta = (1 - ac).view(-1, 1, 1, 1).clamp(min=1e-8)
-                    if pred == "eps":
-                        eps = out
-                        x0 = (x_f - beta.sqrt() * eps) / alpha.sqrt()
-                    else:
-                        x0 = out
-                        eps = (x_f - alpha.sqrt() * x0) / beta.sqrt()
-                    eps = eps.to(x.dtype)
+                    eps, x0 = split_prediction(
+                        out, x, sched.alphas_cumprod, t_batch, pred, device)
                     # Only DDIM-style solvers take eta, and the multistep ones do
                     # not return pred_original_sample — but we already computed x0
                     # above, so use that and stay scheduler-agnostic.
@@ -436,7 +579,7 @@ class Sampler:
                         x = x + (noise_level - 1.0) * beta_next.sqrt() * torch.randn_like(x)
 
                 done += 1
-                raws, pps = self._to_images(x_s, params, pprocess, tensor_to_pil)
+                raws, pps = self._to_images(x_s, params, pprocess, tensor_to_pil, backend, meta)
                 out = {
                     "step": done,
                     "total": max(total, done),
@@ -451,16 +594,18 @@ class Sampler:
             if bend_runtime is not None:
                 bend_runtime.detach()
 
-    def _to_images(self, x_s, params, pprocess, tensor_to_pil):
-        """Convert a (B,3,H,W) tensor to parallel lists of raw / postproc PILs."""
-        torch = _torch()
-        im = (x_s.clone().clamp(-1, 1) + 1) * 0.5
-        im = torch.nan_to_num(im, nan=0.0, posinf=1.0, neginf=0.0)
-        # per-sample contrast normalization (matches xurdifapp3 for B=1)
-        m = im.mean(dim=(1, 2, 3), keepdim=True)
-        sd = im.std(dim=(1, 2, 3), keepdim=True).clamp(min=1e-6)
-        im = (im - m) * (0.18 / sd) + 0.5
-        im = im.clamp(0, 1)
+    def _to_images(self, x_s, params, pprocess, tensor_to_pil, backend=None, meta=None):
+        """Convert a (B,3,H,W) tensor to parallel lists of raw / postproc PILs.
+
+        Mapping x0 into displayable range is the backend's call: xurdif's models
+        are low-contrast and have always been stretched to a fixed std, which
+        would be a distortion applied to anything else.
+        """
+        if backend is None:
+            from app.core.backends.xurdif import XurdifBackend
+
+            backend = XurdifBackend()
+        im = backend.to_display(x_s, meta)
 
         raws = [tensor_to_pil(im[b].cpu()) for b in range(im.shape[0])]
         if pprocess is None or not params.postproc:

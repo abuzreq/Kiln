@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api, mediaUrl, pollJob } from "../api.js";
 import { useApp } from "../state.jsx";
-import { Text, Num, Select, Progress, Empty, Modal, Disclose, ConfirmModal, DeleteBtn, Loading, Seg } from "../components/ui.jsx";
+import { Text, Num, Select, Progress, Empty, Modal, Disclose, ConfirmModal, DeleteBtn, Loading, Seg, Tooltip } from "../components/ui.jsx";
 import { modelSubtitle } from "../components/modelMeta.jsx";
 import LossChart from "../components/LossChart.jsx";
 import CheckpointGallery from "../components/CheckpointGallery.jsx";
@@ -34,6 +34,8 @@ function runLabel(r) {
 }
 
 const EMPTY_FORM = {
+  backend: "xurdif", mode: "scratch", preset: "standard-128",
+  lora_r: 8, precision: "no", gradient_checkpointing: false,
   dataset: "", run_name: "run1", image_size: 512, batch_size: 8,
   diffusion_steps: 1000, train_steps: 280000, accum: 10, lr: 0.0004,
   loss_type: "l1", ssimw: 0, l1w: 1, pred: "x0",
@@ -46,6 +48,62 @@ const MODE_TABS = [
   { id: "run", label: "View previous runs", tip: "Inspect a finished or stopped run" },
 ];
 
+
+/**
+ * Engine-specific settings for a Diffusers run.
+ *
+ * Which controls appear is driven by the backend's reported capabilities, not
+ * by its name -- an install without peft reports lora:false and simply does not
+ * offer the mode, rather than offering a button that fails.
+ */
+function DiffusersOptions({ form, set, engine, seeded }) {
+  const caps = engine?.capabilities || {};
+  const presets = engine?.presets || {};
+  const modes = [];
+  if (seeded && caps.finetune) modes.push("finetune");
+  if (seeded && caps.lora) modes.push("lora");
+
+  return (
+    <>
+      {seeded ? (
+        modes.length ? (
+          <Select label="How to train" value={modes.includes(form.mode) ? form.mode : modes[0]}
+            onChange={(v) => set("mode", v)} options={modes}
+            tip="finetune updates every weight. lora trains a small adapter instead — far fewer parameters, and the adapter saves separately." />
+        ) : (
+          <p className="hint mb-0">This install cannot fine-tune Diffusers models. Install accelerate (and peft for LoRA).</p>
+        )
+      ) : (
+        <Select label="Model size" value={form.preset} onChange={(v) => set("preset", v)}
+          options={Object.keys(presets).length ? Object.keys(presets) : [form.preset]}
+          tip={presets[form.preset]?.label || "Architecture preset for a new model."} />
+      )}
+
+      {seeded && form.mode === "lora" && (
+        <Num label="LoRA rank" value={form.lora_r} onChange={(v) => set("lora_r", Math.round(v))} step={4}
+          tip="Adapter capacity. Higher fits more, costs more. 4–16 is usual." />
+      )}
+
+      <div className="row gap-2">
+        <div className="grow">
+          <Select label="Precision" value={form.precision} onChange={(v) => set("precision", v)}
+            options={["no", "fp16", "bf16"]}
+            tip="Mixed precision. fp16 is faster and lighter on most NVIDIA cards; bf16 needs a newer one." />
+        </div>
+        <div className="grow">
+          <Select label="Fit" value={form.fit} onChange={(v) => set("fit", v)} options={["resize", "crop"]} />
+        </div>
+      </div>
+
+      <label className="row center gap-2">
+        <input type="checkbox" checked={!!form.gradient_checkpointing}
+          onChange={(e) => set("gradient_checkpointing", e.target.checked)} />
+        <span>Gradient checkpointing <span className="hint">(less VRAM, slower steps)</span></span>
+      </label>
+    </>
+  );
+}
+
 export default function Train() {
   const {
     device, toast, trainFromPath, setTrainFromPath,
@@ -54,6 +112,7 @@ export default function Train() {
   const [info, setInfo] = useState(null);
   const [presets, setPresets] = useState({});
   const [archs, setArchs] = useState([]);
+  const [engines, setEngines] = useState([]);
   const [job, setJob] = useState(null);
   const [runView, setRunView] = useState(null);
   const [inspectRun, setInspectRun] = useState(null);
@@ -199,6 +258,7 @@ export default function Train() {
     })();
     api.get("/train/presets").then(setPresets);
     api.get("/architectures").then((d) => setArchs(d.architectures));
+    api.get("/train/backends").then((d) => setEngines(d.backends || [])).catch(() => {});
     return () => { cancelled = true; };
   }, []);
 
@@ -254,11 +314,18 @@ export default function Train() {
       return;
     }
     try {
+      const seeded = fromMode === "library" ? (form.resume || "") : "";
       const payload = {
         ...form,
         mults: form.mults.split(",").map((x) => parseInt(x.trim(), 10)),
-        resume: fromMode === "library" ? (form.resume || "") : "",
+        resume: seeded,
         nostrict: !!form.nostrict,
+        // Each engine names continuing from a checkpoint differently: xurdif
+        // resumes the same run, Diffusers fine-tunes (or trains an adapter).
+        mode: form.backend === "xurdif"
+          ? (seeded ? "continue" : "scratch")
+          : (seeded ? form.mode : "scratch"),
+        base_model: seeded || undefined,
       };
       const { job: j, warning } = await api.post("/train", payload);
       setJob(j);
@@ -531,21 +598,44 @@ export default function Train() {
             )}
 
             {canStart && (
-              <Disclose title="Advanced">
-                <Select label="Architecture" value={form.mtype} onChange={(v) => set("mtype", v)} options={archs.length ? archs : [form.mtype]} />
-                <Text label="Channel multipliers" value={form.mults} onChange={(v) => set("mults", v)} />
-                <div className="row gap-2">
-                  <div className="grow"><Select label="Prediction" value={form.pred} onChange={(v) => set("pred", v)} options={["x0", "eps"]} /></div>
-                  <div className="grow"><Select label="Loss" value={form.loss_type} onChange={(v) => set("loss_type", v)} options={["l1", "l2"]} /></div>
-                </div>
-                <div className="row gap-2">
-                  <div className="grow"><Num label="SSIM weight" value={form.ssimw} onChange={(v) => set("ssimw", v)} step={0.5} /></div>
-                  <div className="grow"><Select label="Fit" value={form.fit} onChange={(v) => set("fit", v)} options={["resize", "crop"]} /></div>
-                </div>
-                <label className="row center gap-2">
-                  <input type="checkbox" checked={form.amp} onChange={(e) => set("amp", e.target.checked)} />
-                  <span className="sub">Mixed precision (AMP)</span>
-                </label>
+              <Disclose title="Advanced"
+                tip="How the network is built and how it learns. The defaults are the ones Kiln's presets are measured against — change these only when you want a different kind of model, not to fix a slow or poor run.">
+                {engines.length > 1 && (
+                  <Select label="Engine" value={form.backend} onChange={(v) => set("backend", v)}
+                    options={engines.map((e) => e.name)}
+                    tip="xurdif trains the compact models Kiln started with. diffusers trains Hugging Face UNet2DModel models and can fine-tune ones you import." />
+                )}
+
+                {form.backend === "xurdif" ? (
+                  <>
+                    <Select label="Architecture" value={form.mtype} onChange={(v) => set("mtype", v)} options={archs.length ? archs : [form.mtype]}
+                      tip="Which network shape to build. The variants with attention see more of the image at once, which helps with overall composition but costs speed and memory. Fixed for the life of a model: you cannot change it later and resume." />
+                    <Text label="Channel multipliers" value={form.mults} onChange={(v) => set("mults", v)}
+                      tip={"Width of the network at each resolution, coarsest last. \"1 2 2 2\" is the default.\n\nBigger numbers mean more capacity and a larger, slower model; the count of numbers sets how many times the image is halved, so it also decides the smallest resolution the model works at. Two models can only be merged if these match."} />
+                    <div className="row gap-2">
+                      <div className="grow"><Select label="Prediction" value={form.pred} onChange={(v) => set("pred", v)} options={["x0", "eps"]}
+                        tip={"What the network is asked to output at each step.\n\nx0 predicts the finished image directly and tends to settle faster on small datasets. eps predicts the noise to remove, the classic formulation. Fixed for the life of a model."} /></div>
+                      <div className="grow"><Select label="Loss" value={form.loss_type} onChange={(v) => set("loss_type", v)} options={["l1", "l2"]}
+                        tip={"How error is measured while training.\n\nl1 is the absolute difference — more forgiving of outliers, and it keeps edges crisp. l2 squares the error, punishing big mistakes harder, which tends to look smoother and blurrier."} /></div>
+                    </div>
+                    <div className="row gap-2">
+                      <div className="grow"><Num label="SSIM weight" value={form.ssimw} onChange={(v) => set("ssimw", v)} step={0.5}
+                        tip="How much structural similarity is mixed into the loss on top of Loss above. 0 turns it off. Raising it pushes the model toward matching local structure and texture rather than just pixel values; too high and training can stall." /></div>
+                      <div className="grow"><Select label="Fit" value={form.fit} onChange={(v) => set("fit", v)} options={["resize", "crop"]}
+                        tip={"How training images that are not square are made to fit.\n\nresize squashes the whole image to the training size, keeping everything but distorting proportions. crop takes a center square, keeping proportions but discarding the edges."} /></div>
+                    </div>
+                  </>
+                ) : (
+                  <DiffusersOptions form={form} set={set} engine={engines.find((e) => e.name === form.backend)} seeded={fromMode === "library"} />
+                )}
+                {form.backend === "xurdif" && (
+                  <Tooltip text="Runs much of the math at half precision. Roughly doubles training speed and halves memory use, at a small risk of numerical instability. Leave it on unless a run produces NaN losses.">
+                    <label className="row center gap-2 has-tip">
+                      <input type="checkbox" checked={form.amp} onChange={(e) => set("amp", e.target.checked)} />
+                      <span className="sub">Mixed precision (AMP)</span>
+                    </label>
+                  </Tooltip>
+                )}
               </Disclose>
             )}
 
@@ -565,7 +655,13 @@ export default function Train() {
                 A preset fills in image size, batch, learning rate and schedule for a
                 given GPU budget. Start there, then adjust.
               </p>
-              {Object.entries(presets).length === 0 ? (
+              {form.backend !== "xurdif" ? (
+                <Empty>
+                  These presets are measured for the xurdif engine. For {form.backend},
+                  pick a model size under Advanced and set image size and batch to suit
+                  your GPU.
+                </Empty>
+              ) : Object.entries(presets).length === 0 ? (
                 <Empty>No presets available.</Empty>
               ) : (
                 <div className="col gap-2">
@@ -607,7 +703,7 @@ export default function Train() {
                 <>
                   <div className="row between center mb-2 gap-3">
                     <span className={`pill ${statusPillClass(running ? "training" : train.status)} ${job?.status === "error" ? "bad" : ""} ${job?.status === "done" ? "good" : ""}`}>
-                      {running ? "training" : (job?.status === "done" ? "completed" : job?.status === "cancelled" ? "stopped" : job?.status === "error" ? "error" : runLabel({ status: runView?.status, checkpoints: checkpoints.length }))}
+                      {running ? "Training" : (job?.status === "done" ? "Completed" : job?.status === "cancelled" ? "Stopped" : job?.status === "error" ? "Error" : runLabel({ status: runView?.status, checkpoints: checkpoints.length }))}
                     </span>
                     <div className="row center gap-3 grow">
                       <span className="sub grow">{job?.message || train.message}</span>
@@ -666,7 +762,7 @@ export default function Train() {
                   <div className="kv"><span>Train steps</span><b>{runMeta.train_steps?.toLocaleString?.() ?? runMeta.train_steps ?? "—"}</b></div>
                   <div className="kv"><span>Save every</span><b>{runMeta.save_every ?? "—"} steps</b></div>
                   <div className="kv"><span>Architecture</span><b>{runMeta.mtype || "—"}</b></div>
-                  <div className="kv"><span>Mults</span><b>{multsLabel}</b></div>
+                  <div className="kv"><span>Channel multipliers</span><b>{multsLabel}</b></div>
                   <div className="kv"><span>Prediction</span><b>{runMeta.pred || "—"}</b></div>
                   <div className="kv"><span>Learning rate</span><b>{runMeta.lr ?? "—"}</b></div>
                   <div className="kv"><span>Accumulation</span><b>{runMeta.accum ?? "—"}</b></div>

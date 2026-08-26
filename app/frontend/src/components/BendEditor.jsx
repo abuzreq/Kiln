@@ -26,7 +26,7 @@ function amountTip(opDef, amountDef) {
 }
 
 function paramTip(param, opDef) {
-  return param.help || `Parameter ‘${param.label}’ for the ${opDef?.label || "bend"} operation.`;
+  return param.help || `Parameter “${param.label}” for the ${opDef?.label || "bend"} operation.`;
 }
 
 function ParamControl({ param, opDef, value, onChange }) {
@@ -120,6 +120,11 @@ function BendCard({
             Set on the map: click a layer, shift+click for a range, drag for a span, or use the group
             buttons above it.
           </p>
+          {(b.targets || []).length === 0 && (
+            <p className="callout mb-2">
+              No layers chosen yet — this bend has no effect until you pick at least one.
+            </p>
+          )}
           {explicit.length > 0 && (
             <div className="row wrap gap-2 mb-2">
               {explicit.map((t) => (

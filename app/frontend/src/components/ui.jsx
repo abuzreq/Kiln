@@ -138,11 +138,19 @@ export function Num({ label, value, onChange, min, max, step, tip, disabled }) {
   );
 }
 
-export function Select({ label, value, onChange, options, tip, disabled }) {
+// `ariaLabel` is for the selects that sit under a heading instead of a label of
+// their own: with label="" there is no text to name the control and no `?` to
+// hang a tip on, so screen readers would otherwise announce it as unlabelled.
+export function Select({ label, value, onChange, options, tip, disabled, ariaLabel }) {
   const opts = options || [];
   return (
     <Field label={label} tip={tip}>
-      <select value={value} disabled={disabled} onChange={(e) => onChange(e.target.value)}>
+      <select
+        value={value}
+        disabled={disabled}
+        aria-label={ariaLabel}
+        onChange={(e) => onChange(e.target.value)}
+      >
         {opts.map((o) => {
           const val = typeof o === "string" ? o : o.value;
           const lab = typeof o === "string" ? o : o.label;

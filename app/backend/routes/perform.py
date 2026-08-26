@@ -63,17 +63,26 @@ def _params_from_body(body: dict) -> SampleParams:
         postproc=pp,
         device=body.get("device", "auto"),
         sampler=body.get("sampler") or DEFAULT_SAMPLER,
+        # Region fill only; 1 is the single-pass behaviour every existing
+        # recipe was made with.
+        resample=max(1, min(20, int(body.get("resample") or 1))),
+        jump_length=max(0, min(100, int(body.get("jump_length") or 0))),
     )
 
 
-def _build_bend_runtime(bends, meta):
+def _build_bend_runtime(bends, meta, backend=None):
     """Optional: construct a bending runtime if a bend stack is supplied."""
     if not bends:
+        return None
+    if backend is not None and not backend.capabilities.bend:
+        from utils.logger import get_logger
+
+        get_logger("perform").info("bends ignored: %s cannot bend", backend.name)
         return None
     try:
         from app.core.craft.bending import build_runtime
 
-        return build_runtime(bends, meta)
+        return build_runtime(bends, meta, backend=backend)
     except Exception as e:  # noqa: BLE001
         # bending is optional; never block sampling because of it
         from utils.logger import get_logger
@@ -251,8 +260,9 @@ def sample():
     init_image = from_data_url(body["init_image"]) if body.get("init_image") else None
     image_prompt = from_data_url(body["image_prompt"]) if body.get("image_prompt") else None
 
-    meta = manager.load(params.model_path, ema=params.ema)["meta"]
-    bend_runtime = _build_bend_runtime(body.get("bends"), meta)
+    bundle = manager.load(params.model_path, ema=params.ema)
+    meta = bundle["meta"]
+    bend_runtime = _build_bend_runtime(body.get("bends"), meta, bundle["backend"])
 
     job = registry.create("sample")
     job.message = "sampling..."
@@ -282,8 +292,9 @@ def inpaint():
     init_image = from_data_url(body["init_image"])
     mask = from_data_url_mask(body["mask"])
 
-    meta = manager.load(params.model_path, ema=params.ema)["meta"]
-    bend_runtime = _build_bend_runtime(body.get("bends"), meta)
+    bundle = manager.load(params.model_path, ema=params.ema)
+    meta = bundle["meta"]
+    bend_runtime = _build_bend_runtime(body.get("bends"), meta, bundle["backend"])
 
     job = registry.create("inpaint")
     job.message = "filling..."

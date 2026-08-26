@@ -13,15 +13,27 @@ from collections import defaultdict
 
 import torch
 
-from app.core.craft.introspect import _ordered_points, _stage_of
 from app.core.craft.ops import apply_op
 
 GROUPS = ("all", "encoder", "mid", "decoder", "attention", "blocks")
 
 
-def _resolve_targets(targets, model) -> set[str]:
+def _default_backend():
+    from app.core.backends.xurdif import XurdifBackend
+
+    return XurdifBackend()
+
+
+def _resolve_targets(targets, model, backend=None) -> set[str]:
+    """Expand a bend's targets to concrete module names.
+
+    The group vocabulary ("encoder", "attention", ...) is shared policy; the
+    module names and class names behind it are the backend's, which is why the
+    matchers come from there rather than being spelled out here.
+    """
+    backend = backend or _default_backend()
     modules = dict(model.named_modules())
-    points = _ordered_points(model)
+    points = backend.bend_points(model)
     out: set[str] = set()
     for t in targets or []:
         if t in modules:
@@ -29,17 +41,20 @@ def _resolve_targets(targets, model) -> set[str]:
         elif t == "all":
             out.update(points)
         elif t in ("encoder", "mid", "decoder"):
-            out.update(n for n in points if _stage_of(n) == t)
+            out.update(n for n in points if backend.stage_of_point(n) == t)
         elif t == "attention":
-            out.update(n for n in points if type(modules.get(n)).__name__ == "SelfAttention2d")
+            out.update(n for n in points
+                       if type(modules.get(n)).__name__ in backend.attention_types)
         elif t == "blocks":
-            out.update(n for n in points if type(modules.get(n)).__name__ == "ConvBlock")
+            out.update(n for n in points
+                       if type(modules.get(n)).__name__ in backend.block_types)
     return out
 
 
 class BendRuntime:
-    def __init__(self, bends: list[dict]):
+    def __init__(self, bends: list[dict], backend=None):
         self.bends = [b for b in (bends or []) if b.get("active", True)]
+        self.backend = backend
         self.total = 1
         self.cur = 0
         self._handles = []
@@ -57,7 +72,7 @@ class BendRuntime:
         modules = dict(model.named_modules())
         by_module: dict[str, list[dict]] = defaultdict(list)
         for b in self.bends:
-            for name in _resolve_targets(b.get("targets", []), model):
+            for name in _resolve_targets(b.get("targets", []), model, self.backend):
                 by_module[name].append(b)
         for name, bends in by_module.items():
             h = modules[name].register_forward_hook(self._make_hook(bends))
@@ -89,5 +104,5 @@ class BendRuntime:
         self._handles = []
 
 
-def build_runtime(bends, meta=None) -> BendRuntime:
-    return BendRuntime(bends)
+def build_runtime(bends, meta=None, backend=None) -> BendRuntime:
+    return BendRuntime(bends, backend=backend)

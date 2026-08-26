@@ -7,13 +7,29 @@ per-platform launch scripts (kiln.bat / kiln.sh / kiln.command).
 Later launches skip pip when a small fingerprint of the requirements files still
 matches and a cheap import probe succeeds — no torch import, no pip resolver.
 """
+import sys
+
+# Version guard first, before anything below is evaluated. Kiln needs 3.10+
+# (app/core/config.py uses PEP 604 `X | None` annotations, and this file uses
+# `list[Path]`), and both fail at *evaluation* time with a bare TypeError that
+# gives a user no idea what went wrong. This file must stay parseable on old
+# interpreters for the message to ever be seen -- keep the syntax here plain.
+if sys.version_info < (3, 10):
+    sys.stderr.write(
+        "\nKiln needs Python 3.10 or newer.\n"
+        "You are running Python %d.%d from:\n  %s\n\n"
+        "Install a newer Python from https://www.python.org/downloads/\n"
+        "then run this launcher again.\n\n"
+        % (sys.version_info[0], sys.version_info[1], sys.executable)
+    )
+    raise SystemExit(1)
+
 import argparse
 import hashlib
 import json
 import os
 import platform
 import subprocess
-import sys
 import time
 import venv
 from pathlib import Path
@@ -22,6 +38,11 @@ ROOT = Path(__file__).resolve().parent
 VENV_DIR = ROOT / ".venv"
 FRONTEND = ROOT / "app" / "frontend"
 STAMP_FILE = VENV_DIR / "kiln-deps.json"
+
+# The Kiln-only subset of the vendored engine's requirements. Its own
+# requirements.txt additionally pulls gradio for the standalone reference apps,
+# which Kiln never imports -- see the header of requirements-kiln.txt.
+VENDOR_REQ = ROOT / "vendor" / "xurdif" / "requirements-kiln.txt"
 
 # Cheap modules (importing torch here would add seconds on every launch).
 _PROBE_MODULES = ("flask", "flask_cors", "PIL", "numpy", "cv2", "einops")
@@ -47,7 +68,7 @@ def ensure_venv():
 
 
 def _req_files() -> list[Path]:
-    paths = [ROOT / "requirements.txt", ROOT / "vendor" / "xurdif" / "requirements.txt"]
+    paths = [ROOT / "requirements.txt", VENDOR_REQ]
     return [p for p in paths if p.exists()]
 
 
@@ -222,10 +243,9 @@ def install_requirements(force: bool = False):
 
     run([str(py), "-m", "pip", "install", "-r", str(ROOT / "requirements.txt")])
 
-    vendor_req = ROOT / "vendor" / "xurdif" / "requirements.txt"
-    if vendor_req.exists():
+    if VENDOR_REQ.exists():
         print("Installing vendored xurdif engine requirements ...")
-        run([str(py), "-m", "pip", "install", "-r", str(vendor_req)])
+        run([str(py), "-m", "pip", "install", "-r", str(VENDOR_REQ)])
 
     _write_stamp()
 

@@ -13,6 +13,7 @@ from app.core.tools.superres import upscale
 from utils.api_responses import ok, err
 from utils.imaging import build_card, bytes_with_params, data_url, from_data_url, save_with_params
 from utils.process_control import registry
+from utils.exceptions import ValidationError
 from utils.validators import require, as_int, safe_name
 
 bp = Blueprint("tools", __name__, url_prefix="/api/tools")
@@ -123,7 +124,25 @@ def _axis_from_body(body, prefix=""):
     values = body.get(f"{prefix}values")
     frm = float(body.get(f"{prefix}from", body.get("from", 0)))
     to = float(body.get(f"{prefix}to", body.get("to", 1)))
-    return {"param": param, "values": sweep_mod.axis_values(param, frm, to, count, values)}
+    out = sweep_mod.axis_values(param, frm, to, count, values)
+
+    # The client computes values for the non-linear axes, so check them here
+    # rather than trusting the payload. An unknown sampler name would otherwise
+    # fall back to DDIM silently and produce a grid of identical cells.
+    if param == "sampler":
+        from app.core.engine.sampler import SAMPLERS
+
+        bad = [v for v in out if v not in SAMPLERS]
+        if bad:
+            raise ValidationError(f"unknown sampler(s): {', '.join(map(str, bad))}")
+    elif param == "image_size":
+        bad = [v for v in out if not (32 <= int(v) <= 2048)]
+        if bad:
+            raise ValidationError(
+                f"image size must be between 32 and 2048: {', '.join(map(str, bad))}")
+    if len(out) > max_n:
+        raise ValidationError(f"at most {max_n} values on this axis")
+    return {"param": param, "values": out}
 
 
 @bp.post("/sweep")

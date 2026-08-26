@@ -46,17 +46,43 @@ def seeds(count: int = PREVIEW_COUNT) -> list[int]:
 
 
 def cache_key(model_path: str | Path) -> str | None:
-    """Stable id for one checkpoint's previews, or None if it is gone.
+    """Stable id for one model's previews, or None if it is gone.
 
     Includes mtime and size so the cache self-invalidates when a model is
-    retrained or overwritten in place.
+    retrained or overwritten in place. Three shapes have to work:
+
+    - a checkpoint file  -- its own stat, as before
+    - a model directory  -- a directory's mtime does not move when a weight file
+      inside it is rewritten, so key on the config and weights instead
+    - a Hub repo ref     -- nothing local to stat; key on the ref itself, which
+      is stable because a pinned repo does not change under us
     """
     p = Path(model_path)
     try:
         st = p.stat()
     except OSError:
+        # A backend ref ("diffusers:owner/repo") has nothing local to stat, but
+        # is still a real model. A missing *file* is still just missing.
+        head = str(model_path).partition(":")[0]
+        if len(head) > 1 and head != str(model_path):
+            return hashlib.sha1(str(model_path).encode("utf-8")).hexdigest()[:12]
         return None
-    raw = f"{p.resolve()}|{int(st.st_mtime)}|{st.st_size}"
+
+    if p.is_dir():
+        parts = []
+        for name in ("model_index.json", "config.json", "unet/config.json",
+                     "diffusion_pytorch_model.safetensors",
+                     "diffusion_pytorch_model.bin",
+                     "unet/diffusion_pytorch_model.safetensors"):
+            f = p / name
+            try:
+                fst = f.stat()
+            except OSError:
+                continue
+            parts.append(f"{name}:{int(fst.st_mtime)}:{fst.st_size}")
+        raw = f"{p.resolve()}|" + "|".join(parts)
+    else:
+        raw = f"{p.resolve()}|{int(st.st_mtime)}|{st.st_size}"
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
 
 
@@ -171,7 +197,9 @@ def _ensure_worker():
 
 def enqueue(model_path: str) -> bool:
     """Queue one model for background generation. False if it is done or queued."""
-    if not model_path or not Path(model_path).exists():
+    if not model_path:
+        return False
+    if not Path(model_path).exists() and ":" not in str(model_path):
         return False
     if len(list_previews(model_path)) >= PREVIEW_COUNT:
         return False

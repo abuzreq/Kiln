@@ -16,6 +16,21 @@ bp = Blueprint("library", __name__, url_prefix="/api/library")
 # seed list plus support for any direct .pt URL; entries download into the workspace.
 DOWNLOAD_CATALOG = [
     {
+        "name": "xurdif-sample-models",
+        "label": "Sample models from the xurdif author",
+        "kind": "info",
+        "url": (
+            "https://www.dropbox.com/scl/fo/flh4pczukrrlb3ar1rfuc/"
+            "AAT22M2b21Tf1yKe3Ji0HS0?rlkey=f1zdhexy36p3hffcun686m77c&dl=0"
+        ),
+        "description": (
+            "Hannu Toyryla, who wrote the xurdif engine, publishes a folder of "
+            "trained models. Open it, copy the download link for any .pt file, "
+            "then paste that link into the box below. Kiln links to the folder "
+            "and downloads nothing on its own."
+        ),
+    },
+    {
         "name": "xurdif-source",
         "label": "xurdif (engine source & docs)",
         "kind": "info",
@@ -23,6 +38,36 @@ DOWNLOAD_CATALOG = [
         "description": "The training/sampling engine Kiln is built on. Train your own compact models on the Train screen.",
     },
 ]
+
+
+def _direct_download_url(url: str) -> str:
+    """Turn a share link into one that returns the file itself.
+
+    A Dropbox share link ends in `dl=0`, which serves an HTML preview page.
+    Downloading that yields a .pt full of markup, and the only thing the user
+    sees is "downloaded file is not a valid model checkpoint" for a link that
+    looked perfectly correct.
+    """
+    if "dropbox.com" not in url:
+        return url
+    if "dl=1" in url or "raw=1" in url:
+        return url
+    if "dl=0" in url:
+        return url.replace("dl=0", "dl=1")
+    return url + ("&" if "?" in url else "?") + "dl=1"
+
+
+def _diffusers():
+    """The Diffusers discovery module, or None if the backend is unavailable."""
+    try:
+        from app.core.backends.hfdiffusers import discovery
+
+        return discovery
+    except Exception as e:  # noqa: BLE001
+        from utils.logger import get_logger
+
+        get_logger("library").info("diffusers discovery unavailable: %s", e)
+        return None
 
 
 @bp.get("/bends")
@@ -132,6 +177,7 @@ def download():
     """Download a .pt model from a direct URL into the workspace models folder."""
     body = request.get_json(force=True, silent=True) or {}
     (url, name) = require(body, "url", "name")
+    url = _direct_download_url(url)
     name = safe_name(name, "model name")
     dest = workspace.models / f"{name}.pt"
 
@@ -180,3 +226,143 @@ def download():
     job.thread = t
     t.start()
     return ok({"job": job.to_dict()})
+
+
+# --- Hugging Face models ---------------------------------------------
+@bp.get("/hf/suggested")
+def hf_suggested():
+    """A short, verified starting list -- not a whitelist.
+
+    Any repo the user pastes still goes through /hf/validate; this exists so the
+    browser is not an empty text box.
+    """
+    d = _diffusers()
+    if d is None:
+        return ok({"models": [], "available": False})
+    return ok({"models": d.suggested(), "available": True})
+
+
+@bp.post("/hf/validate")
+def hf_validate():
+    """Can Kiln use this model? Reads metadata only -- never downloads weights.
+
+    Always 200: an unsupported model is a normal answer with a reason, not a
+    request error, and the browser renders the reason next to the input.
+    """
+    d = _diffusers()
+    if d is None:
+        return err("the Diffusers backend is not available in this install", 501)
+    body = request.get_json(force=True, silent=True) or {}
+    (ref,) = require(body, "ref")
+    return ok(d.validate(ref))
+
+
+@bp.post("/hf/import")
+def hf_import():
+    """Download a validated model into the workspace as a job."""
+    d = _diffusers()
+    if d is None:
+        return err("the Diffusers backend is not available in this install", 501)
+    body = request.get_json(force=True, silent=True) or {}
+    (ref,) = require(body, "ref")
+
+    verdict = d.validate(ref)
+    if not verdict["ok"]:
+        return err(verdict.get("reason") or "unsupported model", 400)
+    name = safe_name(body.get("name") or verdict["model"]["name"], "model name")
+
+    job = registry.create("hf_import")
+    job.message = f"importing {name}..."
+    job.detail["model"] = verdict["model"]
+
+    def worker():
+        try:
+            res = d.import_to_workspace(
+                ref, name, workspace.models,
+                progress=lambda m: setattr(job, "message", m),
+            )
+            job.detail.update(res)
+            library.ensure_card(res["path"], name=name, original_name=name,
+                                trained_as=[name], kind="import")
+            manager.clear_cache()
+            job.status = "done"
+            job.progress = 1.0
+            job.message = f"imported {name}"
+        except Exception as e:  # noqa: BLE001
+            job.status = "error"
+            job.message = str(e)
+
+    t = threading.Thread(target=worker, daemon=True)
+    job.thread = t
+    t.start()
+    return ok({"job": job.to_dict()})
+
+
+@bp.post("/model/convert")
+def convert_model():
+    """Re-home a xurdif .pt into a Diffusers model directory.
+
+    Lossless, and verified so: the network is the same network, so the weights
+    transfer verbatim and the converted model samples bit-identically to the
+    original (scripts/smoke_tinyunet_parity.py). The original .pt is left in
+    place -- this adds a model, it does not replace one.
+    """
+    from pathlib import Path
+
+    body = request.get_json(force=True, silent=True) or {}
+    (path,) = require(body, "path")
+    src = Path(path)
+    if not src.exists():
+        return err("model not found", 404)
+
+    try:
+        from app.core.backends.hfdiffusers.convert import convert_checkpoint
+    except Exception as e:  # noqa: BLE001
+        return err(f"the Diffusers backend is not available: {e}", 501)
+
+    name = safe_name(body.get("name") or f"{src.stem}-diffusers", "model name")
+    dest = workspace.models / name
+    try:
+        res = convert_checkpoint(
+            src, dest,
+            ema=bool(body.get("ema", True)),
+            num_train_timesteps=body.get("num_train_timesteps"),
+            overwrite=bool(body.get("overwrite", False)),
+        )
+    except Exception as e:  # noqa: BLE001
+        return err(str(e), 400)
+
+    library.ensure_card(res["path"], name=name, original_name=name,
+                        trained_as=[res["source_name"]], kind="convert")
+    manager.clear_cache()
+    return ok(res)
+
+
+@bp.get("/model/convertible")
+def convertible_models():
+    """xurdif models that can be re-homed, and whether they already have been."""
+    try:
+        from app.core.backends.hfdiffusers.convert import (
+            DEFAULT_TRAIN_TIMESTEPS, resolve_train_timesteps,
+        )
+        from app.core.backends.hfdiffusers.tinyunet import SOURCE_MTYPE
+    except Exception:  # noqa: BLE001
+        return ok({"models": [], "available": False})
+
+    from pathlib import Path
+
+    out = []
+    for m in manager.scan():
+        if m.backend != "xurdif" or m.mtype != SOURCE_MTYPE:
+            continue
+        steps, source = resolve_train_timesteps(Path(m.path))
+        out.append({
+            "path": m.path, "name": m.name, "mults": m.mults, "step": m.step,
+            "size_mb": round(m.size_mb, 2), "source": m.source,
+            "num_train_timesteps": steps,
+            # Worth surfacing: xurdif does not record the schedule length in the
+            # checkpoint, and guessing wrong rescales the whole noise schedule.
+            "timesteps_known": source != "default",
+            "default_timesteps": DEFAULT_TRAIN_TIMESTEPS,
+        })
+    return ok({"models": out, "available": True})

@@ -14,18 +14,38 @@ torch>=2.0
 torchvision>=0.15
 diffusers>=0.27
 einops>=0.7
+
+# Diffusers backend: Hub model loading, training and LoRA. Both are optional at
+# runtime -- the app boots and the xurdif engine works without them -- but
+# without accelerate diffusers falls back to a slower, higher-memory load path,
+# and LoRA fine-tuning is unavailable without peft.
+accelerate>=0.30
+peft>=0.11
 pytorch-msssim>=1.0
 lpips>=0.1.4
 kornia>=0.7
 
-# CLIP guidance (OpenAI CLIP)
+# Imported directly (not just via diffusers): hfdiffusers/discovery.py calls
+# snapshot_download and try_to_load_from_cache, loader.py calls hf_hub_download,
+# and models are saved as safetensors. Declared so a diffusers version that
+# drops either as a hard dependency cannot break the Diffusers backend.
+huggingface_hub>=0.23
+safetensors>=0.4
+
+# CLIP guidance (OpenAI CLIP).
+# NOTE: this line makes `git` a prerequisite for installing Kiln -- pip shells
+# out to it. The repo is archived upstream, so the commit is pinned: an
+# unpinned `main` on an archived project is a build that can change or vanish
+# under you.
 ftfy
 regex
-git+https://github.com/openai/CLIP.git
+git+https://github.com/openai/CLIP.git@d05afc436d78f1c48dc0dbf8e5980a9d471f35f6
 
 # Image / media
 Pillow>=10.0
 opencv-python>=4.8
+# Left uncapped: NumPy 2.x is verified working against the torch/opencv floors
+# above. If you hit an ABI error from a compiled wheel, pin numpy<2 here.
 numpy>=1.24
 
 # Utilities

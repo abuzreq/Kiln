@@ -60,6 +60,23 @@ def architectures():
     return ok({"architectures": available_architectures()})
 
 
+@bp.get("/train/backends")
+def train_backends():
+    """What each engine can train, so the UI offers only real options."""
+    from app.core import backends
+
+    out = []
+    for name in backends.available():
+        b = backends.get(name)
+        out.append({
+            "name": name,
+            "modes": list(b.training_modes),
+            "capabilities": b.capabilities.to_dict(),
+            "presets": b.training_presets(),
+        })
+    return ok({"backends": out, "default": "xurdif"})
+
+
 @bp.get("/train/presets")
 def presets():
     return ok(CONFIG_PRESETS)
@@ -102,9 +119,24 @@ def start():
     p.ensure()
     out_dir = p.dir / "runs" / run_name
 
-    resume = body.get("resume") or None
-    if resume and not Path(resume).exists():
-        return err("starting checkpoint not found", 404)
+    from app.core import backends
+
+    backend_name = body.get("backend") or "xurdif"
+    mode = (body.get("mode") or ("continue" if body.get("resume") else "scratch")).lower()
+    try:
+        backend = backends.get(backend_name)
+    except Exception:
+        return err(f"unknown backend: {backend_name}", 400)
+    if not backend.supports_training_mode(mode):
+        return err(
+            f"the {backend.name} backend cannot do '{mode}' training "
+            f"(it supports: {', '.join(backend.training_modes) or 'nothing'})", 400)
+    needed = {"scratch": backend.capabilities.train_from_scratch,
+              "continue": backend.capabilities.finetune,
+              "finetune": backend.capabilities.finetune,
+              "lora": backend.capabilities.lora}.get(mode, False)
+    if not needed:
+        return err(f"the {backend.name} backend does not support '{mode}'", 400)
 
     from utils.process_control import registry
     if any(j.get("status") == "running" for j in registry.list("train")):
@@ -112,45 +144,40 @@ def start():
     if out_dir.exists() and any(out_dir.iterdir()):
         return err(f"a run named '{run_name}' already exists — pick a new name", 409)
 
-    cfg = TrainConfig(
-        dataset=str(ds_dir),
-        out_dir=str(out_dir),
-        name=body.get("model_name", run_name),
-        image_size=as_int(body.get("image_size", 512), "image_size", 32, 4096),
-        batch_size=as_int(body.get("batch_size", 8), "batch_size", 1, 64),
-        diffusion_steps=as_int(body.get("diffusion_steps", 1000), "diffusion_steps", 10, 4000),
-        train_steps=as_int(body.get("train_steps", 280000), "train_steps", 100, 5_000_000),
-        accum=as_int(body.get("accum", 10), "accum", 1, 128),
-        lr=as_float(body.get("lr", 4e-4), "lr", 1e-6, 1.0),
-        loss_type=body.get("loss_type", "l1"),
-        l1w=as_float(body.get("l1w", 1.0), "l1w", 0, 100),
-        ssimw=as_float(body.get("ssimw", 0.0), "ssimw", 0, 100),
-        pred=body.get("pred", "x0"),
-        mtype=body.get("mtype", "tinyunet_with_attention3"),
-        mults=body.get("mults", [1, 2, 2, 2]),
-        fit=body.get("fit", "resize"),
-        nsamples=as_int(body.get("nsamples", 1), "nsamples", 1, 16),
-        sample_seed=as_int(body.get("sample_seed", 42), "sample_seed", -1, 2**31 - 1),
-        save_every=as_int(body.get("save_every", 1000), "save_every", 10, 100000),
-        amp=bool(body.get("amp", False)),
-        resume=resume,
-        nostrict=bool(body.get("nostrict", False)),
-    )
-    job = start_training(cfg)
+    try:
+        cfg = backend.training_config(body, ds_dir, out_dir)
+    except Exception as e:
+        return err(str(e), 400)
 
+    job = backend.start_training(cfg)
+    job.detail["backend"] = backend.name
+
+    warning = _vram_warning(job, cfg, backend.name)
+    return ok({"job": job.to_dict(), "warning": warning})
+
+
+def _vram_warning(job, cfg, backend_name: str) -> str | None:
+    """Flag a config likely to spill into system RAM.
+
+    The estimate is fitted to the xurdif tinyunet, so it is only quoted for
+    that backend -- a made-up number for a different architecture is worse than
+    no number.
+    """
+    if backend_name != "xurdif":
+        return None
     total = _gpu_total_mib()
     est = estimate_peak_mib(cfg.image_size, cfg.batch_size)
     job.detail["vram_estimate_mib"] = est
-    warning = None
-    if total and est > 0.85 * total:
-        rec = recommended_batch(cfg.image_size, total)
-        warning = (
-            f"Estimated peak VRAM ~{est} MiB may exceed your {total} MiB GPU — training "
-            f"can spill to system RAM and run ~10x slower. Try batch size ≤ {rec} at "
-            f"{cfg.image_size}px, or a smaller image size."
-        )
-        job.detail["warning"] = warning
-    return ok({"job": job.to_dict(), "warning": warning})
+    if not (total and est > 0.85 * total):
+        return None
+    rec = recommended_batch(cfg.image_size, total)
+    warning = (
+        f"Estimated peak VRAM ~{est} MiB may exceed your {total} MiB GPU — training "
+        f"can spill to system RAM and run ~10x slower. Try batch size ≤ {rec} at "
+        f"{cfg.image_size}px, or a smaller image size."
+    )
+    job.detail["warning"] = warning
+    return warning
 
 
 @bp.post("/runs/<run>/continue")
@@ -175,18 +202,7 @@ def continue_run(run):
         return err(str(e), 400)
 
     job = start_training(cfg)
-    total = _gpu_total_mib()
-    est = estimate_peak_mib(cfg.image_size, cfg.batch_size)
-    job.detail["vram_estimate_mib"] = est
-    warning = None
-    if total and est > 0.85 * total:
-        rec = recommended_batch(cfg.image_size, total)
-        warning = (
-            f"Estimated peak VRAM ~{est} MiB may exceed your {total} MiB GPU — training "
-            f"can spill to system RAM and run ~10x slower. Try batch size ≤ {rec} at "
-            f"{cfg.image_size}px, or a smaller image size."
-        )
-        job.detail["warning"] = warning
+    warning = _vram_warning(job, cfg, "xurdif")
     return ok({"job": job.to_dict(), "warning": warning})
 
 

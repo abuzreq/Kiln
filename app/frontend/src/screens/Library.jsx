@@ -4,7 +4,7 @@ import { useApp } from "../state.jsx";
 import { ConfirmModal, DeleteBtn, Empty, Loading } from "../components/ui.jsx";
 import { RenameModal } from "../components/modelMeta.jsx";
 import { ModelRows } from "./ModelList.jsx";
-import { cardLabel, mergeStoredSampleParams, paramsFromCard } from "../sampleSettings.jsx";
+import { cardLabel, mergeStoredSampleParams, paramsFromCard, paramLabel } from "../sampleSettings.jsx";
 
 function Models({ onPick }) {
   const {
@@ -217,7 +217,9 @@ function Sweeps({ onClose }) {
   const axisLabel = (card) => {
     const axes = card?.axes;
     if (!Array.isArray(axes) || !axes.length) return null;
-    return axes.map((a) => `${a.param} ×${(a.values || []).length}`).join(" · ");
+    return axes
+      .map((a) => `${paramLabel(a.param)} ×${(a.values || []).length}`)
+      .join(" · ");
   };
 
   if (!items) return <Loading />;
@@ -280,7 +282,10 @@ const TABS = [
   { id: "models", label: "Models" },
   { id: "bends", label: "Bends" },
   { id: "merges", label: "Merges" },
-  { id: "saved", label: "Saved" },
+  // Id is the wire value and keys the persisted tab state, so it stays "saved"
+  // while showing as Captures — the name used by the delete modal, the Start
+  // screen and the workspace folder.
+  { id: "saved", label: "Captures" },
   { id: "sweeps", label: "Sweeps" },
 ];
 

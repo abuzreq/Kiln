@@ -165,11 +165,11 @@ export default function Merge() {
 
       {compat && !compat.compatible && (
         <div className="card">
-          <span className="pill bad">incompatible</span>
+          <span className="pill bad">Incompatible</span>
           <ul className="hint mt-2">{compat.reasons.map((r) => <li key={r}>{r}</li>)}</ul>
         </div>
       )}
-      {compat?.compatible && <span className="pill good">compatible</span>}
+      {compat?.compatible && <span className="pill good">Compatible</span>}
 
       <div className="card">
         <div className="row gap-2 wrap mt-2">
@@ -220,7 +220,7 @@ export default function Merge() {
             options={[
               { value: "both", label: "EMA + raw" },
               { value: "ema", label: "EMA only" },
-              { value: "model", label: "raw only" },
+              { value: "model", label: "Raw only" },
             ]} />
         </div>
         <div className="card max-w-sm">
@@ -272,7 +272,7 @@ function ModelPanelReadonly({ title, model, shot, hint }) {
       {model && (
         <>
           <b>{model.name}</b>
-          <div className="kv"><span>arch</span><b>{model.mtype}</b></div>
+          <div className="kv"><span>Type</span><b>{model.mtype}</b></div>
         </>
       )}
     </div>
@@ -283,9 +283,11 @@ function ModelPanel({ title, model, value, onChange, options, shot }) {
   return (
     <div className="card merge-panel">
       <h3>{title}</h3>
+      {/* The panel heading names this select, so it carries an aria-label rather
+          than a visible one; a tip here could never render its `?` mark. */}
       <Select label="" value={value} onChange={onChange}
-        options={options.length ? options : [{ value: "", label: "no models" }]}
-        tip="Pick a library model." />
+        ariaLabel={`Model for ${title}`}
+        options={options.length ? options : [{ value: "", label: "— no library models —" }]} />
       <div className="merge-shot">
         {shot
           ? <img src={shot} alt={`${title} sample`} />
@@ -294,7 +296,7 @@ function ModelPanel({ title, model, value, onChange, options, shot }) {
             : <span className="sub">{model ? "No sample yet — generate a compare" : "Pick a model"}</span>}
       </div>
       {model && (
-        <div className="kv"><span>arch</span><b>{model.mtype}</b></div>
+        <div className="kv"><span>Type</span><b>{model.mtype}</b></div>
       )}
     </div>
   );

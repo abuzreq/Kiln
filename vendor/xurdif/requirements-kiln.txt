@@ -1,0 +1,31 @@
+# The subset of the vendored xurdif engine's requirements that Kiln actually
+# needs. Kiln installs THIS file, not requirements.txt next to it, so users do
+# not pay for the standalone gradio reference apps (gradio pulls fastapi,
+# uvicorn, pandas and more -- several hundred MB Kiln never imports).
+#
+# requirements.txt is left exactly as upstream ships it so that the re-vendoring
+# procedure in UPSTREAM.md stays a straight copy. If you re-vendor a newer
+# xurdif, diff its requirements.txt against this file and add anything new that
+# xurdif.py / xurdiftrainer.py / postproc*.py import.
+#
+# torch/torchvision are unpinned on purpose: an already-installed CUDA build
+# must be left alone, and pip will NOT downgrade it to a CPU wheel.
+torch>=2.0
+torchvision>=0.15
+
+# --- core training + sampling ---
+pytorch-msssim>=1.0      # SSIM loss (xurdif.py)
+lpips>=0.1.4             # perceptual loss (xurdiftrainer.py, xurdif.py)
+einops>=0.7              # tensor rearrange (xurdif.py)
+numpy>=1.24
+Pillow>=10.0
+tqdm>=4.66
+
+# --- DDIM sampling, CLIP guidance, post-processing ---
+diffusers>=0.27         # DDIMScheduler
+kornia>=0.7             # enhance/filters used by postproc
+opencv-python>=4.8      # cv2 post-processing
+ftfy                    # CLIP tokenizer dependency
+regex                   # CLIP tokenizer dependency
+
+# NOTE: `clip` itself comes from the root requirements.txt, which pins a commit.

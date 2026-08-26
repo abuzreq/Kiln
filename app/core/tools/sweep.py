@@ -15,22 +15,33 @@ def _final_frame(params: SampleParams):
 
 
 def axis_values(param: str, frm, to, count: int, values=None) -> list:
+    """Values for one axis. An explicit list wins -- geometric and categorical
+    axes are laid out by the caller, since they are not a line between numbers."""
     if values:
-        return list(values)
+        return [_coerce(param, v) for v in values]
     count = max(2, int(count))
     frm, to = float(frm), float(to)
-    if param == "seed":
-        if count == 1:
-            return [int(round(frm))]
-        step = (to - frm) / max(count - 1, 1)
-        return [int(round(frm + i * step)) for i in range(count)]
-    return [frm + (to - frm) * (i / max(count - 1, 1)) for i in range(count)]
+    span = [frm + (to - frm) * (i / max(count - 1, 1)) for i in range(count)]
+    if param in INT_AXES:
+        return [int(round(v)) for v in span]
+    return span
+
+
+# Axes whose values must reach SampleParams as ints, not floats.
+INT_AXES = ("seed", "steps", "image_size", "skip", "batch_size", "resample")
 
 
 def _fmt(param, v):
-    if param == "seed" or isinstance(v, int):
+    """Label one axis value. Not every axis is a number -- sampler is a name."""
+    if isinstance(v, str):
+        return v
+    if param in INT_AXES or isinstance(v, int):
         return str(int(v))
     return str(round(v, 3))
+
+
+def _coerce(param, v):
+    return int(v) if (param in INT_AXES and not isinstance(v, str)) else v
 
 
 def build_contact_sheet(images: list, labels: list, cols: int | None = None) -> Image.Image:
@@ -82,9 +93,9 @@ def run_sweep(job, model_path: str, axes: list, base: dict):
                 job.status = "cancelled"
                 return None
             kwargs = dict(base)
-            kwargs[p0] = int(x) if p0 == "seed" else x
+            kwargs[p0] = _coerce(p0, x)
             if p1 is not None:
-                kwargs[p1] = int(y) if p1 == "seed" else y
+                kwargs[p1] = _coerce(p1, y)
             params = SampleParams(model_path=model_path, **kwargs)
             img = _final_frame(params)
             lab = f"{p0}={_fmt(p0, x)}" + (f" · {p1}={_fmt(p1, y)}" if p1 else "")

@@ -4,8 +4,8 @@ import { useApp } from "../state.jsx";
 import { usePlay } from "../screens/playContext.jsx";
 import { Slider, Select, Num, Disclose } from "./ui.jsx";
 import {
-  buildSamplePayload, buildInpaintPayload, changeToParams, effectiveSteps, fillSizeFor,
-} from "../sampleSettings.jsx";
+  buildSamplePayload, buildInpaintPayload, changeToParams, effectiveSteps, fillSizeFor, solverCanResample,
+  liveEditLabels, joinLabels } from "../sampleSettings.jsx";
 import {
   contrastPreview, compositePostprocWithMask, countMaskPixels,
 } from "../contrastMask.js";
@@ -60,6 +60,13 @@ export default function CreatePanel() {
     job, setJob, genRunning, genPaused,
   } = usePlay();
 
+  // The same model object Play hands the settings panel — needed to tell which
+  // sampling controls are live (see the pause toast below).
+  const model = useMemo(
+    () => (models || []).find((m) => m.path === modelPath) || null,
+    [models, modelPath],
+  );
+
   const [ppOn, setPpOn] = useState(false);
   const [pp, setPp] = useState(DEFAULT_PP);
   const [bendPresets, setBendPresets] = useState([]);
@@ -70,6 +77,9 @@ export default function CreatePanel() {
   const [srBusy, setSrBusy] = useState(false);
   const [genChange, setGenChange] = useState(0.7);
   const [regionChange, setRegionChange] = useState(0.65);
+  // RePaint resampling. 1 = off, which is how every fill has worked until now.
+  const [resample, setResample] = useState(1);
+  const canResample = solverCanResample(sampleParams.sampler);
   const [feather, setFeather] = useState(8);
   const [variations, setVariations] = useState(1);
   const [splitMethod, setSplitMethod] = useState("luminance");
@@ -81,6 +91,11 @@ export default function CreatePanel() {
   const [maskSide, setMaskSide] = useState("foreground");
   const [splitPreview, setSplitPreview] = useState(null);
   const [splitBusy, setSplitBusy] = useState(false);
+  // Recompute the split whenever the picture being worked on changes: after a
+  // generation, and when an init image is set or swapped. A flag rather than a
+  // direct call, because both of those commit new state during the same render
+  // and calculating inline would still see the previous image.
+  const [splitPending, setSplitPending] = useState(false);
   const pausedSnapshot = useRef(null);
   const ppSource = frameRaw || frame;
   const ppGen = useRef(0);
@@ -200,6 +215,27 @@ export default function CreatePanel() {
     }
   };
 
+  // Setting or swapping the init image changes what is being worked on, the
+  // same way a generation does. The ref starts at the current value so simply
+  // returning to this tab with an init already set does not re-trigger.
+  const lastInit = useRef(initImage);
+  useEffect(() => {
+    if (initImage && initImage !== lastInit.current) setSplitPending(true);
+    lastInit.current = initImage;
+  }, [initImage]);
+
+  // A generation replaces the canvas, which invalidates any split that was on
+  // screen. Recomputing it here means the contrast tiles are ready to use
+  // straight away instead of needing a manual Calculate after every run.
+  useEffect(() => {
+    if (!splitPending || !canvasImage || splitBusy) return;
+    setSplitPending(false);
+    calculateSplit();
+    // calculateSplit is recreated every render; the flag is cleared above, so
+    // this cannot re-enter.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [splitPending, canvasImage]);
+
   const calculateSplit = async () => {
     if (!canvasImage) { toast("Put an image on the canvas first", "error"); return; }
     setSplitBusy(true);
@@ -225,6 +261,7 @@ export default function CreatePanel() {
   const finishJob = (done, clearAfter) => {
     setProgress(null);
     if (done.status === "error") toast(done.message, "error");
+    if (done.status === "done") setSplitPending(true);
     if (done.status === "done" || done.status === "cancelled") {
       const frames = done.detail?.frames;
       const framesRaw = done.detail?.frames_raw;
@@ -274,7 +311,7 @@ export default function CreatePanel() {
           bends: genBends,
           bend_preset: regionBendPreset || genBendPreset || "",
           feather: brushHard ? 0 : feather,
-          overrides: mapped,
+          overrides: { ...mapped, resample: canResample ? resample : 1 },
           batch_size: batchSize,
         });
         const { job: j } = await api.post("/perform/inpaint", body);
@@ -311,7 +348,13 @@ export default function CreatePanel() {
     };
     try {
       await api.post(`/jobs/${job.id}/pause`);
-      toast("Paused — edit Steps, Seed, Eta, or Noise level, then Resume", "success");
+      // Name only the controls actually on screen: Create maps its Change slider
+      // onto noise_level, which hides it, and Eta is hidden for the fast solvers.
+      const live = joinLabels(
+        liveEditLabels(sampleParams, model, { noise_level: "The Change slider in Create" }),
+        "or",
+      );
+      toast(`Paused — edit ${live}, then Resume`, "success");
     } catch (e) { toast(e.message, "error"); }
   };
 
@@ -402,14 +445,17 @@ export default function CreatePanel() {
         {initImage && !hasMask && (
           <>
             <Slider
-              label="Change"
+              label="Change · whole image"
               value={genChange}
               min={0}
               max={1}
               step={0.05}
               onChange={setGenChange}
               fmt={(v) => `${v < 0.3 ? "subtle" : v < 0.7 ? "medium" : "strong"} · ${effectiveSteps(v, sampleParams.steps, true)} steps`}
-              tip="How far to move from the init image. Subtle keeps more of it; strong invents more. It also sets how far down the noise schedule the run starts, so lower values run fewer steps."
+              tip={"How far to move from the init image. Subtle keeps more of it; strong invents more. "
+                + "It also sets how far down the noise schedule the run starts, so lower values run fewer steps."
+                + "\n\nThis one governs the whole image. Region has its own Change for a painted area — "
+                + "only one applies, depending on whether a mask is painted."}
             />
             <div className="row center gap-2 mb-2">
               <div className="thumb-sm"><img src={initImage} alt="init" /></div>
@@ -548,7 +594,7 @@ export default function CreatePanel() {
             max={100}
             step={1}
             onChange={setWandTolerance}
-            tip="How similar a neighbouring pixel's colour must be to join the selection. Click the canvas to select."
+            tip="How similar a neighboring pixel's color must be to join the selection. Click the canvas to select."
           />
         ) : (
           <Slider label="Size" value={brushSize} min={8} max={160} step={2} onChange={setBrushSize}
@@ -559,14 +605,18 @@ export default function CreatePanel() {
           <div className="row gap-2">
             <div className="grow">
               <Slider
-                label="Change"
+                label={hasMask ? "Change · painted region" : "Change · painted region (paint one first)"}
                 value={regionChange}
                 min={0}
                 max={1}
                 step={0.05}
                 onChange={setRegionChange}
                 fmt={(v) => `${v < 0.3 ? "subtle" : v < 0.7 ? "medium" : "strong"} · ${effectiveSteps(v, sampleParams.steps, true)} steps`}
-                tip="How strongly the model restyles the painted region. It also sets how far down the noise schedule the fill starts, so lower values run fewer steps."
+                tip={"How strongly the model restyles the painted region. It also sets how far down the "
+                  + "noise schedule the fill starts, so lower values run fewer steps."
+                  + "\n\nThis one governs the painted area only. Generate has its own Change for the whole "
+                  + "image — only one applies, depending on whether a mask is painted."
+                  + (hasMask ? "" : "\n\nNothing is painted yet, so this has no effect right now.")}
               />
             </div>
             <div className="grow">
@@ -574,6 +624,27 @@ export default function CreatePanel() {
                 tip="Soft edge blend for the inpaint mask." />
             </div>
           </div>
+        )}
+
+        <Slider
+          label={canResample ? "Harmonize" : "Harmonize — needs DDIM or DPM-Solver++"}
+          value={canResample ? resample : 1}
+          min={1}
+          max={8}
+          step={1}
+          onChange={(v) => setResample(Math.round(v))}
+          disabled={!canResample}
+          fmt={(v) => (v <= 1 ? "off" : `${v} passes · about ${v}x slower`)}
+          tip={"Lets the fill settle into what is around it, instead of only matching at the "
+            + "edge. Worth turning on when a fill looks pasted in."
+            + "\n\nEach pass is another trip over the same ground, so higher is slower. "
+            + "3 is a good place to start."
+            + "\n\nNeeds the DDIM or DPM-Solver++ sampler."}
+        />
+        {!canResample && (
+          <p className="hint mb-0">
+            Switch the sampler to DDIM or DPM-Solver++ in Sample settings to enable this.
+          </p>
         )}
 
         <div className="section-title mt-2">Select by contrast</div>
@@ -612,8 +683,16 @@ export default function CreatePanel() {
           </div>
         </div>
         <div className="row gap-2 mb-2 center">
-          <button type="button" className="btn sm" onClick={calculateSplit} disabled={!canvasImage || splitBusy}>
-            {splitBusy && !splitPreview ? "Calculating…" : "Calculate"}
+          <button
+            type="button"
+            className="btn sm"
+            onClick={calculateSplit}
+            // splitPreview is cleared by the effect above whenever the canvas or
+            // any split setting changes, so "we have a preview" is exactly "and
+            // nothing has moved since". No second piece of state to keep in sync.
+            disabled={!canvasImage || splitBusy || !!splitPreview}
+          >
+            {splitBusy ? "Calculating…" : splitPreview ? "Up to date" : "Calculate"}
           </button>
           {splitPreview && (
             <span className="sub">Split at {splitPreview.cut}{splitMethod === "luminance" ? " brightness" : " contrast"}</span>

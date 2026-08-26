@@ -12,6 +12,7 @@ from pathlib import Path
 
 import torch
 
+from app.core import backends
 from app.core.config import workspace
 from app.core.model_manager import read_meta
 from utils.exceptions import IncompatibleModelError, ValidationError
@@ -21,28 +22,16 @@ from utils.validators import safe_name
 log = get_logger("merging")
 
 
-_DENOISE_PREFIX = "denoise_fn."
+def _stage_of_key(key: str, backend=None) -> str:
+    """Stage of one checkpoint key, per the owning backend's naming rules."""
+    if backend is None:
+        from app.core.backends.xurdif import XurdifBackend
+
+        backend = XurdifBackend()
+    return backend.stage_of_key(key)
 
 
-def _stage_of_key(key: str) -> str:
-    """Stage of one checkpoint key.
-
-    Checkpoints hold ``GaussianDiffusion.state_dict()``, so every UNet tensor
-    arrives prefixed with ``denoise_fn.`` (model_manager.load strips the same
-    prefix). Match against the bare module name or nothing ever matches and
-    every tensor silently falls through to the 'other' bucket.
-    """
-    name = key[len(_DENOISE_PREFIX):] if key.startswith(_DENOISE_PREFIX) else key
-    if name.startswith("init_conv") or name.startswith("downs"):
-        return "encoder"
-    if name.startswith("mid"):
-        return "mid"
-    if name.startswith("ups") or name.startswith("final_conv"):
-        return "decoder"
-    return "other"
-
-
-def _blockwise_alpha(key: str, block_weights: dict, alpha: float) -> float:
+def _blockwise_alpha(key: str, block_weights: dict, alpha: float, backend=None) -> float:
     """Per-key mix weight for a blockwise merge.
 
     Keys belonging to no stage -- the time embedding MLP, and the scheduler
@@ -51,7 +40,7 @@ def _blockwise_alpha(key: str, block_weights: dict, alpha: float) -> float:
     so its stale value must never leak in: with all blocks at 0 every tensor has
     to come out as model A exactly, and at 1 as model B.
     """
-    stage = _stage_of_key(key)
+    stage = _stage_of_key(key, backend)
     if stage in block_weights:
         return float(block_weights[stage])
     vals = [float(v) for v in block_weights.values()]
@@ -75,6 +64,13 @@ def _slerp(a: torch.Tensor, b: torch.Tensor, alpha: float) -> torch.Tensor:
 def check_compat(path_a: str, path_b: str) -> dict:
     ma, mb = read_meta(path_a), read_meta(path_b)
     reasons = []
+    # Weights can only be blended between models of literally the same shape, so
+    # two engines' checkpoints are never mergeable -- the formats and the UNet
+    # topologies are unrelated. Say so plainly rather than failing on a key diff.
+    if ma.backend != mb.backend:
+        reasons.append(f"different backends ({ma.backend} vs {mb.backend})")
+    elif not backends.get(ma.backend).capabilities.merge:
+        reasons.append(f"the {ma.backend} backend does not support merging")
     if ma.mtype != mb.mtype:
         reasons.append(f"architectures differ ({ma.mtype} vs {mb.mtype})")
     if list(ma.mults) != list(mb.mults):
@@ -87,7 +83,8 @@ def check_compat(path_a: str, path_b: str) -> dict:
     }
 
 
-def _merge_state(sa: dict, sb: dict, method: str, alpha: float, block_weights: dict) -> dict:
+def _merge_state(sa: dict, sb: dict, method: str, alpha: float, block_weights: dict,
+                 backend=None) -> dict:
     keys_a, keys_b = set(sa), set(sb)
     common = keys_a & keys_b
     if not common:
@@ -102,7 +99,7 @@ def _merge_state(sa: dict, sb: dict, method: str, alpha: float, block_weights: d
             out[k] = ta
             continue
         if method == "blockwise":
-            a = _blockwise_alpha(k, block_weights, alpha)
+            a = _blockwise_alpha(k, block_weights, alpha, backend)
         else:
             a = alpha
         if method == "slerp":
@@ -130,32 +127,41 @@ def merge(
 
     out_name = safe_name(out_name, "merged model name")
     block_weights = block_weights or {}
-    da = torch.load(path_a, map_location="cpu", weights_only=False)
-    db = torch.load(path_b, map_location="cpu", weights_only=False)
+    backend, ref_a = backends.resolve(path_a)
+    _, ref_b = backends.resolve(path_b)
 
-    result = {
-        "step": 0,
-        "mults": da.get("mults", read_meta(path_a).mults),
-        "mtype": da.get("mtype", read_meta(path_a).mtype),
-        "pred": da.get("pred", "eps"),
-        "merged_from": [Path(path_a).name, Path(path_b).name],
-        "merge": {"method": method, "alpha": alpha, "block_weights": block_weights, "which": which},
-    }
+    # Reading and writing the checkpoint is the backend's business; the blend
+    # itself is plain arithmetic on matching tensors and is shared by both.
+    slots_a = backend.merge_slots(ref_a)
+    slots_b = backend.merge_slots(ref_b)
 
-    for slot in ("model", "ema"):
-        if slot in da and slot in db:
-            result[slot] = _merge_state(da[slot], db[slot], method, alpha, block_weights)
-        elif slot in da:
-            result[slot] = da[slot]
-    # ensure both slots exist
-    if "model" not in result and "ema" in result:
-        result["model"] = result["ema"]
-    if "ema" not in result and "model" in result:
-        result["ema"] = result["model"]
+    merge_info = {"method": method, "alpha": alpha,
+                  "block_weights": block_weights, "which": which}
+    merged_from = [_display_name(path_a), _display_name(path_b)]
+
+    slots = {}
+    for slot, sa in slots_a.items():
+        sb = slots_b.get(slot)
+        slots[slot] = (_merge_state(sa, sb, method, alpha, block_weights, backend)
+                       if sb is not None else sa)
+    if not slots:
+        raise IncompatibleModelError("these models expose no weights to merge")
 
     dest_dir = Path(out_dir) if out_dir else workspace.models
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / f"{out_name}.pt"
-    torch.save(result, str(dest))
-    log.info("merged %s + %s -> %s", Path(path_a).name, Path(path_b).name, dest.name)
-    return {"path": str(dest), "name": out_name, **result["merge"], "merged_from": result["merged_from"]}
+    dest = backend.write_merged(
+        ref_a, slots, dest_dir, out_name,
+        {"merged_from": merged_from, "merge": merge_info},
+    )
+    log.info("merged %s + %s -> %s", merged_from[0], merged_from[1], Path(dest).name)
+    return {"path": dest, "name": out_name, **merge_info, "merged_from": merged_from}
+
+
+def _display_name(locator: str) -> str:
+    """Short label for a model in a merge record.
+
+    A xurdif model is a file, a Diffusers one may be a repo id -- both read
+    better as their last segment than as a full path.
+    """
+    p = Path(locator)
+    return p.name if p.exists() else str(locator).rstrip("/").split("/")[-1]

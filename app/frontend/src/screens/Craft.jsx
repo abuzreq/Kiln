@@ -90,7 +90,10 @@ export function BendWorkspace({ stack, setStack }) {
       id: newBendId(),
       op: op.name,
       params,
-      targets: targets || ["all"],
+      // No layers by default. Adding a bend should not silently reach into
+      // every layer of the network -- picking where it applies is the point of
+      // the map, and "all" is a deliberate choice, not a starting position.
+      targets: targets || [],
       step_start: s.start ?? 0,
       step_end: s.end ?? 1,
       active: true,
@@ -132,7 +135,7 @@ export function BendWorkspace({ stack, setStack }) {
     if (!name) { toast("Name this bend setup first", "error"); return; }
     try {
       await api.post("/craft/bends", { name, bends: stack, model_hint: modelPath });
-      toast(`Saved ‘${name}’ — it will show up in Create`, "success");
+      toast(`Saved “${name}” — it will show up in Create`, "success");
       setSaveName("");
       api.get("/craft/bends").then(setPresets);
     } catch (e) { toast(e.message, "error"); }
@@ -145,7 +148,7 @@ export function BendWorkspace({ stack, setStack }) {
       setStack(loaded);
       setFocusedBendId(loaded[0]?.id || null);
       setNote(null);
-      toast(`Loaded ‘${name}’`, "success");
+      toast(`Loaded “${name}”`, "success");
     }
   };
 
@@ -307,7 +310,7 @@ export function BendWorkspace({ stack, setStack }) {
         kind: "sweep",
       });
       setGif(r);
-      toast(`GIF ready — ${r.frames} frames, saved to captures`, "success");
+      toast(`GIF ready — ${r.frames} frames, saved to Sweeps`, "success");
     } catch (e) { toast(e.message, "error"); }
     setGifBusy(false);
   };
@@ -338,10 +341,10 @@ export function BendWorkspace({ stack, setStack }) {
             <h3 className="mb-0">Model map</h3>
             {focusedBend ? (
               <span className="pill accent">
-                editing #{focusIndex + 1} {opMap[focusedBend.op]?.label || focusedBend.op}
+                Editing #{focusIndex + 1} {opMap[focusedBend.op]?.label || focusedBend.op}
               </span>
             ) : (
-              <span className="pill">no bend selected</span>
+              <span className="pill">No bend selected</span>
             )}
           </div>
           <p className="hint mt-1">

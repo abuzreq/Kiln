@@ -191,20 +191,32 @@ def list_checkpoints(out_dir: str | Path, save_every: int | None = None) -> list
     if save_every is None:
         save_every = _read_run_meta(out_dir).get("save_every")
     items: list[dict] = []
-    for pt in out_dir.glob("model-*.pt"):
+    # A xurdif snapshot is one .pt file; a Diffusers snapshot is a model-N/
+    # directory written by save_pretrained. Both are "the checkpoint at
+    # milestone N" as far as every screen that lists them is concerned.
+    for entry in out_dir.glob("model-*"):
+        is_dir = entry.is_dir()
+        if not is_dir and entry.suffix != ".pt":
+            continue
         try:
-            milestone = int(pt.stem.split("-", 1)[1])
+            milestone = int(entry.stem.split("-", 1)[1])
         except (ValueError, IndexError):
             milestone = None
-        st = pt.stat()
-        sample = pt.with_name(f"sample-{milestone}.png") if milestone is not None else None
+        st = entry.stat()
+        if is_dir:
+            size = sum(f.stat().st_size for f in entry.rglob("*") if f.is_file())
+            mtime = max((f.stat().st_mtime for f in entry.rglob("*") if f.is_file()),
+                        default=st.st_mtime)
+        else:
+            size, mtime = st.st_size, st.st_mtime
+        sample = out_dir / f"sample-{milestone}.png" if milestone is not None else None
         items.append({
-            "filename": pt.name,
-            "path": str(pt),
+            "filename": entry.name,
+            "path": str(entry),
             "milestone": milestone,
             "step": milestone * save_every if (milestone is not None and save_every) else None,
-            "size_mb": round(st.st_size / (1024 * 1024), 2),
-            "mtime": st.st_mtime,
+            "size_mb": round(size / (1024 * 1024), 2),
+            "mtime": mtime,
             "sample": str(sample) if (sample and sample.exists()) else None,
         })
     items.sort(key=lambda c: c["mtime"])

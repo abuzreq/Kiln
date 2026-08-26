@@ -2,13 +2,12 @@ import React, { useMemo, useState } from "react";
 import { mediaUrl } from "../api.js";
 import { Empty, Modal } from "./ui.jsx";
 import { THUMB_LEVELS } from "./LazySourceGallery.jsx";
-import { ThumbGalleryToolbar } from "./ThumbGalleryToolbar.jsx";
+import { ThumbGalleryToolbar, GALLERY_SORT_OPTS } from "./ThumbGalleryToolbar.jsx";
 
-const CKPT_SORT_OPTS = [
-  { value: "step", label: "Step" },
-  { value: "name", label: "Name" },
-  { value: "date", label: "Date" },
-];
+// Checkpoints are the one gallery that can also sort by training step. Build on
+// the shared vocabulary rather than restating it, so "Date added" cannot drift
+// back to "Date" here.
+const CKPT_SORT_OPTS = [{ value: "step", label: "Step" }, ...GALLERY_SORT_OPTS];
 
 function sortCheckpoints(items, sort) {
   const list = items.slice();

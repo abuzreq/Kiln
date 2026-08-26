@@ -13,6 +13,9 @@ app/frontend/.vite/
 # Kiln runtime
 /workspace/
 *.log
+# Residue from running the vendored xurdif scripts from the repo root
+/path_for_storing_checkpoints/
+scripts/_scratch_run/
 
 # OS
 .DS_Store

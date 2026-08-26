@@ -67,6 +67,7 @@ _PARAM_KEYS = (
     "image_size", "steps", "eta", "skip", "seed", "batch_size",
     "text", "text_weight", "guidance_step", "guidance_power",
     "image_prompt_weight", "cuts", "noise_level", "ema", "sampler",
+    "resample", "jump_length",
 )
 
 

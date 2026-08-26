@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import CreatePanel from "../components/CreatePanel.jsx";
 import { BendWorkspace } from "./Craft.jsx";
 import SweepPanel from "./Sweep.jsx";
@@ -19,9 +19,16 @@ const CANVAS_TABS = new Set(["create"]);
 
 export default function Play() {
   const {
-    toast, playTab, bendStack, setBendStack, modelPath, setModelPath, setTabBusy,
+    toast, playTab, bendStack, setBendStack, modelPath, setModelPath, setTabBusy, models,
   } = useApp();
   const tab = playTab;
+  // The settings panel needs the selected model, not just its path: whether the
+  // EMA toggle does anything, and what image sizes this model can actually
+  // produce, are properties of the model rather than of the sampler.
+  const activeModel = useMemo(
+    () => (models || []).find((m) => m.path === modelPath) || null,
+    [models, modelPath],
+  );
   const [frame, setFrameState] = useState(null);
   const [frameRaw, setFrameRaw] = useState(null);
   const [frameCard, setFrameCard] = useState(null);
@@ -399,6 +406,12 @@ export default function Play() {
             <SampleSettingsPanel
               params={sampleParams}
               setParam={setSampleParam}
+              model={activeModel}
+              // Create maps its Change slider onto skip + noise_level and passes
+              // them as overrides, so whatever the panel shows for noise level
+              // is discarded on that tab. Saying so beats a slider that quietly
+              // does nothing.
+              overriddenBy={tab === "create" ? { noise_level: "The Change slider in Create" } : null}
               sweptBy={tab === "sweep" ? sweptParams : null}
               disabled={genRunning && !genPaused}
               editable={genPaused
@@ -467,10 +480,12 @@ function PlayCanvas({ brushable }) {
               <span className="pill mono" title="Seed that produced this image">seed {activeSeed}</span>
             )}
             {frameRaw && (
-              <label className="row center gap-1">
-                <input type="checkbox" checked={showRaw} onChange={(e) => setShowRaw(e.target.checked)} />
-                <span className="sub">raw</span>
-              </label>
+              <Tooltip text="Show the image straight from the sampler, before post-processing and upscaling. Useful for judging what the model actually produced.">
+                <label className="row center gap-1 has-tip">
+                  <input type="checkbox" checked={showRaw} onChange={(e) => setShowRaw(e.target.checked)} />
+                  <span className="sub">Unprocessed</span>
+                </label>
+              </Tooltip>
             )}
           </div>
         </div>

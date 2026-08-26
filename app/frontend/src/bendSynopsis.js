@@ -12,7 +12,11 @@ function formatTarget(t) {
 }
 
 function formatTargets(targets) {
-  if (!targets?.length) return "all layers";
+  // Not "all layers": _resolve_targets in app/core/craft/bending.py expands an
+  // empty list to the empty set, so a bend with no targets hooks nothing at
+  // all. Reading it the other way round made a bend look like it was doing the
+  // most it possibly could when it was doing nothing.
+  if (!targets?.length) return "no layers yet";
   if (targets.length <= 3) return targets.map(formatTarget).join(", ");
   return `${targets.slice(0, 3).map(formatTarget).join(", ")} +${targets.length - 3} more`;
 }
@@ -36,7 +40,8 @@ function bendLine(b, i, opMap) {
   const sched = (b.step_start != null && b.step_end != null && (b.step_start > 0 || b.step_end < 1))
     ? ` · steps ${Math.round(b.step_start * 100)}–${Math.round(b.step_end * 100)}%`
     : "";
-  const off = b.active === false ? "  (off)" : "";
+  const off = b.active === false ? "  (off)" : (
+    (b.targets || []).length === 0 ? "  (no effect until a layer is chosen)" : "");
   return `${i + 1}. ${name}${amt} → ${formatTargets(b.targets)}${sched}${off}`;
 }
 

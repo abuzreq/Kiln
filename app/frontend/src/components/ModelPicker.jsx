@@ -139,7 +139,7 @@ export default function ModelPicker() {
           )}
           <div className="model-picker-toolbar-group model-picker-toolbar-actions">
             <span className="toolbar-label">Sort</span>
-            <Select label="" value={sort} onChange={setSort} options={GALLERY_SORT_OPTS} tip="Sort order" />
+            <Select label="" value={sort} onChange={setSort} options={GALLERY_SORT_OPTS} ariaLabel="Sort order" />
             <button type="button" className="btn ghost sm" onClick={load} disabled={modelsBusy}>
               {modelsBusy ? <><span className="spinner sm" aria-hidden /> Refreshing…</> : "Refresh"}
             </button>
