@@ -98,6 +98,21 @@ def run_diffusers(mode: str, run_name: str, base=None, **over):
     return out_dir, job
 
 
+def check_loss_defaults():
+    """Each engine's own default: xurdif trains with edge loss, Diffusers with MSE."""
+    xcfg = backends.get("xurdif").training_config({
+        "image_size": 64, "batch_size": 2, "train_steps": 100, "save_every": 50,
+        "model_name": "x",
+    }, DATASET, WORKSPACE / "runs" / "_defaults_x")
+    assert xcfg.edge_loss is True, xcfg.edge_loss
+    dcfg = backends.get("diffusers").training_config({
+        "mode": "scratch", "preset": "small-64", "image_size": 64, "batch_size": 4,
+        "train_steps": 20, "save_every": 10, "model_name": "d",
+    }, DATASET, WORKSPACE / "runs" / "_defaults_d")
+    assert dcfg.objective == "mse", dcfg.objective
+    print("  loss defaults: xurdif edge on, diffusers MSE")
+
+
 def check_xurdif():
     if not torch.cuda.is_available():
         print("  skipped: the xurdif trainer is CUDA-only and no GPU is visible")
@@ -224,6 +239,8 @@ def main():
     try:
         make_dataset()
         print("workspace:", WORKSPACE)
+        print("training defaults:")
+        check_loss_defaults()
         print("training runs:")
         if not diffusers_only:
             check_xurdif()

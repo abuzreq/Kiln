@@ -9,6 +9,7 @@ import { Progress, Tooltip } from "../components/ui.jsx";
 import { PlayCtx, usePlay, fileToDataUrl } from "./playContext.jsx";
 import {
   loadSampleParams, saveSampleParams, SampleSettingsPanel, paramsFromCard, cardLabel,
+  LIVE_PARAM_KEYS,
 } from "../sampleSettings.jsx";
 import ModelPicker from "../components/ModelPicker.jsx";
 import { buildContrastMask, floodFillMask } from "../contrastMask.js";
@@ -16,6 +17,29 @@ import { buildContrastMask, floodFillMask } from "../contrastMask.js";
 const HISTORY_MAX = 24;
 const MASK_UNDO_MAX = 12;
 const CANVAS_TABS = new Set(["create"]);
+
+// Canvas bounds. The floor is a size a brush can still be aimed inside; the
+// ceiling is well past what these models sample at, and a fill is scaled down
+// to MAX_FILL_SIDE anyway, so nothing is gained by going bigger.
+const CANVAS_MIN = 64;
+const CANVAS_MAX = 2048;
+
+function clampCanvasSide(v) {
+  const n = Math.round(Number(v) || 0);
+  if (!n) return CANVAS_MIN;
+  return Math.max(CANVAS_MIN, Math.min(CANVAS_MAX, n));
+}
+
+/** A transparent-black PNG — the ground a composition is painted on. */
+function blankImage(w, h) {
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  // New canvases are already (0,0,0,0); clear so that stays true if a browser
+  // ever changes the default.
+  c.getContext("2d").clearRect(0, 0, w, h);
+  return c.toDataURL("image/png");
+}
 
 export default function Play() {
   const {
@@ -48,6 +72,19 @@ export default function Play() {
   const [maskVersion, setMaskVersion] = useState(0);
   const [maskUndoLen, setMaskUndoLen] = useState(0);
   const [job, setJob] = useState(null);
+  // The blank canvas people paint regions onto. Its size is remembered here
+  // rather than read from the sampler's image size: a composition can be any
+  // shape, and region fill works at the canvas's own aspect anyway.
+  // The exact data URL of the blank ground newCanvas last laid down. "Is the
+  // canvas still blank" is then a question about the image itself, not about who
+  // called setFrame -- the postprocessing effect re-sets the current frame
+  // unchanged on mount, and a flag flipped inside setFrame was cleared by that
+  // before anything had actually been drawn.
+  const blankFrameRef = useRef(null);
+  const [canvasSize, setCanvasSizeState] = useState(() => {
+    const n = clampCanvasSide(loadSampleParams().image_size || 512);
+    return { w: n, h: n };
+  });
   const maskRef = useRef(null);
   const heroRef = useRef(null);
   const syncMaskOverlayRef = useRef(() => {});
@@ -199,15 +236,41 @@ export default function Play() {
     toast("Init cleared", "success");
   }, [applyInit, toast]);
 
-  /** Wipe the canvas back to empty: image, init and mask together. */
-  const clearCanvas = useCallback(() => {
-    setFrameState(null);
+  /** A blank canvas to paint on: image, init, mask and recipe all reset.
+   *
+   *  Deliberately *not* set as the init image. An untouched blank canvas is a
+   *  surface to select on, not a picture to work from — with no region painted,
+   *  Generate should make a new image rather than img2img from empty pixels.
+   */
+  const newCanvas = useCallback((w, h, { quiet = false } = {}) => {
+    const width = clampCanvasSide(w);
+    const height = clampCanvasSide(h);
+    const ground = blankImage(width, height);
+    blankFrameRef.current = ground;
+    setCanvasSizeState({ w: width, h: height });
+    setFrameState(ground);
     setFrameRaw(null);
     setFrameCard(null);
     setPendingCard(null);
     applyInit(null);
-    toast("Canvas cleared", "success");
+    clearMaskRef.current?.({ skipUndo: true });
+    clearMaskUndoRef.current?.();
+    if (!quiet) toast(`Blank canvas — ${width}x${height}`, "success");
   }, [applyInit, toast]);
+
+  /** Resizing is the same act as starting over: a new blank ground at that size. */
+  const setCanvasSize = useCallback((patch) => {
+    setCanvasSizeState((prev) => ({
+      w: clampCanvasSide(patch.w ?? prev.w),
+      h: clampCanvasSide(patch.h ?? prev.h),
+    }));
+  }, []);
+
+  /** Wipe back to a blank canvas at the size already set. */
+  const clearCanvas = useCallback(() => {
+    newCanvas(canvasSize.w, canvasSize.h, { quiet: true });
+    toast("Canvas cleared", "success");
+  }, [newCanvas, canvasSize.w, canvasSize.h, toast]);
 
   /** Put an image's recorded recipe back into the sampler (and pick its model). */
   const applyCard = useCallback((card) => {
@@ -364,10 +427,25 @@ export default function Play() {
   ].filter(Boolean);
 
   const canvasImage = showRaw && frameRaw ? frameRaw : frame;
+  // Still the untouched blank ground: nothing has been generated, dropped or
+  // restored over it. Region fill has to know, because a partial run started
+  // from empty pixels gives back the empty pixels it started from.
+  const canvasIsBlank = !!frame && frame === blankFrameRef.current;
   const activeSeed = frameCard?.params?.seed ?? null;
   const genRunning = !!(job && job.status === "running");
   const genPaused = genRunning && !!job?.detail?.paused;
   const canUndoMask = maskUndoLen > 0;
+
+  // Play opens on a blank canvas rather than an empty box, so the brush and
+  // region tools have something to work on from the first moment. Once only:
+  // Clear canvas makes its own blank one, and re-running this on every empty
+  // frame would make clearing look like it had failed.
+  const startedBlank = useRef(false);
+  useEffect(() => {
+    if (startedBlank.current) return;
+    startedBlank.current = true;
+    if (!frame) newCanvas(canvasSize.w, canvasSize.h, { quiet: true });
+  }, [frame, newCanvas, canvasSize.w, canvasSize.h]);
 
   useEffect(() => {
     const onPaste = (e) => {
@@ -391,6 +469,7 @@ export default function Play() {
     syncMaskOverlayRef, clearMask, getMaskDataUrl, applyContrastMask, applyFloodFillMask,
     pushMaskUndo, undoMask, clearMaskUndo, canUndoMask,
     sampleParams, setSampleParam, mergeSampleParams, maskVersion, bumpMask,
+    canvasSize, setCanvasSize, newCanvas, canvasIsBlank,
     tabState, setTabStateKey,
     job, setJob, genRunning, genPaused,
   };
@@ -414,9 +493,7 @@ export default function Play() {
               overriddenBy={tab === "create" ? { noise_level: "The Change slider in Create" } : null}
               sweptBy={tab === "sweep" ? sweptParams : null}
               disabled={genRunning && !genPaused}
-              editable={genPaused
-                ? ["steps", "seed", "eta", "noise_level"]
-                : null}
+              editable={genPaused ? LIVE_PARAM_KEYS : null}
               stepsMin={genPaused ? (job?.detail?.step || 1) : undefined}
             />
           </div>
@@ -448,10 +525,11 @@ function PlayCanvas({ brushable }) {
   const {
     frame, frameRaw, showRaw, setShowRaw, initImage, progress, heroRef,
     frameCard, pendingCard, setPendingCard, applyCard, activeSeed, useAsInit,
-    clearInit, clearCanvas,
+    clearInit, clearCanvas, canvasSize, setCanvasSize, newCanvas, loadFile,
   } = usePlay();
   const shown = showRaw && frameRaw ? frameRaw : frame;
   const [busy, setBusy] = useState(false);
+  const openRef = useRef(null);
 
   const download = async () => {
     if (!shown) return;
@@ -511,6 +589,37 @@ function PlayCanvas({ brushable }) {
           )}
           {shown && <MaskOverlay active={brushable} />}
         </div>
+        <div className="row wrap center mt-2 gap-2 canvas-size-row">
+          <span className="sub">Canvas</span>
+          <input
+            type="number" className="canvas-size-input" aria-label="Canvas width"
+            value={canvasSize.w} min={CANVAS_MIN} max={CANVAS_MAX} step={64}
+            onChange={(e) => setCanvasSize({ w: e.target.value })}
+          />
+          <span className="sub">x</span>
+          <input
+            type="number" className="canvas-size-input" aria-label="Canvas height"
+            value={canvasSize.h} min={CANVAS_MIN} max={CANVAS_MAX} step={64}
+            onChange={(e) => setCanvasSize({ h: e.target.value })}
+          />
+          <Tooltip text="Start again on a blank canvas at this size. Whatever is on the canvas now stays in Results, so this does not lose it.">
+            <button type="button" className="btn sm" onClick={() => newCanvas(canvasSize.w, canvasSize.h)}>
+              New canvas
+            </button>
+          </Tooltip>
+          <Tooltip text="Open an image from disk. Dropping one onto the canvas, or pasting it, does the same thing.">
+            <button type="button" className="btn sm ghost" onClick={() => openRef.current?.click()}>
+              Open image…
+            </button>
+          </Tooltip>
+          <input
+            ref={openRef}
+            type="file"
+            accept="image/*"
+            className="hidden-file"
+            onChange={(e) => { loadFile(e.target.files?.[0]); e.target.value = ""; }}
+          />
+        </div>
         <div className="row wrap mt-2 gap-2">
           {shown && (
             <Tooltip text="Download the canvas as a PNG. The sampling settings that made it are written into the file, so dropping it back into Kiln restores them.">
@@ -542,7 +651,7 @@ function PlayCanvas({ brushable }) {
           )}
           <div className="spacer" />
           {shown && (
-            <Tooltip text="Empty the canvas — removes the image, the init and any painted mask.">
+            <Tooltip text="Back to a blank canvas at the current size — drops the init and any painted mask with it. The image itself stays in Results.">
               <button type="button" className="btn ghost sm" onClick={clearCanvas}>Clear canvas</button>
             </Tooltip>
           )}
@@ -653,26 +762,53 @@ function MaskOverlay({ active }) {
     c.style.top = `${r.top - hr.top}px`;
     c.style.width = `${r.width}px`;
     c.style.height = `${r.height}px`;
-    const w = img.naturalWidth || 512;
-    const h = img.naturalHeight || 512;
+    // Resize only once the new frame has actually decoded. A freshly generated
+    // image reports naturalWidth 0 for the first moments after its src changes,
+    // and this used to fall back to 512 and resize the canvas to it -- which
+    // clears the canvas. Every click during that window painted a stroke and
+    // then wiped it on the next one, so the brush looked dead for a second or
+    // two after each generation. The load listener below re-runs this once the
+    // real dimensions exist.
+    if (!img.complete || !img.naturalWidth || !img.naturalHeight) return;
+    const w = img.naturalWidth;
+    const h = img.naturalHeight;
     if (c.width !== w || c.height !== h) {
-      const prev = (c.width > 0 && c.height > 0) ? c.toDataURL() : null;
+      // Setting width/height clears the canvas, so the mask is carried over on
+      // another canvas. This used to go through toDataURL + Image.onload, which
+      // was wrong twice over: the encode is a synchronous PNG on the main
+      // thread (and this runs on *every* live preview frame, each a different
+      // size, so a 50-step run paid for 50 of them -- that is the stall people
+      // hit when brushing right after generating), and the restore landed a
+      // frame later, wiping anything painted in between. drawImage is immediate
+      // and scales in one step.
+      const snap = document.createElement("canvas");
+      snap.width = c.width;
+      snap.height = c.height;
+      const had = c.width > 0 && c.height > 0;
+      if (had) snap.getContext("2d").drawImage(c, 0, 0);
       c.width = w;
       c.height = h;
-      if (prev) {
-        const im = new Image();
-        im.onload = () => c.getContext("2d").drawImage(im, 0, 0, w, h);
-        im.src = prev;
-      }
+      if (had) c.getContext("2d").drawImage(snap, 0, 0, w, h);
     }
   };
 
   useEffect(() => {
     syncMaskOverlayRef.current = syncSize;
     syncSize();
+    const img = heroRef.current?.querySelector("img");
+    // Two things move the overlay out from under the pointer: the image
+    // finishing its decode (new size), and the layout reflowing around it (new
+    // position). Watch for both -- before this, nothing re-synced after a
+    // generation until the next click, and that click was spent re-syncing
+    // instead of painting.
+    img?.addEventListener("load", syncSize);
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(syncSize) : null;
+    if (img && ro) ro.observe(img);
     window.addEventListener("resize", syncSize);
     return () => {
       syncMaskOverlayRef.current = () => {};
+      img?.removeEventListener("load", syncSize);
+      ro?.disconnect();
       window.removeEventListener("resize", syncSize);
     };
   }, [canvasImage, syncMaskOverlayRef]);

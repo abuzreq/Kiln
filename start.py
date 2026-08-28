@@ -145,7 +145,19 @@ def main():
         webview.create_window("Kiln", url, width=1440, height=920, min_size=(1024, 680))
         webview.start()
     except Exception as e:  # noqa: BLE001
+        import platform
+
         log.warning("Native window unavailable (%s).", e)
+        if platform.system() == "Linux":
+            # pywebview installs from pip, but its Linux backend is system GTK +
+            # WebKit, which pip cannot provide. Everything works without it --
+            # the window is the only thing missing -- so say how to get it and
+            # carry on rather than treating this as an error.
+            log.info(
+                "On Linux the desktop window needs a WebKit runtime: "
+                "sudo apt install python3-gi gir1.2-webkit2-4.1 "
+                "(Fedora: python3-gobject webkit2gtk4.1). "
+                "Or pass --no-window to skip it.")
         log.info("Open Kiln in your browser at %s — Ctrl+C to stop.", url)
         try:
             while True:

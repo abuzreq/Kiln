@@ -2,6 +2,11 @@ import React from "react";
 import { Slider, Select, Text, Num, Disclose } from "./components/ui.jsx";
 
 const STORAGE_KEY = "kiln.sampleParams";
+// Bumped when a *default* changes in a way stored settings should follow. Only
+// for defaults nobody would have chosen deliberately, since this overwrites what
+// is on disk: v2 re-points the old UniPC default at DPM-Solver++, which can
+// harmonize a region fill where UniPC cannot.
+const PARAMS_VERSION = 2;
 
 export const DEFAULT_SAMPLE_PARAMS = {
   image_size: 512,
@@ -10,14 +15,21 @@ export const DEFAULT_SAMPLE_PARAMS = {
   skip: 0,
   seed: "",
   text: "",
-  text_weight: 0,
+  // Not a switch and not a strength -- a prompt turns guidance on by existing,
+  // and Guidance strength is the amount. This only balances a text prompt
+  // against an image prompt, so it has no panel control.
+  text_weight: 1,
   guidance_step: 0.02,
   guidance_power: 1,
+  spherical: false,
   image_prompt_weight: 0,
   cuts: 0.5,
   noise_level: 1,
+  attenuation: 1,
   ema: true,
-  sampler: "unipc",
+  // DPM-Solver++, not UniPC: same speed class, but it is the only fast solver
+  // that can resample, so region fills can harmonize (see RESAMPLE_SOLVERS).
+  sampler: "dpmpp",
 };
 
 /** Solvers that can do RePaint resampling.
@@ -41,14 +53,21 @@ export function solverCanResample(sampler) {
 export const PARAM_RANGES = {
   steps: { label: "Steps", min: 5, max: 200, step: 1, int: true },
   eta: { label: "Eta", min: 0, max: 1, step: 0.05 },
+  // No panel control any more (see DEFAULT_SAMPLE_PARAMS); kept for the label
+  // and for recipes written while it was a slider.
   text_weight: { label: "Text weight", min: 0, max: 100, step: 1 },
-  guidance_step: { label: "Guidance step", min: 0, max: 0.3, step: 0.005 },
+  guidance_step: { label: "Guidance strength", min: 0, max: 0.3, step: 0.005 },
+  guidance_power: { label: "Guidance ramp", min: 0, max: 4, step: 0.25 },
   cuts: { label: "Detail ↔ Structure", min: 0, max: 1, step: 0.05 },
   // 1.0 means "leave the schedule alone". Below that the sampler injects
   // extra noise at every step, so the image gets grainier as the number
   // goes *down* — measured detail (total variation) rises from 0.039 at
   // 1.0 to 0.201 at 0.25. "Noise level" read as though 0 meant no noise.
   noise_level: { label: "Extra noise", min: 0, max: 1, step: 0.05 },
+  // Scales the seed noise the run starts from, before anything else happens.
+  // Unlike Extra noise this is a one-off at step 0, so it survives every mode:
+  // pure generation, img2img, and the noise a painted region is filled with.
+  attenuation: { label: "Noise attenuation", min: 0, max: 1, step: 0.05 },
   // A seed has no meaningful range — any integer is as valid as any other — so
   // this is just a comfortable default span of eight consecutive seeds.
   seed: { label: "Seed", min: 0, max: 7, step: 1, int: true },
@@ -61,6 +80,8 @@ export const PARAM_RANGES = {
 const EXTRA_PARAM_LABELS = {
   sampler: "Sampler",
   image_size: "Image size",
+  text: "Prompt",
+  spherical: "Spherical distance",
 };
 
 /** The one display name for any sweepable/sampling key. Never returns a raw key
@@ -69,19 +90,15 @@ export function paramLabel(key) {
   return PARAM_RANGES[key]?.label || EXTRA_PARAM_LABELS[key] || key;
 }
 
-// CLIP guidance is set up in the sampler but never applied to the denoise loop
-// (see app/core/engine/sampler.py — clip_ctx / txt_enc are computed and then
-// unused). Until that is ported from vendor/xurdif/xurdifapp3.py, everything
-// downstream of it is inert, so those controls are hidden rather than shown
-// doing nothing. The payload fields stay, so this is a UI-only restoration.
-export const GUIDANCE_IMPLEMENTED = false;
+// The knobs that only shape guidance once it is actually running. The prompt
+// and its weight are what turn guidance on, so they stay visible either way —
+// these are the ones with nothing to act on until it is.
+export const GUIDANCE_PARAMS = ["guidance_step", "guidance_power", "cuts", "spherical"];
 
-// Everything that only matters once CLIP guidance works. `cuts` belongs here
-// too: it is the cutout count cond_fn samples with, not a standalone knob.
-export const GUIDANCE_PARAMS = [
-  "text", "text_weight", "guidance_step", "guidance_power",
-  "image_prompt_weight", "spherical", "cuts",
-];
+/** Is CLIP guidance switched on? A prompt is the switch. */
+export function guidanceActive(params = {}) {
+  return !!(params.text || "").trim();
+}
 
 /** Why a parameter cannot currently affect the output, or null if it can.
  *
@@ -109,8 +126,8 @@ export function inertReason(name, params = {}, model = null, overriddenBy = null
         + "carry a straight copy.";
     }
   }
-  if (!GUIDANCE_IMPLEMENTED && GUIDANCE_PARAMS.includes(name)) {
-    return "Needs CLIP guidance, which this build sets up but never applies — so it has no effect yet.";
+  if (GUIDANCE_PARAMS.includes(name) && !guidanceActive(params)) {
+    return "Guidance is off until there is a prompt.";
   }
   return null;
 }
@@ -141,9 +158,10 @@ export function imageSizeNote(size, model) {
  *    weights identical to the raw ones) -- show it and say why. There is
  *    nothing to switch to, and the reason is worth knowing about the model.
  *
- *  Guidance controls are absent from the panel entirely, on the same principle.
+ *  The guidance sub-knobs follow the first rule: they appear once a prompt and a
+ *  weight are set, because until then there is nothing for them to shape.
  */
-export const HIDE_WHEN_INERT = new Set(["eta", "noise_level"]);
+export const HIDE_WHEN_INERT = new Set(["eta", "noise_level", ...GUIDANCE_PARAMS]);
 
 export function paramRange(name) {
   return PARAM_RANGES[name] || null;
@@ -152,10 +170,14 @@ export function paramRange(name) {
 export function loadSampleParams() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { ...DEFAULT_SAMPLE_PARAMS };
-    return { ...DEFAULT_SAMPLE_PARAMS, ...JSON.parse(raw) };
+    if (!raw) return { ...DEFAULT_SAMPLE_PARAMS, _v: PARAMS_VERSION };
+    const stored = JSON.parse(raw);
+    const out = { ...DEFAULT_SAMPLE_PARAMS, ...stored };
+    if ((stored._v || 1) < 2 && stored.sampler === "unipc") out.sampler = "dpmpp";
+    out._v = PARAMS_VERSION;
+    return out;
   } catch {
-    return { ...DEFAULT_SAMPLE_PARAMS };
+    return { ...DEFAULT_SAMPLE_PARAMS, _v: PARAMS_VERSION };
   }
 }
 
@@ -219,6 +241,17 @@ export function effectiveSteps(change, steps, hasInit) {
   return Math.max(1, n - Math.min(skip, n));
 }
 
+/** How many of the schedule's steps a given Change amount skips over.
+ *
+ *  The counterpart to effectiveSteps, and the number worth showing: skipping is
+ *  the actual mechanism behind "keep more of the init image", so saying how many
+ *  steps are being skipped explains the slider better than any adjective.
+ */
+export function skippedSteps(change, steps, hasInit) {
+  const n = Math.max(0, Math.round(steps) || 0);
+  return n - effectiveSteps(change, n, hasInit);
+}
+
 /** Sampler settings carried by an image's embedded card, ready for setSampleParams. */
 export function paramsFromCard(card) {
   const p = card?.params;
@@ -241,6 +274,30 @@ export function cardLabel(card) {
   if (card.params?.seed != null) bits.push(`seed ${card.params.seed}`);
   if (card.bend_preset) bits.push(card.bend_preset);
   return bits.join(" · ");
+}
+
+/** Two crossing arrows — the shuffle glyph, for drawing a new seed. */
+function ShuffleIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <polyline points="16 3 21 3 21 8" />
+      <line x1="4" y1="20" x2="21" y2="3" />
+      <polyline points="21 16 21 21 16 21" />
+      <line x1="15" y1="15" x2="21" y2="21" />
+      <line x1="4" y1="4" x2="9" y2="9" />
+    </svg>
+  );
+}
+
+/** A fresh seed, in the same range the sampler draws from when one is blank.
+ *
+ *  Written into the field rather than left empty on purpose: a blank seed is
+ *  redrawn every run, so the image you liked cannot be got back. A pinned seed
+ *  can. (Mirrors resolve_seed in app/core/engine/sampler.py.)
+ */
+export function randomSeed() {
+  return Math.floor(Math.random() * 2 ** 31);
 }
 
 export function parseSeed(seed) {
@@ -273,9 +330,11 @@ export function buildSamplePayload(params, opts = {}) {
     text_weight: merged.text_weight,
     guidance_step: merged.guidance_step,
     guidance_power: merged.guidance_power,
+    spherical: merged.spherical,
     image_prompt_weight: merged.image_prompt_weight,
     cuts: merged.cuts,
     noise_level: merged.noise_level,
+    attenuation: merged.attenuation,
     ema: merged.ema,
     sampler: merged.sampler,
     postproc,
@@ -313,9 +372,11 @@ export function buildInpaintPayload(params, opts = {}) {
     text_weight: merged.text_weight,
     guidance_step: merged.guidance_step,
     guidance_power: merged.guidance_power,
+    spherical: merged.spherical,
     image_prompt_weight: merged.image_prompt_weight,
     cuts: merged.cuts,
     noise_level: merged.noise_level,
+    attenuation: merged.attenuation,
     ema: merged.ema,
     sampler: merged.sampler,
     resample: merged.resample || 1,
@@ -339,9 +400,11 @@ export function buildSweepBase(params, postproc = {}) {
     text_weight: params.text_weight,
     guidance_step: params.guidance_step,
     guidance_power: params.guidance_power,
+    spherical: params.spherical,
     image_prompt_weight: params.image_prompt_weight,
     cuts: params.cuts,
     noise_level: params.noise_level,
+    attenuation: params.attenuation,
     ema: params.ema,
     sampler: params.sampler,
     postproc,
@@ -361,23 +424,39 @@ export const SAMPLER_LABELS = {
 export const samplerLabel = (id) => SAMPLER_LABELS[id] || id;
 
 const SAMPLER_OPTIONS = [
-  { value: "unipc", label: `${SAMPLER_LABELS.unipc} — fast (recommended)` },
-  { value: "dpmpp", label: `${SAMPLER_LABELS.dpmpp} — fast` },
+  { value: "dpmpp", label: `${SAMPLER_LABELS.dpmpp} — fast (recommended)` },
+  { value: "unipc", label: `${SAMPLER_LABELS.unipc} — fast, no region harmonize` },
   { value: "deis", label: `${SAMPLER_LABELS.deis} — fast` },
   { value: "ddim", label: `${SAMPLER_LABELS.ddim} — classic, slowest` },
 ];
 
-/** The live-editable sampling controls that are actually on screen, by label.
+/** Settings a paused run can be resumed with.
+ *
+ *  Mirrors what the sampler re-reads mid-run: the solver knobs it can adjust in
+ *  place, plus every guidance setting (app/core/engine/sampler.py rebuilds the
+ *  prompt embedding from scratch on any of those, which is what lets someone
+ *  pause, retype the prompt, and resume onto it). One list, because the pause
+ *  snapshot, the resume diff and the panel's editable set all have to agree.
+ */
+export const LIVE_PARAM_KEYS = [
+  "steps", "seed", "eta", "noise_level",
+  "text", "guidance_step", "guidance_power", "cuts", "spherical",
+];
+
+/** The live-editable controls actually on screen, by label.
  *
  * A control in HIDE_WHEN_INERT disappears when it cannot do anything, so any
  * notice that names one is only truthful if it checks first. Both the panel's
  * own "Paused — ..." line and Create's pause toast go through here so they
- * cannot drift apart again.
+ * cannot drift apart again. The guidance knobs collapse into one phrase: naming
+ * all six would bury the two that most runs actually touch.
  */
 export function liveEditLabels(params, model, overriddenBy) {
-  return ["steps", "seed", "eta", "noise_level"]
+  const labels = ["steps", "seed", "eta", "noise_level"]
     .filter((k) => !(HIDE_WHEN_INERT.has(k) && !!inertReason(k, params, model, overriddenBy)))
     .map((k) => PARAM_RANGES[k]?.label || k);
+  labels.push(guidanceActive(params) ? "the guidance settings" : "the prompt");
+  return labels;
 }
 
 /** "a, b and c" — an empty list reads as "nothing". */
@@ -451,19 +530,35 @@ export function SampleSettingsPanel({
           />
         </div>
         <div className="sample-seed">
-          <Num
-            label={swept("seed") ? "Seed — set by the sweep" : "Seed"}
-            value={params.seed}
-            onChange={(v) => setParam("seed", v)}
-            disabled={!can("seed")}
-            tip={tipFor("seed", "Same seed + settings = same image. Leave empty for random.")}
-          />
+          <div className="row gap-1 seed-row">
+            <div className="grow">
+              <Num
+                label={swept("seed") ? "Seed — set by the sweep" : "Seed"}
+                value={params.seed}
+                onChange={(v) => setParam("seed", v)}
+                disabled={!can("seed")}
+                tip={tipFor("seed",
+                  "Same seed + settings = same image. Leave empty to draw a fresh one every run; "
+                  + "the shuffle button pins a new one you can keep and come back to.")}
+              />
+            </div>
+            <button
+              type="button"
+              className="btn ghost seed-random"
+              onClick={() => setParam("seed", randomSeed())}
+              disabled={!can("seed")}
+              title="Pin a new random seed"
+              aria-label="Pin a new random seed"
+            >
+              <ShuffleIcon />
+            </button>
+          </div>
         </div>
       </div>
       <Disclose title="Advanced" tip="Less-used sampling knobs.">
         <Select
           label="Sampler"
-          value={params.sampler || "unipc"}
+          value={params.sampler || "dpmpp"}
           onChange={(v) => setParam("sampler", v)}
           options={SAMPLER_OPTIONS}
           disabled={!can("sampler")}
@@ -510,6 +605,85 @@ This model works in multiples of ${model.size_multiple}.` : "")
               + "lowering it makes the result grainier and less settled, not cleaner. "
               + "Useful for roughening an output on purpose.")} />
         )}
+        <Slider
+          label={PARAM_RANGES.attenuation.label}
+          value={params.attenuation ?? 1}
+          min={PARAM_RANGES.attenuation.min} max={PARAM_RANGES.attenuation.max}
+          step={PARAM_RANGES.attenuation.step}
+          fmt={(v) => (v >= 1 ? "none" : `×${v.toFixed(2)} noise`)}
+          onChange={(v) => setParam("attenuation", v)}
+          disabled={!can("attenuation")}
+          tip={tipFor("attenuation",
+            "Scales the noise the run starts from — once, at step 0. Below 1 the sampler begins "
+            + "with less variance than the model expects, which comes out calmer and flatter, and "
+            + "at 0 there is no randomness left at all.\n\n"
+            + "It applies to whatever the run starts with: pure noise, the noise mixed into an "
+            + "init image, or the noise a painted region is filled with. Unlike Extra noise, which "
+            + "keeps injecting at every step, this is a single change to the starting point.")} />
+
+        <p className="sub mt-2 mb-1">CLIP guidance</p>
+        <Text
+          label="Prompt"
+          value={params.text || ""}
+          placeholder="e.g. a rust-red coastline, aerial"
+          onChange={(v) => setParam("text", v)}
+          disabled={!can("text")}
+          tip={tipFor("text",
+            "Steers the image toward a description. CLIP scores crops of the picture as it forms, "
+            + "and every step is nudged toward a better score. Typing a prompt switches guidance on; "
+            + "clearing it switches guidance off.\n\n"
+            + "The model has no text input of its own, so this is a pull in a direction it can "
+            + "already go — not an instruction.")} />
+        {!hidden("guidance_step") && (
+          <Slider
+            label={PARAM_RANGES.guidance_step.label}
+            value={params.guidance_step ?? 0.02}
+            min={PARAM_RANGES.guidance_step.min} max={PARAM_RANGES.guidance_step.max}
+            step={PARAM_RANGES.guidance_step.step}
+            onChange={(v) => setParam("guidance_step", v)}
+            disabled={!can("guidance_step")}
+            tip={tipFor("guidance_step",
+              "How hard each step is pulled toward the prompt — the main dial. Too high and the "
+              + "picture turns into CLIP's own texture instead of the subject.")} />
+        )}
+        {!hidden("guidance_power") && (
+          <Slider
+            label={PARAM_RANGES.guidance_power.label}
+            value={params.guidance_power ?? 1}
+            min={PARAM_RANGES.guidance_power.min} max={PARAM_RANGES.guidance_power.max}
+            step={PARAM_RANGES.guidance_power.step}
+            fmt={(v) => (v === 0 ? "even" : `×${v}`)}
+            onChange={(v) => setParam("guidance_power", v)}
+            disabled={!can("guidance_power")}
+            tip={tipFor("guidance_power",
+              "When the pull happens. 0 pulls evenly the whole way through; higher holds off until "
+              + "there is an image to work on rather than noise.")} />
+        )}
+        {!hidden("cuts") && (
+          <Slider
+            label={PARAM_RANGES.cuts.label}
+            value={params.cuts ?? 0.5}
+            min={PARAM_RANGES.cuts.min} max={PARAM_RANGES.cuts.max}
+            step={PARAM_RANGES.cuts.step}
+            fmt={(v) => (v < 0.35 ? "detail" : v > 0.65 ? "structure" : "balanced")}
+            onChange={(v) => setParam("cuts", v)}
+            disabled={!can("cuts")}
+            tip={tipFor("cuts",
+              "CLIP only ever sees small crops, never the whole frame. Toward detail it takes many "
+              + "little ones, so the prompt reaches texture; toward structure a few big ones, so it "
+              + "shapes the composition.")} />
+        )}
+        {!hidden("spherical") && (
+          <label className="row center gap-2" title={tipFor("spherical",
+            "A distance measure that keeps pulling as the image nears the prompt instead of easing "
+            + "off. Worth trying when a strong prompt seems to stall.")}>
+            <input type="checkbox" checked={!!params.spherical}
+              disabled={!can("spherical")}
+              onChange={(e) => setParam("spherical", e.target.checked)} />
+            <span className="sub">Spherical distance</span>
+          </label>
+        )}
+
         <label className="row center gap-2" title={tipFor("ema",
           "Averaged weights are usually smoother than the raw ones. Kiln falls back to the raw "
           + "weights when a model has no averaged copy.")}>

@@ -1,10 +1,10 @@
-# originally based on from https://github.com/lucidrains/denoising-diffusion-pytorch
+# originally from https://github.com/lucidrains/denoising-diffusion-pytorch
 
 '''
 
 xurdiffusion
 
-@htoyryla 2023 - 2025
+@htoyryla June 2023, 2025
 
 diffusion library with support for DDIM with conditioning
 
@@ -162,6 +162,69 @@ def edge_weighted_l1(
     # Optional: return components for logging
     return loss, {"base_l1": base_l1.detach(), "edge_l1": edge_l1.detach()}
 
+def masked_l1(x_pred, x_target, mask_ratio=0.8):
+        # x_pred, x_target: [B,C,H,W]
+        b, c, h, w = x_pred.shape
+
+        keep_prob = 1.0 - mask_ratio
+
+        # one mask per spatial pixel, shared over channels
+        mask = (torch.rand(b, 1, h, w, device=x_pred.device) < keep_prob).float()
+
+        diff = (x_pred - x_target).abs()
+
+        # normalize by number of visible values, not total pixels
+        loss = (diff * mask).sum() / (mask.sum() * c + 1e-8)
+
+        return loss, mask
+
+def masked_edge_weighted_l1(
+    x_pred: torch.Tensor,
+    x_target: torch.Tensor,
+    edge_weight: float = 4.0,
+    edge_threshold: float = 0.1,
+    mask_ratio: float = 0.8,
+):
+    """
+    Edge-weighted L1 with random masking applied only in loss evaluation.
+
+    mask_ratio:
+        Fraction of spatial pixels ignored in the loss.
+        0.8 = supervise only 20% of pixels.
+    """
+
+    # For logging only (same as before)
+    base_l1 = F.l1_loss(x_pred, x_target)
+
+    # Edge map from target
+    edges = sobel_edges(x_target)                  # (B,1,H,W)
+    edge_mask = (edges > edge_threshold).float()  # (B,1,H,W)
+
+    # Per-pixel abs diff, averaged over channels
+    diff = torch.abs(x_pred - x_target).mean(dim=1, keepdim=True)   # (B,1,H,W)
+
+    # Same edge weighting as before
+    weights = 1.0 + edge_weight * edge_mask       # (B,1,H,W)
+
+    # Random spatial supervision mask (shared over channels already,
+    # since diff is already channel-averaged)
+    b, _, h, w = diff.shape
+    keep_prob = 1.0 - mask_ratio
+    mask = (torch.rand(b, 1, h, w, device=diff.device) < keep_prob).float()
+
+    # Apply both edge weighting and random supervision mask
+    weighted_diff = diff * weights * mask
+
+    # IMPORTANT: normalize by active weighted pixels, not full image
+    denom = (weights * mask).sum().clamp_min(1e-8)
+    edge_l1 = weighted_diff.sum() / denom
+
+    loss = edge_l1
+
+    return loss, {
+        "base_l1": base_l1.detach(),
+        "edge_l1": edge_l1.detach(),
+    }
 
 class DDIMDiffusion(nn.Module):
     def __init__(
@@ -529,14 +592,11 @@ class GaussianDiffusion(nn.Module):
         l1w = 1,
         ssimw = 10, 
         pred="eps",
-        # KILN: the edge-weighted L1 below was hardcoded, with its weight and
-        # threshold written at the call site. Kiln exposes it as a training
-        # option, so it has to be switchable. Defaults reproduce the original
-        # behaviour exactly: use_edges on, and the same 4.0 / 0.08 the call
-        # site used (edge_weighted_l1's own default threshold is 0.1).
+        use_mask = True,
         use_edges = True,
-        edge_weight = 4.0,
-        edge_threshold = 0.08
+        edge_weight=4.0,
+        edge_threshold=0.08,
+        mask_ratio=0.8
         #loss_type = 'l1'
         #lpips_fn = None
     ):
@@ -544,6 +604,11 @@ class GaussianDiffusion(nn.Module):
         self.channels = channels
         self.image_size = image_size
         self.denoise_fn = denoise_fn
+        self.use_mask = use_mask
+        self.use_edges = use_edges
+        self.mask_ratio = mask_ratio
+        self.edge_weight = edge_weight
+        self.edge_threshold = edge_threshold
       
         betas = cosine_beta_schedule(timesteps)
 
@@ -558,10 +623,6 @@ class GaussianDiffusion(nn.Module):
         #self._lpips_fn = None
         self.l1w = l1w
         self.ssimw = ssimw    
-        # KILN: see the constructor note above.
-        self.use_edges = use_edges
-        self.edge_weight = edge_weight
-        self.edge_threshold = edge_threshold
 
         self.pred = pred
 
@@ -693,15 +754,53 @@ class GaussianDiffusion(nn.Module):
             extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
         )
 
+    
+
+    def p_losses_masked(self, x_start, t, noise=None):
+        b, c, h, w = x_start.shape
+        noise = default(noise, lambda: torch.randn_like(x_start))
+
+        x_noisy  = self.q_sample(x_start=x_start, t=t, noise=noise)
+        val_pred = self.denoise_fn(x_noisy, t)
+
+        if self.pred == "eps":
+            pred_x0 = self.predict_xstart_from_eps(x_noisy, t, val_pred)
+        else:
+            pred_x0 = val_pred
+
+        pred_x0 = pred_x0.clamp(-1, 1)
+        x_tgt   = x_start.clamp(-1, 1).detach()
+
+
+        if self.use_edges:            
+            loss_x0_l1, _ = masked_edge_weighted_l1(
+                x_pred=pred_x0,
+                x_target=x_tgt,
+                edge_weight=getattr(self, "edge_weight", 0.8),
+                edge_threshold=getattr(self, "edge_threshold", 0.8),
+                mask_ratio=getattr(self, "mask_ratio", 0.8),
+            )
+        else:
+            loss_x0_l1, mask = masked_l1(
+                pred_x0,
+                x_tgt,
+                mask_ratio=getattr(self, "mask_ratio", 0.8)
+            )
+
+        pred01 = (pred_x0 * 0.5 + 0.5).clamp(0, 1)
+        tgt01  = (x_tgt   * 0.5 + 0.5)
+
+        loss_ssim = 1.0 - ssim(pred01, tgt01)
+
+        loss = self.l1w * loss_x0_l1 + self.ssimw * loss_ssim
+
+        return loss    
+
     def p_losses(self, x_start, t, noise = None):
         b, c, h, w = x_start.shape
         noise = default(noise, lambda: torch.randn_like(x_start))
 
-        #print(t)    
-
-        #x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
-        #x_recon = self.denoise_fn(x_noisy, t)
-
+        
         x_noisy  = self.q_sample(x_start=x_start, t=t, noise=noise)
         val_pred = self.denoise_fn(x_noisy, t)   
 
@@ -715,17 +814,13 @@ class GaussianDiffusion(nn.Module):
         x_tgt   = x_start.clamp(-1, 1).detach() # no grads into data
 
 
-        # KILN: switchable. With use_edges off this is the plain x0-space L1
-        # upstream left commented out on the first line here.
-        if self.use_edges:
-            loss_x0_l1, _ = edge_weighted_l1(
-                x_pred=pred_x0,
-                x_target=x_tgt,
-                edge_weight=self.edge_weight,
-                edge_threshold=self.edge_threshold,
-                )
-        else:
-            loss_x0_l1 = (pred_x0 - x_tgt).abs().mean()
+        #loss_x0_l1 = (pred_x0 - x_tgt).abs().mean()
+        loss_x0_l1, _ = edge_weighted_l1(
+            x_pred=pred_x0,
+            x_target=x_tgt,
+            edge_weight=4.0,       # tune this
+            edge_threshold=0.08,   # tune this a bit too
+            )
 
         # range 0..1 for ssim
         pred01 = (pred_x0 * 0.5 + 0.5).clamp(0,1)
@@ -735,43 +830,22 @@ class GaussianDiffusion(nn.Module):
 
         loss = self.l1w * loss_x0_l1 + self.ssimw * loss_ssim
 
-        '''
-        if self.loss_type == 'l1':
-            loss = (noise - x_recon).abs().mean()
-        elif self.loss_type == 'l2':
-            loss = F.mse_loss(noise, x_recon)
-        elif self.loss_type == 'ssim':
-            #loss = 20*(1 - ssim(noise, x_recon)) 
-            pred_x0 = self.predict_xstart_from_eps(x_noisy, t, x_recon)
-            pred_x0 = pred_x0.clamp(-1, 1)
-            x_target = x_start.clamp(-1, 1)
-            loss = 20 * (1 - ssim((pred_x0 + 1)*0.5, (x_target + 1) * 0.5))   
-        elif (self.loss_type == 'lpips') and (self._lpips_fn is not None):
-            #Recover predicted x_start (x0) from ε
-            pred_x0 = self.predict_xstart_from_eps(x_noisy, t, x_recon)
 
-            # Clamp to valid range just in case
-            pred_x0 = pred_x0.clamp(-1, 1)
-            x_target = x_start.clamp(-1, 1)
-
-            # LPIPS compares images, not noise
-            with torch.no_grad():
-                loss = self._lpips_fn(pred_x0.float(), x_target.float()).mean()
-        else:
-            raise NotImplementedError()
-        '''
         return loss
 
     def forward(self, x, *args, **kwargs):
         b, c, h, w, device, img_size, = *x.shape, x.device, self.image_size
         assert h == img_size and w == img_size, f'height and width of image must be {img_size}'
         t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
-        return self.p_losses(x, t, *args, **kwargs)
+        if self.use_mask:
+            return self.p_losses_masked(x, t, *args, **kwargs)
+        else:    
+            return self.p_losses(x, t, *args, **kwargs)
 
 # dataset classes
 
 class Dataset(data.Dataset):
-    def __init__(self, folder, image_size, exts = ['jpg', 'jpeg', 'png'], transform=None):
+    def __init__(self, folder, image_size, exts = ['jpg', 'jpeg', 'png', 'JPG', 'PNG'], transform=None):
         super().__init__()
         self.folder = folder
         self.image_size = image_size
@@ -819,7 +893,7 @@ class Trainer(object):
         opts = {},
         transform = None,
         ddim_steps = 100,
-        pred = "eps"
+        pred = "eps",
     ):
         super().__init__()
         self.model = diffusion_model
@@ -836,6 +910,7 @@ class Trainer(object):
         self.train_num_steps = train_num_steps
 
         self.ds = Dataset(folder, image_size, transform=transform)
+        print(len(self.ds))
         self.dl = cycle(data.DataLoader(self.ds, batch_size = train_batch_size, shuffle=True, pin_memory=True))
         self.opt = Adam(diffusion_model.parameters(), lr=train_lr, eps=1e-5)
 
@@ -916,31 +991,12 @@ class Trainer(object):
                 batches = num_to_groups(self.nsamples, self.batch_size)
 
                 print("trainer", batches)
-                # KILN: snapshot previews run on a fixed seed when one is given, so
-                # the thumbnails across a run differ only by how far training got.
-                # The training RNG stream is saved and restored around the sample --
-                # reseeding in place would rewind the noise training itself draws from.
-                sample_seed = getattr(self.opts, "sampleSeed", -1)
-                seeding = sample_seed is not None and sample_seed >= 0
-                cpu_rng = torch.get_rng_state() if seeding else None
-                cuda_rng = (torch.cuda.get_rng_state_all()
-                            if seeding and torch.cuda.is_available() else None)
-                if seeding:
-                    torch.manual_seed(sample_seed)
-                    if torch.cuda.is_available():
-                        torch.cuda.manual_seed_all(sample_seed)
-                try:
-                  with torch.no_grad():
-                    if self.ddim is None:
-                      all_images_list = list(map(lambda n: self.model.sample(batch_size=n), batches))
-                    else:
-                      all_images_list = list(map(lambda n: self.ddim.sample_loop(bs=n), batches))
-                      #all_images_list = list(self.ddim.sample_loop())
-                finally:
-                  if cpu_rng is not None:
-                    torch.set_rng_state(cpu_rng)
-                  if cuda_rng is not None:
-                    torch.cuda.set_rng_state_all(cuda_rng)
+                with torch.no_grad():
+                  if self.ddim is None:
+                    all_images_list = list(map(lambda n: self.model.sample(batch_size=n), batches))
+                  else:
+                    all_images_list = list(map(lambda n: self.ddim.sample_loop(bs=n), batches))
+                    #all_images_list = list(self.ddim.sample_loop())
 
                 all_images = torch.cat(all_images_list, dim=0)
                 #all_images = (all_images + 1) * 0.5

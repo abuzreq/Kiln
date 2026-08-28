@@ -3,10 +3,12 @@
 # not pay for the standalone gradio reference apps (gradio pulls fastapi,
 # uvicorn, pandas and more -- several hundred MB Kiln never imports).
 #
-# requirements.txt is left exactly as upstream ships it so that the re-vendoring
-# procedure in UPSTREAM.md stays a straight copy. If you re-vendor a newer
-# xurdif, diff its requirements.txt against this file and add anything new that
-# xurdif.py / xurdiftrainer.py / postproc*.py import.
+# requirements.txt next to this file is Kiln-authored: upstream ships no
+# requirements file at all, only a prose list in its README. It stays because it
+# is still the accurate dependency list for the vendored modules, including the
+# gradio reference apps. If you re-vendor a newer xurdif, diff what
+# xurdif.py / xurdiftrainer.py / postproc*.py import against this file and add
+# anything new.
 #
 # torch/torchvision are unpinned on purpose: an already-installed CUDA build
 # must be left alone, and pip will NOT downgrade it to a CPU wheel.

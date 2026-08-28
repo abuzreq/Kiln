@@ -2,6 +2,7 @@ import React from "react";
 import { Slider, Select, DeleteBtn, Tooltip } from "./ui.jsx";
 import BendFootprint from "./BendFootprint.jsx";
 import { explicitTargets } from "../bendTargets.js";
+import { bendAmount } from "../bendSynopsis.js";
 
 function defaultsFor(opDef) {
   const p = {};
@@ -55,6 +56,7 @@ function BendCard({
   const amountDef = amountKey ? (opDef?.params || []).find((p) => p.name === amountKey) : null;
   const extraParams = (opDef?.params || []).filter((p) => p.name !== amountKey);
   const explicit = explicitTargets(b, nodes);
+  const amount = bendAmount(b, opDef);
 
   return (
     <div className={`bend-card ${b.active ? "" : "dim"} ${focused ? "focused" : "collapsed"}`}>
@@ -72,20 +74,36 @@ function BendCard({
               aria-label="Enable this bend" />
           </label>
           <span className="bend-card-chev">{focused ? "▾" : "▸"}</span>
-          <select
-            value={b.op}
-            onClick={(e) => e.stopPropagation()}
-            onChange={(e) => {
-              const nd = ops.find((o) => o.name === e.target.value);
-              update(b.id, { op: e.target.value, params: defaultsFor(nd), ...scheduleFor(nd) });
-            }}
-            className="grow"
-          >
-            {ops.map((o) => <option key={o.name} value={o.name}>{o.label}</option>)}
-          </select>
-          <Tooltip text={opDef?.help || opDef?.label || ""}>
-            <span className="pill">{opDef?.category}</span>
-          </Tooltip>
+          {/* Collapsed, a card has one job: say what the bend is. The picker
+              only appears once the card is open, where changing the op belongs;
+              squeezed into the closed head it truncated the very name it was
+              there to show. */}
+          {focused ? (
+            <select
+              value={b.op}
+              onClick={(e) => e.stopPropagation()}
+              onChange={(e) => {
+                const nd = ops.find((o) => o.name === e.target.value);
+                update(b.id, { op: e.target.value, params: defaultsFor(nd), ...scheduleFor(nd) });
+              }}
+              className="grow"
+            >
+              {ops.map((o) => <option key={o.name} value={o.name}>{o.label}</option>)}
+            </select>
+          ) : (
+            <span className="bend-card-op grow">
+              <b>{opDef?.label || b.op}</b>
+              {amount != null && <span className="sub"> {amount}</span>}
+            </span>
+          )}
+          {/* The category only earns its space next to the op picker, where it
+              groups the choices. Beside a named bend it repeats what the name
+              already says, and it was crowding out longer labels. */}
+          {focused && (
+            <Tooltip text={opDef?.help || opDef?.label || ""}>
+              <span className="pill">{opDef?.category}</span>
+            </Tooltip>
+          )}
           <div className="row gap-1" onClick={(e) => e.stopPropagation()}>
             <button type="button" className="btn ghost sm" onClick={() => move(i, -1)} aria-label="Move up">↑</button>
             <button type="button" className="btn ghost sm" onClick={() => move(i, 1)} aria-label="Move down">↓</button>
@@ -204,8 +222,7 @@ export default function BendEditor({
         <button type="button" className="btn sm primary" onClick={addBend} disabled={!ops.length}>+ Add bend</button>
       </div>
       <p className="hint mb-0">
-        Each bend hooks targeted layers and rewrites activations as they pass through. Pick a bend to
-        edit it — the map then shows and sets that bend&apos;s layers.
+        Pick a bend to edit it; the map then shows and sets its layers.
       </p>
 
       {stack.length === 0 && <div className="empty">No bends yet. Click a layer on the map, or add one here.</div>}

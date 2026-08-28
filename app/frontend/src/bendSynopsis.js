@@ -26,15 +26,24 @@ export function opIndex(ops) {
   return Object.fromEntries((ops || []).map((o) => [o.name, o]));
 }
 
-function bendLine(b, i, opMap) {
-  const def = opMap?.[b.op];
-  const params = b.params || {};
-  // The catalog knows which parameter is the headline one; guessing got it
-  // wrong for most ops (they use std / factor / angle / mix / gain / t / k).
-  const amountKey = def?.amount_param
+/** The headline number for a bend, or null when the op has no parameters.
+ *
+ *  The catalog names the headline parameter (``amount_param``); guessing from
+ *  the params got it wrong for most ops, which use std / factor / angle / mix /
+ *  gain / t / k rather than anything called "amount".
+ */
+export function bendAmount(b, def) {
+  const params = b?.params || {};
+  const key = def?.amount_param
     || Object.keys(params).find((k) => ["amount", "value", "strength"].includes(k))
     || Object.keys(params)[0];
-  const amount = amountKey != null ? params[amountKey] : null;
+  const v = key != null ? params[key] : null;
+  return v == null ? null : String(v);
+}
+
+function bendLine(b, i, opMap) {
+  const def = opMap?.[b.op];
+  const amount = bendAmount(b, def);
   const amt = amount != null ? ` ${amount}` : "";
   const name = def?.label || b.op || "bend";
   const sched = (b.step_start != null && b.step_end != null && (b.step_start > 0 || b.step_end < 1))
@@ -54,7 +63,11 @@ export function bendPresetSynopsis(preset, ops) {
   const head = active === bends.length
     ? `${bends.length} bend${bends.length === 1 ? "" : "s"}:`
     : `${active} active of ${bends.length} bends:`;
-  return `${head}\n${bends.map((b, i) => bendLine(b, i, opMap)).join("\n")}`;
+  // A preset's own description first, where it has one: on the starter recipes
+  // that sentence is the whole point, and the op list underneath is the detail.
+  const notes = (preset?.notes || "").trim();
+  const body = `${head}\n${bends.map((b, i) => bendLine(b, i, opMap)).join("\n")}`;
+  return notes ? `${notes}\n\n${body}` : body;
 }
 
 /** One-line version for inline hints. */

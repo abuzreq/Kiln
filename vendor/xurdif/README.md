@@ -69,3 +69,31 @@ Look at the terminal output for training progress, usually the loss should decre
 
 In the checkpoint folder you will see both the saved model files as well as sample output from each stored model file. You can the copy selected models into your models folder... just rename them into something meaningful so that you will be able to differentiate between different models in the gradio app.
 
+
+## Update 27 July 2026
+
+Added new files instead of committing them as new versions:
+
+xurdiftrainer2b.py: 
+* supports edge aware loss for learning noisy or edgy images
+* masked training... appears to learn faster or better
+* usage example:
+```
+python xurdiftrainer2b.py --images <path_to_train_images> --steps 1000 --trainstep 280000 --accum 10 --dir <output_folder> --imageSize 512   --batchSize 8 --saveEvery 100 --nsamples 2 --model tinyunet_with_attention3 --lr 5e-5 --losstype l1 --mults 1 2 4 4 8 --pred x0 --use_mask  --fit crop --rot --flip --use_edges [--load <model_path_for_resume>]
+```
+
+xurdif2.py:
+* basic diffusion library needed for the new trainer
+
+xurdiffer23t2.py:
+* command line tool for generating images, typically using init image (or a folder of images)
+* usage example
+```
+python xurdiffer23t2.py --dir <output_path>  --eta 0.5 --steps 50   --lr 1   --image <init_image_path>  --ema --rsort   --h 1024 --w 1536 --mul 0.98 --postproc --eqhist 0.4 --noise 0.02 --unsharp 0.4 --text "text_prompt" --textw 100 --lr 1  --load <model_path>  --skip 33 --img_prompt <image_prompt_path> --imgpw 100 
+```
+xurdifstile2d.py:
+* tiled generation, usually meaningful when using init images
+* usage example
+```
+python xurdifstile2d.py --dir <output_path> --eta 0.5 --steps 200   --lr 0  --load <model_path> --image <init_image_path> --skip 40  --ema --rsort  --model tinyunet_with_attention3   --h 2048 --w 3072 --tilemin 512 --grid --mul 0.9 --icontrast 1.5 --gamma 1.5 --postproc --noise 0.1 --unsharp 0.4
+```

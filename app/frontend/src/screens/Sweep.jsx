@@ -25,7 +25,7 @@ const AXIS_KINDS = {
 
 
 
-const SAMPLER_CHOICES = ["unipc", "dpmpp", "deis", "ddim"];
+const SAMPLER_CHOICES = ["dpmpp", "unipc", "deis", "ddim"];
 
 export function axisKind(param) {
   return AXIS_KINDS[param] || "linear";
@@ -265,7 +265,7 @@ export default function SweepPanel() {
     if (!sweptKeys.includes("seed")) {
       out.push(sampleParams.seed === "" ? "a random seed" : `Seed (${sampleParams.seed})`);
     }
-    if (!sweptKeys.includes("sampler")) out.push(samplerLabel(sampleParams.sampler || "unipc"));
+    if (!sweptKeys.includes("sampler")) out.push(samplerLabel(sampleParams.sampler || "dpmpp"));
     if (!sweptKeys.includes("image_size")) out.push(`size ${sampleParams.image_size}px`);
     return out;
   }, [sweptKeys, sampleParams]);

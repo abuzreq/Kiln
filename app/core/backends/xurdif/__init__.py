@@ -32,6 +32,37 @@ def cosine_betas(timesteps: int):
     return torch.clip(betas, 0, 0.999).numpy()
 
 
+def _clean_mults(raw, image_size: int) -> list:
+    """Channel multipliers, validated before they can reach the subprocess.
+
+    This is the one field the trainer took on trust. A bad value did not fail
+    here -- it failed several seconds later inside the training subprocess, as a
+    shape mismatch on the UNet's skip concatenation, surfacing to the user as a
+    stack trace in the log panel. Each entry halves the feature map and the skips
+    concatenate, so the image size has to divide by ``2 ** len(mults)``.
+    """
+    from app.core.engine.sampler import align_size
+    from utils.exceptions import ValidationError
+
+    mults = raw or [1, 2, 2, 2]
+    if isinstance(mults, str):
+        mults = [x for x in (part.strip() for part in mults.split(",")) if x]
+    try:
+        mults = [int(m) for m in mults]
+    except (TypeError, ValueError):
+        raise ValidationError(
+            "channel multipliers must be whole numbers, e.g. 1,2,2,2")
+    if not 1 <= len(mults) <= 8 or any(m < 1 for m in mults):
+        raise ValidationError(
+            "channel multipliers must be 1-8 positive whole numbers, e.g. 1,2,2,2")
+    step = 2 ** len(mults)
+    if image_size % step:
+        raise ValidationError(
+            f"image size {image_size} must divide by {step} for {len(mults)} "
+            f"channel multipliers - try {align_size(image_size, mults)}")
+    return mults
+
+
 class XurdifBackend(Backend):
     name = "xurdif"
     aliases = ("xur",)
@@ -168,11 +199,12 @@ class XurdifBackend(Backend):
             from utils.exceptions import NotFoundError
 
             raise NotFoundError("starting checkpoint not found")
+        image_size = as_int(body.get("image_size", 512), "image_size", 32, 4096)
         return TrainConfig(
             dataset=str(dataset),
             out_dir=str(out_dir),
             name=body.get("model_name", Path(str(out_dir)).name),
-            image_size=as_int(body.get("image_size", 512), "image_size", 32, 4096),
+            image_size=image_size,
             batch_size=as_int(body.get("batch_size", 8), "batch_size", 1, 64),
             diffusion_steps=as_int(body.get("diffusion_steps", 1000), "diffusion_steps", 10, 4000),
             train_steps=as_int(body.get("train_steps", 280000), "train_steps", 100, 5_000_000),
@@ -183,7 +215,7 @@ class XurdifBackend(Backend):
             ssimw=as_float(body.get("ssimw", 0.0), "ssimw", 0, 100),
             pred=body.get("pred", "x0"),
             mtype=body.get("mtype", "tinyunet_with_attention3"),
-            mults=body.get("mults", [1, 2, 2, 2]),
+            mults=_clean_mults(body.get("mults"), image_size),
             fit=body.get("fit", "resize"),
             nsamples=as_int(body.get("nsamples", 1), "nsamples", 1, 16),
             sample_seed=as_int(body.get("sample_seed", 42), "sample_seed", -1, 2 ** 31 - 1),
@@ -191,6 +223,7 @@ class XurdifBackend(Backend):
             amp=bool(body.get("amp", False)),
             resume=resume,
             nostrict=bool(body.get("nostrict", False)),
+            edge_loss=bool(body.get("edge_loss", True)),
         )
 
     def start_training(self, cfg):

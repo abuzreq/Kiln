@@ -2,7 +2,7 @@
 
 Ported and generalized from the vendored ``xurdifapp3.py`` gradio sampler:
 - DDIM sampling with a cosine-beta schedule (via diffusers ``DDIMScheduler``)
-- optional CLIP text / image-prompt guidance in x0-space
+- optional CLIP text / image-prompt guidance in x0-space (see ``guide_step``)
 - init-image mixing (img2img), skip / noise level / "simplify"
 - a non-destructive post-processing chain
 - per-step streaming (yields a PIL image each denoise step)
@@ -125,7 +125,12 @@ SAMPLERS = {
 # silently alter how every saved recipe replays. New sessions get UniPC via the
 # frontend default instead.
 DEFAULT_SAMPLER = "ddim"
-RECOMMENDED_SAMPLER = "unipc"
+# DPM-Solver++ over UniPC: it is the only fast solver whose multistep history can
+# be reset (see _reset_solver_state), which is what lets a region fill resample
+# (RePaint's jumps back up the schedule). UniPC matches it on plain generation
+# and then cannot harmonize a fill at all, so recommending it meant most people
+# met inpainting through the solver least able to do it.
+RECOMMENDED_SAMPLER = "dpmpp"
 
 
 def sampler_catalog() -> list[dict]:
@@ -154,7 +159,12 @@ class SampleParams:
     batch_size: int = 1        # multi-seed variations in one GPU run (1–4)
     # guidance
     text: str = ""
-    text_weight: float = 0.0
+    # Only ever a *balance* against an image prompt. It cannot act as an on/off
+    # switch or a strength: the guidance gradient is RMS-normalised before the
+    # step (see ``guide_step``), which divides a lone text weight straight back
+    # out -- 10 and 90 give byte-identical images. A non-empty ``text`` is what
+    # turns text guidance on, and ``guidance_step`` is how hard it pulls.
+    text_weight: float = 1.0
     guidance_step: float = 0.02
     guidance_power: float = 1.0
     spherical: bool = False
@@ -163,6 +173,13 @@ class SampleParams:
     # init image
     noise_level: float = 1.0    # 'mul' — how much noise vs init image
     simplify: float = 0.0       # 'weak'
+    # Scales the *initial* noise only (1.0 = untouched). Applies to every start
+    # the sampler can make -- pure noise, an init image's added noise, and the
+    # noise a mask is filled with -- because all three are drawn from the same
+    # tensor. Below 1 the run starts with less variance than the model was
+    # trained to expect, which reads as calmer, flatter, more washed-out output
+    # (and, with an init image, as less departure from it).
+    attenuation: float = 1.0
     # output
     postproc: dict = field(default_factory=dict)
     device: str = "auto"
@@ -171,6 +188,15 @@ class SampleParams:
     # 1 keeps the single-pass behaviour every existing recipe was made with.
     resample: int = 1
     jump_length: int = 0        # 0 = derive from step count
+
+
+# Guidance settings a paused run can be resumed with. Kept together because the
+# whole set is re-read at once (see ``_build_guidance``) -- changing any one of
+# them means re-encoding, so there is no point tracking them separately.
+GUIDANCE_KEYS = (
+    "text", "text_weight", "guidance_step", "guidance_power", "spherical",
+    "cuts", "image_prompt_weight",
+)
 
 
 def _make_betas(timesteps: int):
@@ -184,16 +210,159 @@ class _Clip:
     """Lazily-loaded CLIP model + cutout sampler for guidance."""
 
     _inst = None
+    _cutter = None
 
     @classmethod
     def get(cls, device):
+        torch = _torch()
         if cls._inst is None:
             import clip
 
             model, _ = clip.load("ViT-B/32", device=device, jit=False)
-            model = model.eval()
-            cls._inst = (model, clip)
+            cls._inst = (model.eval(), clip)
+            return cls._inst
+        model, clip_mod = cls._inst
+        want = torch.device(device).type
+        if next(model.parameters()).device.type != want:
+            # The cache outlives a device switch -- a CPU run after a CUDA one,
+            # or the reverse. clip.load keeps fp16 weights on GPU and casts to
+            # fp32 on CPU (where half is slow and partly unimplemented), so
+            # match that rather than only moving the tensors.
+            model = model.to(device)
+            model = model.float() if want == "cpu" else model.half()
+            cls._inst = (model, clip_mod)
         return cls._inst
+
+    @classmethod
+    def cutter(cls):
+        """The vendored GPU cutout sampler that CLIP is scored over.
+
+        CLIP sees 224px crops, never the frame itself. Scoring one downscaled
+        copy of the image would guide composition and nothing else; a spread of
+        random crops is what lets a prompt reach local detail. ``cuts`` slides
+        between the two -- 0 is many small crops (detail), 1 is few large ones
+        (structure).
+        """
+        if cls._cutter is None:
+            from ._vendor import ensure_on_path
+
+            ensure_on_path()
+            from cutouts25 import CutoutConfig, GpuCutoutSampler
+
+            cls._cutter = GpuCutoutSampler(CutoutConfig())
+        return cls._cutter
+
+
+def spherical_dist_loss(x, y):
+    """Great-circle distance between two CLIP embeddings.
+
+    The alternative to cosine distance. Same minimum, but its gradient does not
+    flatten as the embeddings converge, so a strong prompt keeps pulling right
+    to the end of the run instead of stalling once it is roughly satisfied.
+    """
+    import torch.nn.functional as F
+
+    x = F.normalize(x, dim=-1)
+    y = F.normalize(y, dim=-1)
+    return (x - y).norm(dim=-1).div(2).arcsin().pow(2).mul(2)
+
+
+def _clip_cutouts(img01, cuts: float):
+    """CLIP-normalised crops of a (B,3,H,W) image in [0,1], gradients intact."""
+    torch = _torch()
+    cutter = _Clip.cutter()
+    # GpuCutoutSampler asserts a single image, so batch items are cut separately
+    # and stacked. The losses stay effectively per-item anyway: each crop's
+    # gradient flows back only into the item it was cut from.
+    return torch.cat(
+        [cutter.sample(img01[b:b + 1], slider=float(cuts)) for b in range(img01.shape[0])],
+        dim=0,
+    )
+
+
+def _encode_cutouts(clip_model, crops):
+    """Encode crops with CLIP, whatever precision the model was loaded at.
+
+    ``clip.load`` keeps fp16 weights on CUDA and casts to fp32 only on CPU, so
+    handing it a float32 batch raises a dtype mismatch on GPU. The embedding
+    comes back as fp32 either way -- the guidance math wants the headroom.
+    """
+    dtype = next(clip_model.parameters()).dtype
+    return clip_model.encode_image(crops.to(dtype)).float()
+
+
+def _embed_loss(target_enc, img_enc, spherical: bool):
+    torch = _torch()
+    if spherical:
+        return spherical_dist_loss(target_enc, img_enc).mean()
+    return (1 - torch.cosine_similarity(target_enc, img_enc)).mean()
+
+
+def _text_weight(params) -> float:
+    """The prompt's weight against an image prompt, never zero.
+
+    A prompt is switched on by existing, so a stored 0 (the old default, and
+    what any recipe written before that carried) must not silently mute it.
+    """
+    w = float(getattr(params, "text_weight", 1.0) or 0.0)
+    return w if w > 0 else 1.0
+
+
+def clip_grad(x0, clip_model, params, txt_enc=None, imgp_enc=None):
+    """``dL/dx0`` for the active CLIP losses, or None if nothing is guiding.
+
+    The gradient stops at x0; it is deliberately *not* backpropagated through
+    the UNet into x. Stepping x0 and re-deriving epsilon from it (see
+    ``guide_step``) points the same way at a fraction of the memory, and it
+    leaves the model's forward pass free to run under fp16 autocast -- with
+    bending hooks attached -- without any of that landing in an autograd graph.
+    """
+    torch = _torch()
+    with torch.enable_grad():
+        x0 = x0.detach().float().requires_grad_(True)
+        # CLIP wants [0,1]; x0 lives in [-1,1] and can overshoot early on.
+        crops = _clip_cutouts((x0.clamp(-1, 1) + 1) * 0.5, params.cuts)
+        img_enc = _encode_cutouts(clip_model, crops)
+
+        loss = None
+        for enc, weight in ((txt_enc, _text_weight(params)),
+                            (imgp_enc, params.image_prompt_weight)):
+            if enc is None or float(weight) <= 0:
+                continue
+            term = float(weight) * _embed_loss(enc, img_enc, params.spherical)
+            loss = term if loss is None else loss + term
+        if loss is None:
+            return None
+        grad = torch.autograd.grad(loss, x0)[0]
+    return torch.nan_to_num(grad.detach(), nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def guide_step(x, eps, x0, alpha, params, clip_model, txt_enc=None, imgp_enc=None):
+    """Nudge x0 toward the prompt, then re-derive the epsilon the solver is fed.
+
+    Working in x0-space is what keeps this solver-agnostic: every scheduler in
+    the catalogue takes epsilon, so guidance has to end as a modified epsilon
+    rather than as a direct edit of x.
+
+    Two knobs shape the step. ``guidance_step`` is how far to move along the
+    gradient, which is RMS-normalised first -- raw CLIP gradient magnitudes vary
+    by orders of magnitude between prompts, and without normalising, a value
+    that works for one prompt tears another apart. ``guidance_power`` ramps that
+    step with sqrt(alpha_bar), the signal strength: at 0 guidance is constant
+    across the run, and the higher it goes the longer guidance holds off. Early
+    steps are nearly pure noise, and pushing CLIP hard against noise bakes in
+    its adversarial texture rather than the subject.
+    """
+    torch = _torch()
+    grad = clip_grad(x0, clip_model, params, txt_enc, imgp_enc)
+    if grad is None:
+        return eps, x0
+    rms = grad.flatten(1).pow(2).mean(dim=1).sqrt().view(-1, 1, 1, 1) + 1e-8
+    scale = float(params.guidance_step) * alpha.sqrt() ** float(params.guidance_power)
+    x0 = x0 - scale * (grad / rms)         # descent: the losses are distances
+    beta = (1 - alpha).clamp(min=1e-8)
+    eps = ((x.float() - alpha.sqrt() * x0) / beta.sqrt()).to(eps.dtype)
+    return eps, x0
 
 
 def _postproc_fn():
@@ -278,6 +447,17 @@ def undo_step(sched, x, t, stride, torch):
     return x
 
 
+def alpha_bar(alphas_cumprod, t_batch, device):
+    """``ᾱ`` for a batch of timesteps, shaped (B,1,1,1) and always fp32.
+
+    The one place the schedule is read, so the denoise loop and CLIP guidance
+    cannot end up disagreeing about the noise level of the step they are on.
+    """
+    torch = _torch()
+    ac = alphas_cumprod[t_batch.cpu()].to(device=device, dtype=torch.float32)
+    return ac.view(-1, 1, 1, 1)
+
+
 def split_prediction(out, x, alphas_cumprod, t_batch, pred, device):
     """Return ``(eps, x0)`` from a raw model output, whatever the model predicts.
 
@@ -286,12 +466,10 @@ def split_prediction(out, x, alphas_cumprod, t_batch, pred, device):
     ``backends/hfdiffusers``), while x0 is what gets displayed. Shared with the
     region-fill loop in ``engine/inpaint.py`` so the two cannot drift apart.
     """
-    torch = _torch()
     out = out.float()
     x_f = x.float()
-    ac = alphas_cumprod[t_batch.cpu()].to(device=device, dtype=torch.float32)
-    alpha = ac.view(-1, 1, 1, 1)
-    beta = (1 - ac).view(-1, 1, 1, 1).clamp(min=1e-8)
+    alpha = alpha_bar(alphas_cumprod, t_batch, device)
+    beta = (1 - alpha).clamp(min=1e-8)
     if pred == "eps":
         eps = out
         x0 = (x_f - beta.sqrt() * eps) / alpha.sqrt()
@@ -409,7 +587,61 @@ class Sampler:
         # fill); plain generation still uses the square ``image_size``.
         H = int(height or params.image_size)
         W = int(width or params.image_size)
+        # Guidance is set up *before* the seeded noise is drawn, and the order
+        # matters: loading CLIP allocates random tensors, so doing it after
+        # torch.manual_seed advanced the global stream by a different amount on
+        # the first guided run of a process than on every one after it. Same
+        # seed, same settings, different image -- verified, and reproducibility
+        # is the one promise every capture in Kiln makes.
+        # Guidance is rebuilt from scratch whenever its settings change, rather
+        # than patched, so a mid-run prompt swap cannot leave a stale embedding
+        # paired with a new weight. Encoding a prompt is milliseconds next to a
+        # denoise step, so there is nothing to save by being cleverer.
+        def _build_guidance(p):
+            """``(clip_model, txt_enc, imgp_enc)`` for ``p``, or a triple of None."""
+            wants_text = bool((p.text or "").strip())
+            wants_image = image_prompt is not None and p.image_prompt_weight > 0
+            if not (wants_text or wants_image):
+                return None, None, None
+            try:
+                clip_model, clip_mod = _Clip.get(device)
+                t_enc = None
+                if wants_text:
+                    tok = clip_mod.tokenize(p.text).to(device)
+                    t_enc = clip_model.encode_text(tok).detach().float()
+                i_enc = None
+                if wants_image:
+                    import torchvision.transforms.functional as TF
+
+                    ip = TF.to_tensor(
+                        image_prompt.convert("RGB").resize((W, H))
+                    ).to(device).unsqueeze(0).clamp(0, 1)
+                    with torch.no_grad():
+                        # Cut the reference the same way the sample will be cut,
+                        # or the two embeddings describe different things.
+                        i_enc = _encode_cutouts(
+                            clip_model, _clip_cutouts(ip, p.cuts)).detach()
+                return clip_model, t_enc, i_enc
+            except Exception as e:  # noqa: BLE001
+                log.warning("guidance disabled: %s", e)
+                return None, None, None
+
+        # Guidance reads its settings from here, not from ``params``: a paused run
+        # can be resumed with a different prompt, and the caller's params (which
+        # the recipe card was built from) must not change under it.
+        gparams = params
+        clip_ctx, txt_enc, imgp_enc = _build_guidance(gparams)
+        guided = clip_ctx is not None and (txt_enc is not None or imgp_enc is not None)
+
         init_noise = _batched_init_noise(torch, bs, H, W, device, params.seed)
+        # Attenuation scales the seed noise once, here, before it is used. Every
+        # way a run can start draws from this tensor -- pure noise below, an init
+        # image's added noise, and the noise a mask is filled with -- so scaling
+        # it covers all of them without a branch per case.
+        atten = 1.0 if params.attenuation is None else float(params.attenuation)
+        atten = max(0.0, min(1.0, atten))
+        if abs(atten - 1.0) > 1e-6:
+            init_noise = init_noise * atten
 
         orig = None
         mask_t = None
@@ -439,23 +671,6 @@ class Sampler:
             )
             x = mask_t * noised + (1 - mask_t) * orig
 
-        # optional guidance setup
-        use_guidance = (params.text and params.text_weight > 0) or (
-            image_prompt is not None and params.image_prompt_weight > 0
-        )
-        clip_ctx = None
-        txt_enc = None
-        if use_guidance:
-            try:
-                clip_model, clip_mod = _Clip.get(device)
-                clip_ctx = clip_model
-                if params.text and params.text_weight > 0:
-                    tok = clip_mod.tokenize(params.text).to(device)
-                    txt_enc = clip_model.encode_text(tok).detach().float()
-            except Exception as e:  # noqa: BLE001
-                log.warning("guidance disabled: %s", e)
-                use_guidance = False
-
         if bend_runtime is not None:
             bend_runtime.attach(model)
             bend_runtime.set_total(total)
@@ -472,8 +687,22 @@ class Sampler:
 
         def _apply_updates(updates: dict):
             nonlocal eta, noise_level, steps, remaining, total, sched, skip
+            nonlocal gparams, clip_ctx, txt_enc, imgp_enc, guided
             if not updates:
                 return
+            # Guidance settings are live: a run can be paused, given a different
+            # prompt, and resumed onto it. An empty prompt or a zero weight turns
+            # guidance off the same way, so "" is a meaningful value here and only
+            # None means "not being set".
+            live_guidance = {k: updates[k] for k in GUIDANCE_KEYS
+                             if k in updates and updates[k] is not None}
+            if live_guidance:
+                from dataclasses import replace
+
+                gparams = replace(gparams, **live_guidance)
+                clip_ctx, txt_enc, imgp_enc = _build_guidance(gparams)
+                guided = clip_ctx is not None and (
+                    txt_enc is not None or imgp_enc is not None)
             if "eta" in updates and updates["eta"] is not None:
                 eta = float(updates["eta"])
             if "noise_level" in updates and updates["noise_level"] is not None:
@@ -549,6 +778,14 @@ class Sampler:
                         out = model(x, t_batch)
                     eps, x0 = split_prediction(
                         out, x, sched.alphas_cumprod, t_batch, pred, device)
+                    if guided:
+                        # Guidance edits x0 and hands back the epsilon implied by
+                        # the edit, so the solver step below is untouched by it.
+                        eps, x0 = guide_step(
+                            x, eps, x0,
+                            alpha_bar(sched.alphas_cumprod, t_batch, device),
+                            gparams, clip_ctx, txt_enc, imgp_enc,
+                        )
                     # Only DDIM-style solvers take eta, and the multistep ones do
                     # not return pred_original_sample — but we already computed x0
                     # above, so use that and stay scheduler-agnostic.

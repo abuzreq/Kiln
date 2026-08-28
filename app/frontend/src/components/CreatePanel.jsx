@@ -4,7 +4,8 @@ import { useApp } from "../state.jsx";
 import { usePlay } from "../screens/playContext.jsx";
 import { Slider, Select, Num, Disclose } from "./ui.jsx";
 import {
-  buildSamplePayload, buildInpaintPayload, changeToParams, effectiveSteps, fillSizeFor, solverCanResample,
+  buildSamplePayload, buildInpaintPayload, changeToParams, effectiveSteps, skippedSteps,
+  fillSizeFor, solverCanResample, LIVE_PARAM_KEYS,
   liveEditLabels, joinLabels } from "../sampleSettings.jsx";
 import {
   contrastPreview, compositePostprocWithMask, countMaskPixels,
@@ -24,8 +25,6 @@ const SPLIT_SIDES = [
   { id: "foreground", label: "Side A", luminance: "Darker", contrast: "Detailed" },
   { id: "background", label: "Side B", luminance: "Lighter", contrast: "Flat" },
 ];
-
-const LIVE_PARAM_KEYS = ["steps", "seed", "eta", "noise_level"];
 
 function isIdentityPostproc(pp) {
   if (!pp) return true;
@@ -57,7 +56,7 @@ export default function CreatePanel() {
     maskTool, setMaskTool, wandTolerance, setWandTolerance,
     clearMask, getMaskDataUrl, applyContrastMask, maskRef, maskVersion, frameCard,
     undoMask, clearMaskUndo, canUndoMask, tab,
-    job, setJob, genRunning, genPaused,
+    job, setJob, genRunning, genPaused, canvasIsBlank,
   } = usePlay();
 
   // The same model object Play hands the settings panel — needed to tell which
@@ -77,8 +76,21 @@ export default function CreatePanel() {
   const [srBusy, setSrBusy] = useState(false);
   const [genChange, setGenChange] = useState(0.7);
   const [regionChange, setRegionChange] = useState(0.65);
-  // RePaint resampling. 1 = off, which is how every fill has worked until now.
-  const [resample, setResample] = useState(1);
+
+  // A fill on a blank canvas has to run the whole schedule. Change works by
+  // skipping the early, high-noise steps to preserve what is already there --
+  // and on empty pixels there is nothing worth preserving, so a partial run
+  // just hands back the blank it started from. Snapped to full whenever the
+  // canvas is blank; it stays editable, with a warning below if it is turned
+  // down. Keyed on the frame as well, so pressing New canvas restores full
+  // Change rather than carrying a turned-down value onto a fresh blank.
+  useEffect(() => {
+    if (canvasIsBlank) setRegionChange(1);
+  }, [canvasIsBlank, frame]);
+  // RePaint resampling, on at 2 passes by default: the fill agrees with what
+  // surrounds it far better than in a single pass, and most of that gain is
+  // already there at two. 1 is off, which is how fills used to work.
+  const [resample, setResample] = useState(2);
   const canResample = solverCanResample(sampleParams.sampler);
   const [feather, setFeather] = useState(8);
   const [variations, setVariations] = useState(1);
@@ -338,14 +350,16 @@ export default function CreatePanel() {
     } catch (e) { toast(e.message, "error"); setProgress(null); setJob(null); }
   };
 
+  // What the live settings were when the run was paused. Resume sends only what
+  // actually changed, so this has to cover every key the panel lets you edit --
+  // including the guidance ones, which is how a prompt swap reaches the sampler.
+  const snapshotLive = () => Object.fromEntries(
+    LIVE_PARAM_KEYS.map((k) => [k, sampleParams[k]]),
+  );
+
   const pause = async () => {
     if (!job) return;
-    pausedSnapshot.current = {
-      steps: sampleParams.steps,
-      seed: sampleParams.seed,
-      eta: sampleParams.eta,
-      noise_level: sampleParams.noise_level,
-    };
+    pausedSnapshot.current = snapshotLive();
     try {
       await api.post(`/jobs/${job.id}/pause`);
       // Name only the controls actually on screen: Create maps its Change slider
@@ -368,12 +382,7 @@ export default function CreatePanel() {
     if (updates.seed === "") updates.seed = null;
     try {
       await api.post(`/jobs/${job.id}/resume`, updates);
-      pausedSnapshot.current = {
-        steps: sampleParams.steps,
-        seed: sampleParams.seed,
-        eta: sampleParams.eta,
-        noise_level: sampleParams.noise_level,
-      };
+      pausedSnapshot.current = snapshotLive();
     } catch (e) { toast(e.message, "error"); }
   };
 
@@ -452,8 +461,14 @@ export default function CreatePanel() {
               step={0.05}
               onChange={setGenChange}
               fmt={(v) => `${v < 0.3 ? "subtle" : v < 0.7 ? "medium" : "strong"} · ${effectiveSteps(v, sampleParams.steps, true)} steps`}
-              tip={"How far to move from the init image. Subtle keeps more of it; strong invents more. "
-                + "It also sets how far down the noise schedule the run starts, so lower values run fewer steps."
+              tip={"How far to move from the init image. Subtle keeps more of it; strong invents more."
+                + "\n\nWhat it does is skip steps. The first steps of the schedule are the high-noise "
+                + "ones that would wipe the init image out, so the run starts partway down instead: the "
+                + "lower the Change, the more of those steps are skipped and the less the init image is "
+                + "altered. Right now it skips "
+                + `${skippedSteps(genChange, sampleParams.steps, true)} of ${sampleParams.steps} steps`
+                + ", which is why the run is shorter than the Steps box says. It also sets how much "
+                + "extra noise is mixed in at each remaining step."
                 + "\n\nThis one governs the whole image. Region has its own Change for a painted area — "
                 + "only one applies, depending on whether a mask is painted."}
             />
@@ -612,8 +627,14 @@ export default function CreatePanel() {
                 step={0.05}
                 onChange={setRegionChange}
                 fmt={(v) => `${v < 0.3 ? "subtle" : v < 0.7 ? "medium" : "strong"} · ${effectiveSteps(v, sampleParams.steps, true)} steps`}
-                tip={"How strongly the model restyles the painted region. It also sets how far down the "
-                  + "noise schedule the fill starts, so lower values run fewer steps."
+                tip={"How strongly the model restyles the painted region."
+                  + "\n\nWhat it does is skip steps. The first steps of the schedule are the high-noise "
+                  + "ones that would wipe out what is already there, so the fill starts partway down "
+                  + "instead: the lower the Change, the more of those steps are skipped and the less the "
+                  + "region is altered. Right now it skips "
+                  + `${skippedSteps(brushHard ? 1 : regionChange, sampleParams.steps, true)} of ${sampleParams.steps} steps`
+                  + ", which is why the fill is shorter than the Steps box says. It also sets how much "
+                  + "extra noise is mixed in at each remaining step."
                   + "\n\nThis one governs the painted area only. Generate has its own Change for the whole "
                   + "image — only one applies, depending on whether a mask is painted."
                   + (hasMask ? "" : "\n\nNothing is painted yet, so this has no effect right now.")}
@@ -624,6 +645,13 @@ export default function CreatePanel() {
                 tip="Soft edge blend for the inpaint mask." />
             </div>
           </div>
+        )}
+        {canvasIsBlank && !brushHard && regionChange < 1 && (
+          <p className="callout mb-2">
+            The canvas is blank, so anything below full Change keeps most of the empty
+            pixels — a fill needs the whole schedule when there is nothing underneath
+            to preserve.
+          </p>
         )}
 
         <Slider
@@ -636,9 +664,9 @@ export default function CreatePanel() {
           disabled={!canResample}
           fmt={(v) => (v <= 1 ? "off" : `${v} passes · about ${v}x slower`)}
           tip={"Lets the fill settle into what is around it, instead of only matching at the "
-            + "edge. Worth turning on when a fill looks pasted in."
-            + "\n\nEach pass is another trip over the same ground, so higher is slower. "
-            + "3 is a good place to start."
+            + "edge. On at 2 passes by default; turn it off for the old single-pass behaviour, "
+            + "or when you need the speed."
+            + "\n\nEach pass is another trip over the same ground, so higher is slower."
             + "\n\nNeeds the DDIM or DPM-Solver++ sampler."}
         />
         {!canResample && (

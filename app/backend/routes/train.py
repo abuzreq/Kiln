@@ -22,13 +22,15 @@ bp = Blueprint("train", __name__, url_prefix="/api")
 # larger at 512px pushes a laptop card past its VRAM and into a ~10x slowdown.
 CONFIG_PRESETS = {
     "quick-256": {"image_size": 256, "batch_size": 8, "mults": [1, 2, 2, 2], "lr": 4e-4,
-                  "train_steps": 120000, "save_every": 100, "label": "Quick 256 (fast iteration)"},
+                  "train_steps": 120000, "save_every": 1000, "label": "Quick 256",
+                  "blurb": "Fastest way to find out whether your dataset works at all."},
     "standard-512": {"image_size": 512, "batch_size": 4, "mults": [1, 2, 2, 2], "lr": 4e-4,
-                     "train_steps": 280000, "save_every": 100, "label": "Standard 512 (recommended)"},
+                     "train_steps": 280000, "save_every": 1000, "label": "Standard 512",
+                     "blurb": "The default. Good detail without a long wait."},
     "detailed-512": {"image_size": 512, "batch_size": 2, "mults": [1, 2, 2, 4], "lr": 3e-4,
-                     "train_steps": 400000, "save_every": 100, "label": "Detailed 512 (larger model)"},
+                     "train_steps": 400000, "save_every": 1000, "label": "Detailed 512",
+                     "blurb": "A wider network. Most detail, slowest, wants a bigger GPU."},
 }
-
 
 def _gpu_total_mib() -> int:
     dev = get_device_info()
@@ -77,9 +79,51 @@ def train_backends():
     return ok({"backends": out, "default": "xurdif"})
 
 
+def presets_view() -> dict:
+    """The presets, each annotated with what it would cost on this machine.
+
+    Computed here rather than in the browser so the pre-selection and the
+    warning ``POST /train`` raises afterwards come from the same numbers -- they
+    agree by construction instead of by two copies of the same constants.
+
+    Fit uses 0.82, the budget ``recommended_batch`` works to, not the 0.85 alarm
+    line ``_vram_warning`` fires on: pre-select conservatively, warn liberally.
+    Anything else would highlight a preset the same server then calls risky.
+    """
+    total = _gpu_total_mib()
+    out = {}
+    for rank, (pid, p) in enumerate(CONFIG_PRESETS.items()):
+        est = estimate_peak_mib(p["image_size"], p["batch_size"])
+        # ``order`` because Flask sorts JSON keys alphabetically, which would
+        # hand the picker "Detailed, Quick, Standard" -- declaration order here
+        # runs cheapest to richest and is what the list should show.
+        out[pid] = {**p, "estimate_mib": est, "order": rank,
+                    "fits": (est <= 0.82 * total) if total else None}
+    out[_recommended(out, total)]["recommended"] = True
+    return out
+
+
+# The preset to land on when it fits. Not simply the richest that fits: the
+# detailed preset trains a wider network at batch 2, so it *estimates cheaper*
+# than standard at batch 4 and would win a pure "richest that fits" contest on
+# the very laptop GPUs its own blurb warns away from.
+PREFERRED_PRESET = "standard-512"
+
+
+def _recommended(view: dict, total: int) -> str:
+    """Which preset to pre-select for this machine."""
+    cheapest = min(view, key=lambda k: view[k]["estimate_mib"])
+    if not total:
+        return cheapest          # no GPU to measure against; start small
+    if view.get(PREFERRED_PRESET, {}).get("fits"):
+        return PREFERRED_PRESET
+    fitting = [k for k, v in view.items() if v["fits"]]
+    return max(fitting, key=lambda k: view[k]["estimate_mib"]) if fitting else cheapest
+
+
 @bp.get("/train/presets")
 def presets():
-    return ok(CONFIG_PRESETS)
+    return ok(presets_view())
 
 
 @bp.get("/train/continue/info")

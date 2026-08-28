@@ -2,9 +2,10 @@
 from flask import Blueprint, request
 
 from app.core import library
-from app.core.craft import bending, ops
+from app.core.craft import bending, ops, starters
 from app.core.model_manager import manager
 from utils.api_responses import ok, err
+from utils.exceptions import NotFoundError
 from utils.logger import get_logger
 from utils.imaging import data_url, from_data_url, save_with_params
 from utils.validators import require
@@ -33,7 +34,16 @@ def introspect():
 # --- bend presets (Library-backed) -----------------------------------
 @bp.get("/bends")
 def list_bends():
-    return ok(library.list_entries("bends"))
+    """Saved bend stacks, with Kiln's own starters folded in.
+
+    Starters come first: an empty Library is the common case, and they are there
+    to be tried before anything is saved. A user entry of the same name wins --
+    saving over a starter is how you adapt one.
+    """
+    saved = library.list_entries("bends")
+    taken = {e.get("name") for e in saved}
+    builtin = [e for e in starters.entries() if e["name"] not in taken]
+    return ok(builtin + saved)
 
 
 @bp.post("/bends")
@@ -50,7 +60,15 @@ def save_bend():
 
 @bp.delete("/bends/<name>")
 def delete_bend(name):
-    library.delete_entry("bends", name)
+    try:
+        library.delete_entry("bends", name)
+    except NotFoundError:
+        # A starter has no file to delete. Say so rather than reporting a missing
+        # entry for something the user can plainly see in the list.
+        if starters.is_starter(name):
+            return err(f"'{name}' ships with Kiln and cannot be deleted. Save a stack "
+                       f"under the same name to replace it with your own.", 400)
+        raise
     return ok({"deleted": name})
 
 

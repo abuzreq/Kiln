@@ -1,4 +1,4 @@
-from xurdif import GaussianDiffusion, Trainer
+from xurdif2 import GaussianDiffusion, Trainer # xurdif2 uses training with masked loss / under work
 import torch
 from torchvision import transforms
 import lpips 
@@ -13,6 +13,20 @@ xurdiffusion
 basic trainer
 
 '''
+
+import random
+from torchvision.transforms import functional as TF
+
+class RandomRightAngleRotate:
+    """
+    Randomly rotate image by 0, 90, 180, or 270 degrees.
+    """
+    def __call__(self, img):
+        angle = random.choice([0, 90, 180, 270])
+        if angle == 0:
+            return img
+        return TF.rotate(img, angle, expand=False)
+
 
 import argparse
 
@@ -38,24 +52,28 @@ parser.add_argument('--load', type=str, default="", help='path to pth file')
 parser.add_argument('--nostrict', action="store_true", help='')
 parser.add_argument('--mults', type=int, nargs='*', default=[1, 1, 2, 2, 4, 4, 8, 8], help='')
 parser.add_argument('--nsamples', type=int, default=2, help='how many samples to generate')
-# KILN: fixed seed for the snapshot preview so a run's thumbnails form a
-# comparable timeline instead of a different random image every time.
-# Negative disables seeding and restores the original behaviour.
-parser.add_argument('--sampleSeed', type=int, default=-1, help='seed for snapshot samples (-1 = random)')
 parser.add_argument('--model', type=str, default="unet2", help='model architecture: unet0, unetok5, unet1,unetcn0')
 
 parser.add_argument('--fit', type=str, default="resize", help='resize | crop')
+parser.add_argument('--rot', action="store_true", help='use right angle rotation')
+parser.add_argument("--presize", type=int, default=0)
+parser.add_argument("--flip", action="store_true")
+
+
+parser.add_argument('--use_mask', action="store_true", help='use masked loss')
+parser.add_argument('--use_edges', action="store_true", help='use edge loss')
+parser.add_argument('--mask_ratio', type=float, default=0.8, help='L1 loss weight')
+parser.add_argument('--edge_weight', type=float, default=4.0, help='edge loss weight')
+parser.add_argument('--edge_threshold', type=float, default=4.0, help='edge threshold')
+
+
 
 parser.add_argument('--pred', type=str, default="eps", help='prediction type: eps, x0')
-# KILN: the edge-weighted L1 in GaussianDiffusion.p_losses was unconditional.
-# Kiln offers it as a training option, so it needs a switch. Phrased as an
-# opt-out so a bare run trains exactly as it always did -- note that xurdif2's
-# --use_edges is the opposite polarity and defaults OFF, so a future move to
-# the v2 trainer must invert this.
-parser.add_argument('--noEdges', action="store_true", help='disable the edge-weighted L1 loss')
 
 
 opt = parser.parse_args()
+
+print(opt)
 
 mtype = opt.model
 
@@ -81,19 +99,29 @@ else:
   print("Unsupported model: "+mtype)
   exit()
 
-
+'''
 if opt.fit == "resize":
     xf = transforms.Compose([
           transforms.Resize((opt.imageSize, opt.imageSize)),
-          transforms.RandomHorizontalFlip(),
+          #transforms.RandomHorizontalFlip(),
           #transforms.CenterCrop(opt.imageSize),
           transforms.ToTensor(),
           transforms.Lambda(lambda t: t - 0.5) # value range -0.5 - 0.5
     ])
 elif opt.fit == "crop":
-   xf = transforms.Compose([
+    if opt.rot: 
+        xf = transforms.Compose([
           #transforms.Resize(opt.imageSize),
           transforms.RandomHorizontalFlip(),
+          RandomRightAngleRotate(),
+          transforms.RandomCrop((opt.imageSize, opt.imageSize)),
+          transforms.ToTensor(),
+          transforms.Lambda(lambda t: t - 0.5) # value range -0.5 - 0.5
+        ])
+    else:    
+        xf = transforms.Compose([
+          #transforms.Resize(opt.imageSize),
+          #transforms.RandomHorizontalFlip(),
           transforms.RandomCrop((opt.imageSize, opt.imageSize)),
           transforms.ToTensor(),
           transforms.Lambda(lambda t: t - 0.5) # value range -0.5 - 0.5
@@ -101,6 +129,41 @@ elif opt.fit == "crop":
 else:    
    print("unknown value for fit: ",opt.fit)
    exit()      
+'''
+
+xfs = []
+
+# Optional pre-resize before crop
+# e.g. opt.resize_before_crop could be 768, 1024, etc.
+if getattr(opt, "presize", None):
+    xfs.append(transforms.Resize(opt.presize))
+
+# Augmentations allowed for all fit modes
+if getattr(opt, "flip", False):
+    xfs.append(transforms.RandomHorizontalFlip())
+
+if opt.rot:
+    xfs.append(RandomRightAngleRotate())
+
+# Fit mode
+if opt.fit == "resize":
+    xfs.append(transforms.Resize((opt.imageSize, opt.imageSize)))
+
+elif opt.fit == "crop":
+    xfs.append(transforms.RandomCrop((opt.imageSize, opt.imageSize)))
+
+else:
+    print("unknown value for fit:", opt.fit)
+    exit()
+
+# Final conversion
+xfs.extend([
+    transforms.ToTensor(),
+    transforms.Lambda(lambda t: t - 0.5),
+])
+
+xf = transforms.Compose(xfs)
+
 
 model = Unet(
     dim = 64,
@@ -111,8 +174,8 @@ print(model)
 
 model = model.cuda()
 
-#lpips_fn = lpips.LPIPS(net='vgg').to("cuda")  # TODO!!!
-#lpips_fn.eval()  # always eval mode
+lpips_fn = lpips.LPIPS(net='vgg').to("cuda")  # TODO!!!
+lpips_fn.eval()  # always eval mode
 
 diffusion = GaussianDiffusion(
     model,
@@ -121,7 +184,11 @@ diffusion = GaussianDiffusion(
     ssimw = opt.ssimw,
     l1w = opt.l1w,
     pred=opt.pred,
-    use_edges = not opt.noEdges   # KILN: see --noEdges above
+    edge_weight=4.0,
+    edge_threshold=0.08,
+    mask_ratio=0.8,
+    use_mask = opt.use_mask,
+    use_edges = opt.use_edges
     #loss_type = opt.losstype   # L1 or L2,
     #lpips_fn = lpips_fn
 ).cuda()

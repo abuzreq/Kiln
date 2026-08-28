@@ -102,7 +102,7 @@ def inspect_source(path: str | Path) -> dict:
 
     config = {}
     for k in ("image_size", "batch_size", "train_steps", "save_every", "lr", "accum",
-              "loss_type", "fit", "mtype", "mults", "pred"):
+              "loss_type", "fit", "mtype", "mults", "pred", "edge_loss"):
         if run_meta.get(k) is not None:
             config[k] = run_meta[k]
         elif card.get(k) is not None:
@@ -152,7 +152,7 @@ def _looks_safe(name: str) -> bool:
         return False
 
 
-def _copy_data(src: projects.Project, dest: projects.Project):
+def _copy_data(src: projects.Store, dest: projects.Store):
     for sub in ("source", "datasets"):
         s, d = src.dir / sub, dest.dir / sub
         if s.exists():

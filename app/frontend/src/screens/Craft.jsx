@@ -2,10 +2,10 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api, downloadPost, pollJob } from "../api.js";
 import { useApp } from "../state.jsx";
 import { usePlay, usePlayState } from "./playContext.jsx";
-import { Select, Num, Text, Disclose, Progress } from "../components/ui.jsx";
+import { Select, Num, Text, Disclose, Progress, Modal } from "../components/ui.jsx";
 import UnetVisualizer from "../components/UnetVisualizer.jsx";
 import BendEditor from "../components/BendEditor.jsx";
-import BendPresetChips from "../components/BendPresetChips.jsx";
+import BendPresetList from "../components/BendPresetList.jsx";
 import { buildSamplePayload } from "../sampleSettings.jsx";
 import {
   expandGroup, isGroup, resolveMany, resolveTargets, toggleNodeTargets,
@@ -17,6 +17,29 @@ const BEND_SWEEP_EMPTY = {
   bend: 0, param: "", from: 0, to: 1, count: 5,
   frames: null, busy: false, job: null, fps: 8, pingpong: true,
 };
+
+/** The two samples side by side. Same markup inline and in the modal, so the
+ *  enlarged view cannot drift from the one in the column. */
+function ComparePair({ plain, bent, large = false, onEnlarge }) {
+  const box = (src, label, alt) => (
+    <div className="grow">
+      <div className="section-title">{label}</div>
+      <div className={`preview-box preview-square ${large ? "" : "preview-max"}`}>
+        {src ? (
+          onEnlarge
+            ? <img src={src} alt={alt} onClick={onEnlarge} className="clickable" />
+            : <img src={src} alt={alt} />
+        ) : <span className="sub">—</span>}
+      </div>
+    </div>
+  );
+  return (
+    <div className={`row gap-2 mt-2 ${large ? "compare-large" : ""}`}>
+      {box(plain, "Without bends", "without bends")}
+      {box(bent, "With bends", "with bends")}
+    </div>
+  );
+}
 
 export function BendWorkspace({ stack, setStack }) {
   const { toast, modelPath, ops: sharedOps, setPlayTab } = useApp();
@@ -37,6 +60,11 @@ export function BendWorkspace({ stack, setStack }) {
   const [genBent, setGenBent] = usePlayState("bend.bent", null);
   const [sweep, setSweep] = usePlayState("bend.sweep", BEND_SWEEP_EMPTY);
   const [gif, setGif] = usePlayState("bend.gif", null);
+  // What the cached unbent image (bend.plain) was sampled from. Kept in Play
+  // state alongside the image itself so a tab switch does not silently
+  // invalidate one without the other.
+  const [cachedPlainKey, setCachedPlainKey] = usePlayState("bend.plainKey", null);
+  const [compareOpen, setCompareOpen] = useState(false);
   const [gifBusy, setGifBusy] = useState(false);
 
   useEffect(() => {
@@ -46,6 +74,10 @@ export function BendWorkspace({ stack, setStack }) {
   }, []);
 
   const ops = sharedOps || [];
+  // Kiln's own recipes are listed apart from the user's: they are the answer to
+  // "what does bending even do", which a list of one's own saved stacks is not.
+  const starterPresets = presets.filter((p) => p.builtin);
+  const savedPresets = presets.filter((p) => !p.builtin);
 
 
   useEffect(() => {
@@ -207,15 +239,27 @@ export function BendWorkspace({ stack, setStack }) {
     if (!modelPath) { toast("Pick a model", "error"); return; }
     if (!stack.some((b) => b.active)) { toast("Add and enable at least one bend", "error"); return; }
     setGenBusy(true);
-    setGenPlain(null);
     setGenBent(null);
     try {
       const plainBody = buildSamplePayload(sampleParams, { model_path: modelPath, postproc: {} });
-      const { job: j0 } = await api.post("/perform/sample", { ...plainBody, bends: null });
-      setGenJob(j0);
-      const plain = await pollJob(j0.id, setGenJob, 300);
-      if (plain.status === "error") throw new Error(plain.message || "Sample without bends failed");
-      setGenPlain(plain.detail?.frame || null);
+      // The unbent side does not depend on the bend stack at all, so editing
+      // bends and comparing again should not pay for it twice. It is keyed on
+      // everything that *does* decide it -- model and sampler settings -- and
+      // only when the seed is pinned: a blank seed is redrawn every run, so a
+      // cached baseline would be an image of a different thing entirely.
+      const plainKey = plainBody.seed == null ? null : JSON.stringify(plainBody);
+      let plainFrame = (plainKey && plainKey === cachedPlainKey) ? genPlain : null;
+      const reusedPlain = !!plainFrame;
+      if (!plainFrame) {
+        setGenPlain(null);
+        const { job: j0 } = await api.post("/perform/sample", { ...plainBody, bends: null });
+        setGenJob(j0);
+        const plain = await pollJob(j0.id, setGenJob, 300);
+        if (plain.status === "error") throw new Error(plain.message || "Sample without bends failed");
+        plainFrame = plain.detail?.frame || null;
+        setCachedPlainKey(plainKey);
+      }
+      setGenPlain(plainFrame);
 
       const bentBody = buildSamplePayload(sampleParams, {
         model_path: modelPath,
@@ -227,7 +271,9 @@ export function BendWorkspace({ stack, setStack }) {
       const bent = await pollJob(j1.id, setGenJob, 300);
       if (bent.status === "error") throw new Error(bent.message || "Sample with bends failed");
       setGenBent(bent.detail?.frame || null);
-      toast("Compared with vs without bends", "success");
+      toast(reusedPlain
+        ? "Compared — reused the unbent image, only the bent side was sampled"
+        : "Compared with vs without bends", "success");
     } catch (e) { toast(e.message, "error"); }
     setGenBusy(false);
     setGenJob(null);
@@ -329,13 +375,55 @@ export function BendWorkspace({ stack, setStack }) {
           )}
         </div>
         <p className="hint mb-0 mt-1">
-          Bending rewrites the model&apos;s activations mid-generation at the layers you choose.
-          It changes what comes out, not the model file — save the setup as a preset to reuse in Create.
-          The model comes from the picker at the top of Play.
+          Rewrites activations mid-generation at the layers you pick. Changes the output, not the
+          model file. Save a stack to reuse it in Create.
         </p>
       </div>
 
       <div className="bend-layout">
+        <div className="bend-side">
+          <div className="card bend-save-card">
+            <h3>Save this setup</h3>
+            <p className="hint mb-2">Name it to reuse in Create.</p>
+            <div className="row center wrap gap-2">
+              <div className="grow">
+                <Text label="" value={saveName} onChange={setSaveName} placeholder="e.g. melt-decoder" />
+              </div>
+              <button type="button" className="btn primary" onClick={savePreset} disabled={!stack.length}>Save bend</button>
+            </div>
+            <p className="hint mb-0 mt-2">
+              Each starter changes one thing. Load one, Compare, then edit it. Hover for details.
+            </p>
+            <BendPresetList
+              groups={[
+                { label: "Starters", presets: starterPresets },
+                { label: "Saved", presets: savedPresets },
+              ]}
+              onLoad={loadPreset}
+              ops={ops}
+            />
+            <div className="section-title mt-2">Share with other tools</div>
+            <p className="hint mb-2">
+              The shared network-bending JSON. Layer paths are per-architecture, so an imported
+              file usually needs retargeting.
+            </p>
+            <div className="row center wrap gap-2">
+              <button type="button" className="btn sm" onClick={exportBends} disabled={!stack.length}>
+                Export JSON
+              </button>
+              <button type="button" className="btn sm" onClick={() => importRef.current?.click()}>
+                Import JSON
+              </button>
+              <input
+                ref={importRef}
+                type="file"
+                accept="application/json,.json"
+                className="hidden-file"
+                onChange={(e) => { importBends(e.target.files?.[0]); e.target.value = ""; }}
+              />
+            </div>
+          </div>
+        </div>
         <div className="card">
           <div className="row between center wrap gap-2">
             <h3 className="mb-0">Model map</h3>
@@ -349,7 +437,7 @@ export function BendWorkspace({ stack, setStack }) {
           </div>
           <p className="hint mt-1">
             {focusedBend
-              ? "Click a layer to target it, shift+click for a range, drag across for a span (alt+drag to remove). Solid rings are this bend; dashed rings are the rest of the stack."
+              ? "Click to target, shift+click a range, drag a span (alt+drag removes). Solid rings: this bend. Dashed: the rest."
               : "Click a layer to start a bend on it."}
           </p>
           <div className="row wrap gap-2 bend-map-chips">
@@ -368,100 +456,68 @@ export function BendWorkspace({ stack, setStack }) {
             onCreateFromNode={onCreateFromNode}
           />
         </div>
-        <div className="bend-side">
-          <div className="card bend-save-card">
-            <h3>Save this setup</h3>
-            <p className="hint mb-2">Name the stack to reuse it in Create without coming back here.</p>
-            <div className="row center wrap gap-2">
-              <div className="grow">
-                <Text label="" value={saveName} onChange={setSaveName} placeholder="e.g. melt-decoder" />
-              </div>
-              <button type="button" className="btn primary" onClick={savePreset} disabled={!stack.length}>Save bend</button>
+        <div className="bend-compare-col">
+          <div className="card bend-compare-card">
+            <div className="row between center wrap gap-2">
+              <h3 className="mb-0">Compare</h3>
+              {(genPlain || genBent) && (
+                <button type="button" className="btn ghost sm" onClick={() => setCompareOpen(true)}>
+                  Enlarge
+                </button>
+              )}
             </div>
-            {presets.length > 0 && (
-              <>
-                <div className="section-title mt-2">Load a saved bend</div>
-                <BendPresetChips presets={presets} value="" onChange={loadPreset} allowNone={false} label="" ops={ops} />
-              </>
-            )}
-            <div className="section-title mt-2">Share with other tools</div>
             <p className="hint mb-2">
-              Reads and writes the common network-bending JSON. Layer paths are named per
-              architecture, so a file from another model needs retargeting on the map.
+              Same seed, plain then bent. The plain side is reused until the model, settings or seed change.
             </p>
             <div className="row center wrap gap-2">
-              <button type="button" className="btn sm" onClick={exportBends} disabled={!stack.length}>
-                Export JSON
-              </button>
-              <button type="button" className="btn sm" onClick={() => importRef.current?.click()}>
-                Import JSON
-              </button>
-              <input
-                ref={importRef}
-                type="file"
-                accept="application/json,.json"
-                className="hidden-file"
-                onChange={(e) => { importBends(e.target.files?.[0]); e.target.value = ""; }}
-              />
+              {genBusy ? (
+                <button type="button" className="btn danger" onClick={async () => { if (genJob) await api.post(`/jobs/${genJob.id}/cancel`); }}>Stop</button>
+              ) : (
+                <button type="button" className="btn primary" onClick={generateCompare} disabled={!modelPath || !stack.length}>
+                  Compare samples
+                </button>
+              )}
+              {genBusy && genJob && <span className="sub">{genJob.message || "Generating…"}</span>}
             </div>
-          </div>
-          <div className="card bend-stack-card">
-            <BendEditor
-              ops={ops}
-              nodes={nodes}
-              stack={stack}
-              setStack={setStack}
-              focusedId={focusedBendId}
-              setFocusedId={(id) => { setFocusedBendId(id); setNote(null); }}
-              addBend={() => addBend()}
-              updateBend={updateBend}
-              note={note}
-            />
+            {(genPlain || genBent) && (
+              <ComparePair plain={genPlain} bent={genBent} onEnlarge={() => setCompareOpen(true)} />
+            )}
           </div>
         </div>
       </div>
 
-      <div className="card">
-        <h3>Compare sample: without vs with bends</h3>
-        <p className="hint">
-          Runs two full samples with the same seed — plain model first, then with your active bend stack.
-        </p>
-        <div className="row center wrap gap-2">
-          {genBusy ? (
-            <button type="button" className="btn danger" onClick={async () => { if (genJob) await api.post(`/jobs/${genJob.id}/cancel`); }}>Stop</button>
-          ) : (
-            <button type="button" className="btn primary" onClick={generateCompare} disabled={!modelPath || !stack.length}>
-              Compare samples
-            </button>
-          )}
-          {genBusy && genJob && <span className="sub">{genJob.message || "Generating…"}</span>}
-        </div>
-        {(genPlain || genBent) && (
-          <div className="row gap-3 mt-2">
-            <div className="grow">
-              <div className="section-title">Without bends</div>
-              <div className="preview-box preview-square preview-max">
-                {genPlain ? <img src={genPlain} alt="without bends" /> : <span className="sub">—</span>}
-              </div>
-            </div>
-            <div className="grow">
-              <div className="section-title">With bends</div>
-              <div className="preview-box preview-square preview-max">
-                {genBent ? <img src={genBent} alt="with bends" /> : <span className="sub">—</span>}
-              </div>
-            </div>
-          </div>
-        )}
+      <div className="card bend-stack-card">
+        <BendEditor
+          ops={ops}
+          nodes={nodes}
+          stack={stack}
+          setStack={setStack}
+          focusedId={focusedBendId}
+          setFocusedId={(id) => { setFocusedBendId(id); setNote(null); }}
+          addBend={() => addBend()}
+          updateBend={updateBend}
+          note={note}
+        />
       </div>
+
+      {compareOpen && (
+        <Modal
+          title="Compare: without vs with bends"
+          wide
+          onClose={() => setCompareOpen(false)}
+          footer={<button type="button" className="btn ghost" onClick={() => setCompareOpen(false)}>Close</button>}
+        >
+          <ComparePair plain={genPlain} bent={genBent} large />
+        </Modal>
+      )}
 
       <Disclose
         title="Sweep a bend parameter"
         tip="Runs a full sample for each value, changing only this one number — everything else, including the seed and the layers you targeted, stays fixed."
       >
         <p className="hint mb-2">
-          One full generation per value, same seed throughout, using the targets
-          already set on that bend. Because only the parameter moves, the strip
-          reads as a single image being pushed — and can be saved as a GIF.
+          One generation per value, same seed, same targets. Only the number moves, so the strip
+          can be saved as a GIF.
         </p>
         <div className="row wrap gap-3">
           <div className="w-130">

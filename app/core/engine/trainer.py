@@ -88,6 +88,10 @@ class TrainConfig:
     sample_seed: int = 42
     save_every: int = 1000
     amp: bool = False
+    # The edge-weighted L1 the vendored engine trains with. On by default, and
+    # read back as True for runs written before it was switchable -- every one
+    # of those was edge-trained, so True is what they actually did.
+    edge_loss: bool = True
     resume: str | None = None
     nostrict: bool = False
     continued_from: str | None = None
@@ -116,6 +120,10 @@ class TrainConfig:
         ]
         if self.amp:
             args.append("--amp")
+        if not self.edge_loss:
+            # Opt-out, matching the vendored flag: absent means the edge-weighted
+            # L1 that every model before this option was trained with.
+            args.append("--noEdges")
         if self.resume:
             args += ["--load", self.resume]
             if self.nostrict:
@@ -171,6 +179,7 @@ def config_from_run(run_dir: str | Path, train_steps: int, checkpoint: str | Non
         sample_seed=int(meta.get("sample_seed", 42)),
         save_every=int(save_every or 1000),
         amp=bool(meta.get("amp", False)),
+        edge_loss=bool(meta.get("edge_loss", True)),
         resume=ckpt["path"],
         continued_from=ckpt["filename"],
     )
@@ -251,6 +260,12 @@ def _read_run_meta(out_dir: Path) -> dict:
     return {}
 
 
+def _loss_stride(save_every) -> int:
+    """How often to keep a loss point. Shared by the live and on-disk paths so
+    a run's chart looks the same while it trains and after it finishes."""
+    return max(min(int(save_every or 0) // 2, 50), 1)
+
+
 def _write_run_meta(out_dir: Path, cfg: "TrainConfig", *, continued_from: str | None = None):
     existing = _read_run_meta(out_dir)
     meta = {
@@ -274,6 +289,7 @@ def _write_run_meta(out_dir: Path, cfg: "TrainConfig", *, continued_from: str | 
         "nsamples": cfg.nsamples,
         "sample_seed": cfg.sample_seed,
         "amp": cfg.amp,
+        "edge_loss": cfg.edge_loss,
         "status": "training",
         "resume": cfg.resume or "",
     }
@@ -306,19 +322,27 @@ def load_run_view(out_dir: str | Path) -> dict:
     ckpts = list_checkpoints(out_dir, save_every) if out_dir.exists() else []
     log_path = out_dir / "train.log"
     log_lines: list[str] = []
+    all_lines: list[str] = []
     if log_path.exists():
         try:
             text = log_path.read_text(encoding="utf-8", errors="replace")
-            log_lines = text.splitlines()[-LOG_TAIL:]
+            all_lines = text.splitlines()
+            log_lines = all_lines[-LOG_TAIL:]
         except Exception:  # noqa: BLE001
+            all_lines = []
             log_lines = []
+    # the log panel shows a tail, but the loss curve is parsed from the whole
+    # file so it spans every step of the run, not just the last few hundred lines.
     losses = []
-    for line in log_lines:
+    for line in all_lines:
         m = _STEP_RE.match(line)
         if not m:
             continue
         step = int(m.group(1))
-        if save_every and step % max(int(save_every) // 2, 1) != 0:
+        # Sampled, not every line -- but capped at 50 so curve density stops
+        # riding on snapshot frequency. At save_every 1000 the old half-of-it
+        # rule plotted a point every 500 steps, which is a chart of four dots.
+        if save_every and step % _loss_stride(save_every) != 0:
             continue
         losses.append({"step": step, "loss": float(m.group(2))})
     if len(losses) > 240:
@@ -416,7 +440,7 @@ def _run(job: Job, cfg: TrainConfig):
             job.message = f"step {step} / {cfg.train_steps}  loss {loss:.4f}"
             job.detail["step"] = step
             job.detail["loss"] = loss
-            if step % max(cfg.save_every // 2, 1) == 0:
+            if step % _loss_stride(cfg.save_every) == 0:
                 losses.append({"step": step, "loss": loss})
             samp = _latest_sample(out_dir)
             if samp:

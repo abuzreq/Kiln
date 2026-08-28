@@ -41,6 +41,24 @@ Launchers handle virtual environment setup automatically:
 * **macOS:** Run `kiln.command`
 * **Linux:** Run `./kiln.sh`
 
+#### Linux notes
+
+The launcher builds its own virtual environment, but three things have to come
+from the distribution first. Kiln tells you which one is missing when it hits
+them; installing them up front saves the round trip.
+
+```bash
+# Debian / Ubuntu
+sudo apt install python3-venv python3-pip git   # venv is a separate package here
+sudo apt install libgl1 libglib2.0-0            # OpenCV links these
+sudo apt install python3-gi gir1.2-webkit2-4.1  # optional: the desktop window
+```
+
+Without the WebKit packages everything still works — Kiln prints its URL and you
+open it in a browser, which is also what `./kiln.sh --no-window` does. If the
+launcher lost its executable bit (downloading a zip rather than cloning does
+this), `chmod +x kiln.sh` restores it.
+
 ### Manual Setup
 
 If you prefer setting up environments manually:
@@ -148,7 +166,7 @@ models/            # Local scratch checkpoints
 | **Training From Scratch** | Yes (CUDA required) | Yes |
 | **Fine-tuning** | Resume run | Full fine-tune |
 | **LoRA Support** | No | Yes (via PEFT) |
-| **Loss Function** | Edge-weighted L1 + SSIM | MSE or edge-weighted L1 |
+| **Loss Function** | Edge-weighted L1 (optional) + SSIM | MSE or edge-weighted L1 |
 | **Noise Schedule** | Fixed cosine | Set via `scheduler_config.json` |
 
 ### `TinyUNet2DModel` Port

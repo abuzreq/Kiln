@@ -59,12 +59,42 @@ def run(cmd, **kw):
     subprocess.check_call(cmd, **kw)
 
 
+def _venv_help() -> str:
+    """What to install when the standard library cannot build a venv.
+
+    Debian and Ubuntu ship Python without ensurepip and without venv's package
+    metadata, so ``python3 -m venv`` fails there on a machine that otherwise has
+    a perfectly good Python. It is the most common first-run failure on Linux,
+    and the raw traceback names none of this.
+    """
+    import shutil
+
+    ver = "%d.%d" % (sys.version_info[0], sys.version_info[1])
+    if platform.system() != "Linux":
+        return "Reinstall Python from https://www.python.org/downloads/ and try again."
+    if shutil.which("apt-get") or shutil.which("apt"):
+        return ("On Debian/Ubuntu the venv module is a separate package:\n"
+                "    sudo apt install python3-venv python3-pip\n"
+                "  (if that is not enough, try python" + ver + "-venv)")
+    if shutil.which("dnf") or shutil.which("yum"):
+        return "On Fedora/RHEL:\n    sudo dnf install python3-pip"
+    if shutil.which("pacman"):
+        return "On Arch:\n    sudo pacman -S python-pip"
+    return "Install your distribution's python3-venv / python3-pip packages and try again."
+
+
 def ensure_venv():
-    if not venv_python().exists():
-        print("Creating virtual environment in .venv ...")
-        venv.EnvBuilder(with_pip=True).create(VENV_DIR)
-    else:
+    if venv_python().exists():
         print("Virtual environment already present.")
+        return
+    print("Creating virtual environment in .venv ...")
+    try:
+        venv.EnvBuilder(with_pip=True).create(VENV_DIR)
+    except Exception as e:  # noqa: BLE001
+        raise SystemExit(
+            "\nCould not create the virtual environment in %s.\n"
+            "  %s: %s\n\n%s\n" % (VENV_DIR, type(e).__name__, e, _venv_help())
+        )
 
 
 def _req_files() -> list[Path]:
@@ -73,9 +103,15 @@ def _req_files() -> list[Path]:
 
 
 def _fingerprint() -> str:
-    """Hash of requirement files + interpreter version. Fast; no subprocess."""
+    """Hash of requirement files + interpreter version. Fast; no subprocess.
+
+    Major.minor, not the full ``sys.version``: a venv is tied to the minor
+    version, but the build string moves on every patch release, and on a distro
+    that updates Python regularly that meant a full pip pass after an upgrade
+    that changed nothing a wheel cares about.
+    """
     h = hashlib.sha256()
-    h.update(sys.version.encode())
+    h.update(("%d.%d" % (sys.version_info[0], sys.version_info[1])).encode())
     h.update(platform.system().encode())
     for p in _req_files():
         h.update(p.name.encode())
@@ -247,6 +283,7 @@ def install_requirements(force: bool = False):
         print("Installing vendored xurdif engine requirements ...")
         run([str(py), "-m", "pip", "install", "-r", str(VENDOR_REQ)])
 
+    _check_native_libs(py)
     _write_stamp()
 
     if _torch_is_cuda(py):
@@ -262,6 +299,30 @@ def install_requirements(force: bool = False):
         print(
             "No NVIDIA GPU detected: dataset prep, model inspection, bending and "
             "merging work on CPU; training and sampling need CUDA."
+        )
+
+
+def _check_native_libs(py: Path):
+    """One real import of OpenCV, once, after a fresh install.
+
+    The launch probe only asks whether packages are *present* (find_spec, no
+    import) so that startup stays fast. That cannot see a missing system
+    library: opencv-python links libGL, which minimal and server Linux images do
+    not ship, and the failure would otherwise surface much later as a traceback
+    in the middle of preparing a dataset.
+    """
+    out = subprocess.run([str(py), "-c", "import cv2"], capture_output=True, text=True)
+    if out.returncode == 0:
+        return
+    err = (out.stderr or "").strip().splitlines()
+    last = err[-1] if err else "unknown error"
+    print("\nWARNING: OpenCV is installed but does not import:\n  %s" % last)
+    if "libGL" in last or "libgl" in last or "libglib" in last.lower():
+        print(
+            "  It needs system graphics libraries that this image does not carry.\n"
+            "  On Debian/Ubuntu:\n"
+            "    sudo apt install libgl1 libglib2.0-0\n"
+            "  Dataset prep from video and the post-processing chain need it."
         )
 
 

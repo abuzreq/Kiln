@@ -162,6 +162,41 @@ def check_objective():
     print("  objective: sobel, edge-weighted L1 and the composed loss all identical")
 
 
+def check_edge_switch():
+    """The KILN edge-loss switch: on reproduces upstream, off is a plain L1.
+
+    ``use_edges`` defaults to True precisely so every model trained before the
+    patch keeps its meaning, so the on-path is asserted equal to the hardcoded
+    call it replaced -- not merely close to it.
+    """
+    torch.manual_seed(0)
+    pred = torch.randn(2, 3, 32, 32).clamp(-1, 1)
+    tgt = torch.randn(2, 3, 32, 32).clamp(-1, 1).detach()
+
+    on, _ = V.edge_weighted_l1(x_pred=pred, x_target=tgt,
+                               edge_weight=4.0, edge_threshold=0.08)
+    off = (pred - tgt).abs().mean()
+    assert not torch.equal(on, off), "edge weighting made no difference to the loss"
+
+    net = build_unet("tinyunet_with_attention3", [1, 2, 2, 2])
+    gd_on = V.GaussianDiffusion(net, image_size=32, timesteps=1000, l1w=1.0,
+                                ssimw=0.0, pred="x0")
+    gd_off = V.GaussianDiffusion(net, image_size=32, timesteps=1000, l1w=1.0,
+                                 ssimw=0.0, pred="x0", use_edges=False)
+    assert gd_on.use_edges and gd_on.edge_weight == 4.0 and gd_on.edge_threshold == 0.08,         "the default must still be the values the upstream call site hardcoded"
+    assert not gd_off.use_edges
+
+    x = torch.randn(1, 3, 32, 32).clamp(-1, 1)
+    t = torch.full((1,), 40, dtype=torch.long)
+    noise = torch.randn_like(x)
+    with torch.no_grad():
+        l_on = gd_on.p_losses(x, t, noise=noise)
+        l_off = gd_off.p_losses(x, t, noise=noise)
+    assert not torch.equal(l_on, l_off), "--noEdges changed nothing in p_losses"
+    print(f"  edge switch: default matches the hardcoded call; off differs "
+          f"({float(l_on):.4f} vs {float(l_off):.4f})")
+
+
 def check_vendor_harness():
     """Both networks inside the vendored GaussianDiffusion: same loss, same grads.
 
@@ -347,6 +382,7 @@ def main():
         check_gradients()
         check_training_steps()
         check_objective()
+        check_edge_switch()
         check_vendor_harness()
         check_schedule_provenance()
         check_conversion(tmp)

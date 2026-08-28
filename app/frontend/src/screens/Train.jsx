@@ -33,15 +33,54 @@ function runLabel(r) {
   return r.checkpoints ? "Stopped" : "—";
 }
 
+function edgeLossDefault(backend) {
+  // xurdif's native training loss. Diffusers' stock target is MSE; the same
+  // edge-weighted L1 is available there as an opt-in, not the starting point.
+  return backend === "xurdif";
+}
+
 const EMPTY_FORM = {
   backend: "xurdif", mode: "scratch", preset: "standard-128",
   lora_r: 8, precision: "no", gradient_checkpointing: false,
   dataset: "", run_name: "run1", image_size: 512, batch_size: 8,
   diffusion_steps: 1000, train_steps: 280000, accum: 10, lr: 0.0004,
   loss_type: "l1", ssimw: 0, l1w: 1, pred: "x0",
+  // One control, both engines. start() translates it: diffusers spells it
+  // objective:"xurdif"|"mse", xurdif takes edge_loss straight through.
+  edge_loss: edgeLossDefault("xurdif"),
   mtype: "tinyunet_with_attention3", mults: "1,2,2,2", save_every: 1000,
   nsamples: 1, sample_seed: 42, fit: "resize", amp: false, resume: "", nostrict: false,
 };
+
+// How far a fine-tune should travel from the model it starts on. Learning rate
+// is the whole mechanism -- there is no scheduler anywhere in Kiln, so this is
+// the only dial that decides it. It deliberately does not touch the step target.
+const FT_DISTANCE = [
+  { id: "close", label: "Stay close", lr: 5e-5,
+    tip: "Small steps. Keeps the base model's look and picks up your images slowly." },
+  { id: "some", label: "Move somewhat", lr: 1.5e-4,
+    tip: "The middle setting. Shifts noticeably toward your images while keeping the base model's habits." },
+  { id: "far", label: "Go far", lr: 4e-4,
+    tip: "Big steps. Learns your images fastest and is the most likely to lose what the base model knew." },
+];
+// Fine-tuning starts here rather than at whatever lr the base model was trained
+// with -- inheriting 4e-4 from a scratch run is the worst default for a tune.
+const FT_DEFAULT_LR = 1.5e-4;
+
+/** What a recorded run actually optimised.
+ *
+ *  Not `loss_type`: that field is written to run.json but the vendored trainer
+ *  parses `--losstype` and never uses it. What runs is the edge-weighted L1
+ *  (plus SSIM when weighted), or plain MSE on the Diffusers engine.
+ */
+function lossLabel(meta) {
+  if (!meta) return "—";
+  if (meta.backend === "diffusers") {
+    return meta.objective === "xurdif" ? "Edge-aware L1 (xurdif objective)" : "MSE";
+  }
+  const edges = meta.edge_loss === false ? "plain L1" : "edge-weighted L1";
+  return `${edges} (SSIM ${meta.ssimw ?? 0})`;
+}
 
 const MODE_TABS = [
   { id: "new", label: "Train new model", tip: "Configure and start a training run" },
@@ -124,6 +163,9 @@ export default function Train() {
   const [fromMode, setFromMode] = useState("scratch");
   const [pendingRun, setPendingRun] = useState(null);
   const [nameAvailable, setNameAvailable] = useState(true);
+  // Whether the form has already been seeded (by the recommended preset, or by
+  // a model handed over from Library). Guards against the two racing.
+  const presetSeeded = useRef(false);
   const [continueSteps, setContinueSteps] = useState(280000);
   const logRef = useRef(null);
 
@@ -164,10 +206,12 @@ export default function Train() {
       ...EMPTY_FORM,
       dataset: f.dataset || info?.datasets?.[0]?.name || "",
       run_name: nextRunName(runsList || info?.runs || runs),
-      image_size: f.image_size,
-      batch_size: f.batch_size,
       mtype: f.mtype,
     }));
+    // A new run lands on the preset that suits this GPU rather than on the size
+    // and batch the previous run happened to leave behind.
+    const rec = Object.keys(presets).find((k) => presets[k].recommended);
+    if (rec) applyPresetFrom(presets, rec, { announce: false });
   };
 
   const applyLibraryStart = async (path) => {
@@ -178,6 +222,7 @@ export default function Train() {
     }
     setFromMode("library");
     setMode("new");
+    presetSeeded.current = true;
     try {
       const d = await api.get(`/train/continue/info?path=${encodeURIComponent(path)}`);
       setForm((f) => ({
@@ -186,11 +231,15 @@ export default function Train() {
         image_size: d.config?.image_size ?? f.image_size,
         batch_size: d.config?.batch_size ?? f.batch_size,
         train_steps: d.suggested_steps ?? f.train_steps,
-        save_every: d.config?.save_every ?? f.save_every,
+        // save_every and lr are deliberately NOT inherited. The first is a disk
+        // preference, not an architecture fact, and older runs carry 100. The
+        // second is the base model's *training* rate -- often 4e-4, the worst
+        // place to start a fine-tune from. Everything below is architecture and
+        // must match, or the checkpoint will not load.
+        lr: FT_DEFAULT_LR,
         mtype: d.mtype || f.mtype,
         mults: Array.isArray(d.mults) ? d.mults.join(",") : f.mults,
         pred: d.pred || f.pred,
-        lr: d.config?.lr ?? f.lr,
         accum: d.config?.accum ?? f.accum,
       }));
     } catch (e) {
@@ -256,7 +305,16 @@ export default function Train() {
         if (!cancelled) toast(e.message, "error");
       }
     })();
-    api.get("/train/presets").then(setPresets);
+    api.get("/train/presets").then((p) => {
+      setPresets(p);
+      const rec = Object.keys(p).find((k) => p[k].recommended);
+      // The ref, not a check on form state: the deep link from Library resolves
+      // asynchronously too, and whichever lands second must not win.
+      if (rec && !presetSeeded.current) {
+        presetSeeded.current = true;
+        applyPresetFrom(p, rec, { announce: false });
+      }
+    });
     api.get("/architectures").then((d) => setArchs(d.architectures));
     api.get("/train/backends").then((d) => setEngines(d.backends || [])).catch(() => {});
     return () => { cancelled = true; };
@@ -291,13 +349,16 @@ export default function Train() {
       && p.batch_size === form.batch_size
       && p.lr === form.lr
       && p.train_steps === form.train_steps
-      && (p.mults || []).join(",") === form.mults
+      && p.save_every === form.save_every
+      && (p.mults || []).join(",") === String(form.mults ?? "")
     ));
     return hit ? hit[0] : null;
-  }, [presets, form.image_size, form.batch_size, form.lr, form.train_steps, form.mults]);
+  }, [presets, form.image_size, form.batch_size, form.lr, form.train_steps, form.save_every, form.mults]);
 
-  const applyPreset = (id) => {
-    const p = presets[id];
+  // Split in two so the mount handler can seed from the response it just got,
+  // before `presets` state exists on that tick.
+  const applyPresetFrom = (map, id, { announce = true } = {}) => {
+    const p = map?.[id];
     if (!p) return;
     setForm((f) => ({
       ...f,
@@ -305,8 +366,23 @@ export default function Train() {
       train_steps: p.train_steps, save_every: p.save_every,
       mults: (p.mults || [1, 2, 2, 2]).join(","),
     }));
-    toast(`Applied ${p.label}`, "success");
+    if (announce) toast(`Applied ${p.label}`, "success");
   };
+
+  const applyPreset = (id, opts) => applyPresetFrom(presets, id, opts);
+
+  // Flask sorts JSON keys, so trust the server's rank rather than key order.
+  const presetRows = useMemo(
+    () => Object.entries(presets).sort((a, b) => (a[1].order ?? 0) - (b[1].order ?? 0)),
+    [presets],
+  );
+
+  // Derived, not stored: the lr is the single source of truth, so typing one by
+  // hand under Advanced simply deselects all three tabs.
+  const ftDistance = useMemo(
+    () => FT_DISTANCE.find((d) => d.lr === form.lr)?.id || "",
+    [form.lr],
+  );
 
   const start = async () => {
     if (!nameAvailable) {
@@ -326,6 +402,10 @@ export default function Train() {
           ? (seeded ? "continue" : "scratch")
           : (seeded ? form.mode : "scratch"),
         base_model: seeded || undefined,
+        // One checkbox, two spellings. Diffusers picks a loss by name; the
+        // xurdif trainer takes a flag. Sending both is harmless -- each backend
+        // reads only the keys it knows.
+        objective: form.edge_loss ? "xurdif" : "mse",
       };
       const { job: j, warning } = await api.post("/train", payload);
       setJob(j);
@@ -549,25 +629,52 @@ export default function Train() {
                   )}
                 </>
               )}
-              <div className="row gap-2">
-                <div className="grow"><Num label="Image size" value={form.image_size} onChange={(v) => set("image_size", v)} step={32} disabled={running} tip="Training resolution. Higher uses much more VRAM." /></div>
-                <div className="grow"><Num label="Batch" value={form.batch_size} onChange={(v) => set("batch_size", v)} min={1} disabled={running} tip="Images per step. Lower if you run out of VRAM." /></div>
-              </div>
-              <div className="row gap-2">
-                <div className="grow"><Num label={fromMode === "library" ? "Train until step" : "Iterations"} value={form.train_steps} onChange={(v) => set("train_steps", v)} step={1000} disabled={running} tip={fromMode === "library" ? "Total optimizer steps. Should be higher than the step count already in the library model." : "How many optimizer steps to run."} /></div>
-                <div className="grow"><Num label="Save every" value={form.save_every} onChange={(v) => set("save_every", v)} disabled={running} tip="Write a snapshot every N steps." /></div>
-              </div>
-              <div className="row gap-2">
-                <div className="grow"><Num label="Learning rate" value={form.lr} onChange={(v) => set("lr", v)} step={0.0001} disabled={running} tip="How big each weight update is." /></div>
-                <div className="grow"><Num label="Grad accum" value={form.accum} onChange={(v) => set("accum", v)} disabled={running} tip="Accumulate this many micro-batches before an optimizer step." /></div>
-              </div>
-              {est && est.total_mib > 0 && canStart && (
-                <div className={`vram-hint ${est.risky ? "risky" : ""}`}>
-                  <span>Est. peak VRAM <b>~{est.estimate_mib} MiB</b> / {est.total_mib} MiB{est.free_mib ? ` · ${est.free_mib} free` : ""}</span>
-                  {est.risky && (
-                    <span className="warn-text">May exceed VRAM — try batch ≤ {est.recommended_batch} at {form.image_size}px.</span>
+              {fromMode === "library" ? (
+                <>
+                  <div className="section-title mt-2">How far from the base model</div>
+                  <Seg tabs={FT_DISTANCE} value={ftDistance} onChange={(id) => set("lr", FT_DISTANCE.find((d) => d.id === id).lr)}
+                    ariaLabel="How far to move from the base model" />
+                  <p className="hint mt-1">
+                    Learning rate <b>{form.lr}</b>{ftDistance ? "" : " (custom)"}. Fine-tuning starts
+                    lower than the rate the base model was trained at.
+                  </p>
+                </>
+              ) : form.backend !== "xurdif" ? (
+                <p className="hint mt-2">
+                  Pick a model size under Advanced — Diffusers presets choose the network
+                  shape rather than a GPU budget.
+                </p>
+              ) : presetRows.length > 0 && (
+                <>
+                  <div className="section-title mt-2">Preset</div>
+                  <div className="col gap-2">
+                    {presetRows.map(([id, pr]) => (
+                      <button
+                        key={id}
+                        type="button"
+                        className={`asset-row ${activePreset === id ? "on" : ""}`}
+                        onClick={() => applyPreset(id)}
+                        disabled={running}
+                        aria-pressed={activePreset === id}
+                      >
+                        <div className="meta">
+                          <b>{pr.label}</b>
+                          {pr.blurb && <span className="sub">{pr.blurb}</span>}
+                          <span className="sub">
+                            {pr.image_size}px · batch {pr.batch_size} · lr {pr.lr}
+                            {pr.train_steps ? ` · ${pr.train_steps.toLocaleString()} steps` : ""}
+                          </span>
+                          {pr.fits === false && (
+                            <span className="sub warn-text">Larger than your GPU</span>
+                          )}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                  {!activePreset && (
+                    <p className="hint mt-1 mb-0">Custom — edited under Advanced.</p>
                   )}
-                </div>
+                </>
               )}
             </div>
 
@@ -600,8 +707,24 @@ export default function Train() {
             {canStart && (
               <Disclose title="Advanced"
                 tip="How the network is built and how it learns. The defaults are the ones Kiln's presets are measured against — change these only when you want a different kind of model, not to fix a slow or poor run.">
+                <div className="section-title">Run size</div>
+                <div className="row gap-2">
+                  <div className="grow"><Num label="Image size" value={form.image_size} onChange={(v) => set("image_size", v)} step={32} disabled={running} tip="Training resolution. Higher uses much more VRAM." /></div>
+                  <div className="grow"><Num label="Batch" value={form.batch_size} onChange={(v) => set("batch_size", v)} min={1} disabled={running} tip="Images per step. Lower if you run out of VRAM." /></div>
+                </div>
+                <div className="row gap-2">
+                  <div className="grow"><Num label={fromMode === "library" ? "Train until step" : "Iterations"} value={form.train_steps} onChange={(v) => set("train_steps", v)} step={1000} disabled={running} tip={fromMode === "library" ? "Total optimizer steps. Should be higher than the step count already in the library model." : "How many optimizer steps to run."} /></div>
+                  <div className="grow"><Num label="Save every" value={form.save_every} onChange={(v) => set("save_every", v)} disabled={running} tip="Write a snapshot every N steps." /></div>
+                </div>
+                <div className="row gap-2">
+                  <div className="grow"><Num label="Learning rate" value={form.lr} onChange={(v) => set("lr", v)} step={0.0001} disabled={running} tip="How big each weight update is. Fine-tuning sets this from the distance control instead." /></div>
+                  <div className="grow"><Num label="Grad accum" value={form.accum} onChange={(v) => set("accum", v)} disabled={running} tip="Accumulate this many micro-batches before an optimizer step." /></div>
+                </div>
+                <div className="section-title mt-2">Architecture & loss</div>
                 {engines.length > 1 && (
-                  <Select label="Engine" value={form.backend} onChange={(v) => set("backend", v)}
+                  <Select label="Engine" value={form.backend} onChange={(v) => {
+                    setForm((f) => ({ ...f, backend: v, edge_loss: edgeLossDefault(v) }));
+                  }}
                     options={engines.map((e) => e.name)}
                     tip="xurdif trains the compact models Kiln started with. diffusers trains Hugging Face UNet2DModel models and can fine-tune ones you import." />
                 )}
@@ -615,19 +738,24 @@ export default function Train() {
                     <div className="row gap-2">
                       <div className="grow"><Select label="Prediction" value={form.pred} onChange={(v) => set("pred", v)} options={["x0", "eps"]}
                         tip={"What the network is asked to output at each step.\n\nx0 predicts the finished image directly and tends to settle faster on small datasets. eps predicts the noise to remove, the classic formulation. Fixed for the life of a model."} /></div>
-                      <div className="grow"><Select label="Loss" value={form.loss_type} onChange={(v) => set("loss_type", v)} options={["l1", "l2"]}
-                        tip={"How error is measured while training.\n\nl1 is the absolute difference — more forgiving of outliers, and it keeps edges crisp. l2 squares the error, punishing big mistakes harder, which tends to look smoother and blurrier."} /></div>
-                    </div>
-                    <div className="row gap-2">
-                      <div className="grow"><Num label="SSIM weight" value={form.ssimw} onChange={(v) => set("ssimw", v)} step={0.5}
-                        tip="How much structural similarity is mixed into the loss on top of Loss above. 0 turns it off. Raising it pushes the model toward matching local structure and texture rather than just pixel values; too high and training can stall." /></div>
                       <div className="grow"><Select label="Fit" value={form.fit} onChange={(v) => set("fit", v)} options={["resize", "crop"]}
                         tip={"How training images that are not square are made to fit.\n\nresize squashes the whole image to the training size, keeping everything but distorting proportions. crop takes a center square, keeping proportions but discarding the edges."} /></div>
                     </div>
+                    <Num label="SSIM weight" value={form.ssimw} onChange={(v) => set("ssimw", v)} step={0.5}
+                      tip="How much structural similarity is mixed into the loss on top of the edge-aware L1. 0 turns it off. Raising it pushes the model toward matching local structure and texture rather than just pixel values; too high and training can stall." />
                   </>
                 ) : (
                   <DiffusersOptions form={form} set={set} engine={engines.find((e) => e.name === form.backend)} seeded={fromMode === "library"} />
                 )}
+                <Tooltip text={form.backend === "xurdif"
+                  ? "Weights the training loss toward the edges found in your images, so lines and texture stay sharp instead of averaging out. Costs a little speed per step.\n\nOn by default for xurdif — this is how Kiln's own models were trained. Turning it off leaves a plain L1 loss."
+                  : "Uses xurdif's edge-weighted L1 instead of Diffusers' usual MSE, so lines and texture stay sharp instead of averaging out. Costs a little speed per step.\n\nOff by default on this engine."}>
+                  <label className="row center gap-2 has-tip">
+                    <input type="checkbox" checked={form.edge_loss}
+                      onChange={(e) => set("edge_loss", e.target.checked)} />
+                    <span className="sub">Edge-aware loss <span className="hint">(crisper edges, slightly slower)</span></span>
+                  </label>
+                </Tooltip>
                 {form.backend === "xurdif" && (
                   <Tooltip text="Runs much of the math at half precision. Roughly doubles training speed and halves memory use, at a small risk of numerical instability. Leave it on unless a run produces NaN losses.">
                     <label className="row center gap-2 has-tip">
@@ -650,39 +778,33 @@ export default function Train() {
           </div>
           <div className="col">
             <div className="card">
-              <h3>Presets</h3>
+              <h3>This run</h3>
               <p className="hint">
-                A preset fills in image size, batch, learning rate and schedule for a
-                given GPU budget. Start there, then adjust.
+                What the preset works out to. Change any of it under Advanced.
               </p>
+              <div className="run-params">
+                <div className="kv"><span>Image size</span><b>{form.image_size}px</b></div>
+                <div className="kv"><span>Batch</span><b>{form.batch_size}</b></div>
+                <div className="kv"><span>{fromMode === "library" ? "Train until step" : "Iterations"}</span><b>{Number(form.train_steps).toLocaleString()}</b></div>
+                <div className="kv"><span>Save every</span><b>{form.save_every}</b></div>
+                <div className="kv"><span>Learning rate</span><b>{form.lr}</b></div>
+                <div className="kv"><span>Grad accum</span><b>{form.accum}</b></div>
+                {form.backend === "xurdif" && (
+                  <div className="kv"><span>Channel multipliers</span><b>{form.mults}</b></div>
+                )}
+                <div className="kv"><span>Edge-aware loss</span><b>{form.edge_loss ? "on" : "off"}</b></div>
+              </div>
               {form.backend !== "xurdif" ? (
-                <Empty>
-                  These presets are measured for the xurdif engine. For {form.backend},
-                  pick a model size under Advanced and set image size and batch to suit
-                  your GPU.
-                </Empty>
-              ) : Object.entries(presets).length === 0 ? (
-                <Empty>No presets available.</Empty>
-              ) : (
-                <div className="col gap-2">
-                  {Object.entries(presets).map(([id, pr]) => (
-                    <button
-                      key={id}
-                      type="button"
-                      className={`asset-row ${activePreset === id ? "on" : ""}`}
-                      onClick={() => applyPreset(id)}
-                      disabled={running}
-                      aria-pressed={activePreset === id}
-                    >
-                      <div className="meta">
-                        <b>{pr.label}</b>
-                        <span className="sub">
-                          {pr.image_size}px · batch {pr.batch_size} · lr {pr.lr}
-                          {pr.train_steps ? ` · ${pr.train_steps.toLocaleString()} steps` : ""}
-                        </span>
-                      </div>
-                    </button>
-                  ))}
+                <p className="hint mt-2">
+                  VRAM estimates are measured for the xurdif engine, so none is shown
+                  for {form.backend}.
+                </p>
+              ) : est && est.total_mib > 0 && canStart && (
+                <div className={`vram-hint mt-2 ${est.risky ? "risky" : ""}`}>
+                  <span>Est. peak VRAM <b>~{est.estimate_mib} MiB</b> / {est.total_mib} MiB{est.free_mib ? ` · ${est.free_mib} free` : ""}</span>
+                  {est.risky && (
+                    <span className="warn-text">May exceed VRAM — try batch ≤ {est.recommended_batch} at {form.image_size}px.</span>
+                  )}
                 </div>
               )}
               <p className="callout mt-2 mb-0">
@@ -767,7 +889,7 @@ export default function Train() {
                   <div className="kv"><span>Learning rate</span><b>{runMeta.lr ?? "—"}</b></div>
                   <div className="kv"><span>Accumulation</span><b>{runMeta.accum ?? "—"}</b></div>
                   <div className="kv"><span>Diffusion steps</span><b>{runMeta.diffusion_steps ?? "—"}</b></div>
-                  <div className="kv"><span>Loss</span><b>{runMeta.loss_type || "—"} (L1 {runMeta.l1w ?? 1}, SSIM {runMeta.ssimw ?? 0})</b></div>
+                  <div className="kv"><span>Loss</span><b>{lossLabel(runMeta)}</b></div>
                   <div className="kv"><span>Fit mode</span><b>{runMeta.fit || "—"}</b></div>
                   <div className="kv"><span>Samples / snapshot</span><b>{runMeta.nsamples ?? "—"}</b></div>
                   <div className="kv"><span>Snapshot seed</span><b>{runMeta.sample_seed == null ? "—" : (runMeta.sample_seed < 0 ? "random" : runMeta.sample_seed)}</b></div>

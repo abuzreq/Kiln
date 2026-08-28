@@ -170,6 +170,10 @@ body {
   max-width: 100%;
   max-height: calc(100vh - var(--topbar-h) - var(--content-pad-y) * 2 - 170px);
   object-fit: contain; display: block;
+  /* Checkerboard so a transparent-black blank canvas is visible on the dark UI. */
+  background-color: var(--bg-1);
+  background-image: repeating-conic-gradient(var(--bg-1) 0% 25%, var(--bg-3) 0% 50%);
+  background-size: 16px 16px;
 }
 .mask-overlay {
   position: absolute; z-index: 2; pointer-events: none; touch-action: none; cursor: crosshair;
@@ -369,25 +373,50 @@ body {
 .empty-shot { border-style: dashed; }
 .bend-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.3fr) minmax(280px, 380px);
+  /* Compare | map | stack. The comparison is the point of the screen -- it is
+     the only thing that says what a bend did -- so it gets a real column and the
+     map gives up the width for it. */
+  /* Save | map | compare. Compare is wider than the save column: it is the
+     only thing on the screen that shows what a bend actually did. */
+  grid-template-columns: minmax(260px, 330px) minmax(0, 1fr) minmax(330px, 440px);
   gap: var(--s-3);
   align-items: start;
 }
+@media (max-width: 1100px) {
+  /* Below this the map would be narrower than the picture it draws, so compare
+     goes full width on top and the other two share the row. */
+  .bend-layout { grid-template-columns: minmax(260px, 330px) minmax(0, 1fr); }
+  .bend-compare-col { grid-column: 1 / -1; order: -1; }
+}
 .bend-side { display: flex; flex-direction: column; gap: var(--s-3); min-width: 0; }
+.bend-compare-col { min-width: 0; }
+/* The enlarged pair fills the modal: samples are small (128-512px), and a
+   lightbox that showed them at natural size would not be an enlargement. */
+.compare-large .preview-box { max-height: min(62vh, 560px); }
+.compare-large .preview-box img { width: 100%; height: 100%; }
+.preview-box img.clickable { cursor: zoom-in; }
 @media (max-width: 900px) {
   .bend-layout { grid-template-columns: 1fr; }
 }
 .bend-stack-card { min-height: 0; }
 .bend-editor { min-height: 0; }
+/* The stack reads left to right across the full width: a bend is a step in a
+   chain, and stacked vertically in a narrow column it could show two at a time
+   before scrolling. Cards keep a fixed width so the row scrolls predictably. */
 .bend-stack {
-  max-height: min(42vh, 420px);
-  overflow-y: auto;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  align-items: flex-start;
+  overflow-x: auto;
   gap: var(--s-2);
-  padding-right: var(--s-1);
+  padding-bottom: var(--s-2);
   margin-top: var(--s-2);
 }
+/* Wide enough for the op name to read in full next to its number and category
+   pill -- at 260px "Fourier amplify" clipped to a few letters. */
+.bend-stack .bend-card { flex: 0 0 380px; width: 380px; }
+.bend-stack .bend-card.focused { flex-basis: 420px; width: 420px; }
+.bend-card-body { max-height: min(46vh, 420px); overflow-y: auto; }
 .bend-card {
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
@@ -402,6 +431,13 @@ body {
   width: 100%; border: none; color: inherit; font: inherit; text-align: left;
 }
 .bend-card-head-main { display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0; }
+.bend-card-op {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+}
 .bend-card-head select.grow { width: auto; min-width: 0; }
 
 /* Per-bend footprint: the U in miniature, lit where this bend hooks in. */
@@ -629,7 +665,13 @@ body {
   background: var(--bg);
 }
 
-.sample-seed { width: 140px; flex: 0 0 140px; }
+.sample-seed { width: 172px; flex: 0 0 172px; }
+/* The button sits beside the input, so the row aligns on the input's baseline
+   rather than the field label above it. */
+.seed-row { align-items: flex-end; }
+.seed-row .field { margin-bottom: 0; }
+.seed-random { padding: 6px 7px; line-height: 0; }
+.seed-random svg { display: block; }
 .sample-steps-seed { align-items: flex-end; }
 
 .bend-save-card { min-width: 0; }
@@ -831,7 +873,39 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .thumb.virtual-cell.clickable { cursor: zoom-in; }
 .thumb.virtual-cell.clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-.bend-preset-chip .tip-mark { cursor: help; }
+/* Preset list: one row per stack, name over a one-line summary. Scrolls past a
+   handful rather than pushing the bend editor off screen. */
+.bend-preset-rows {
+  list-style: none;
+  margin: 0 0 var(--s-2);
+  padding: 0;
+  /* Two rows, then scroll. Nine presets listed in full pushed the bend editor
+     off the bottom of the card, which is the thing you are actually editing. */
+  max-height: 82px;
+  overflow-y: auto;
+}
+.bend-preset-row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 4px 7px;
+  cursor: pointer;
+  color: var(--text);
+  font-family: inherit;
+}
+.bend-preset-row:hover { background: var(--bg-3); border-color: var(--accent); }
+.bend-preset-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.bend-preset-row .name { display: block; font-size: var(--fs-sm); font-weight: 600; }
+.bend-preset-row .summary {
+  display: block;
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .run-params { display: flex; flex-direction: column; gap: 2px; }
 .source-inner { position: relative; width: 100%; }
@@ -1280,3 +1354,7 @@ a { color: var(--accent); }
   .start-card-shot img { transition: none; }
 }
 .hidden-file { display: none; }
+/* Canvas size row: the numbers sit inline with their buttons, so they are
+   sized to the digits rather than stretching like a form field. */
+.canvas-size-row { row-gap: var(--s-1); }
+.canvas-size-input { width: 72px; }
