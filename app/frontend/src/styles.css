@@ -180,8 +180,63 @@ body {
 }
 .mask-overlay.on { pointer-events: auto; }
 .mask-overlay.wand { cursor: cell; }
+/* A disabled selection still shows, faintly — otherwise "off" and "deleted"
+   look the same and the eye toggle appears to have thrown the work away. */
+.mask-overlay.dim { opacity: 0.3; }
 .hero.brushable { cursor: crosshair; }
 .hero.painting { cursor: crosshair; }
+
+/* The selection's own strip, directly above the picture: what is selected, and
+   what the next run will therefore do. */
+.selection-bar {
+  display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap;
+  margin: var(--s-2) 0; padding: var(--s-2) var(--s-3);
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  font-size: var(--fs-md);
+}
+.selection-bar.off { border-left-color: var(--line); background: var(--bg-2); }
+.selection-bar .sel-note { flex: 0 1 auto; min-width: 0; }
+.sel-eye {
+  background: transparent; border: none; cursor: pointer; font: inherit;
+  color: var(--text-faint); padding: 0 2px; line-height: 1;
+}
+.sel-eye.on { color: var(--accent); }
+.sel-name {
+  background: transparent; border: 1px solid transparent; cursor: text;
+  color: var(--text); font: inherit; font-weight: 600;
+  padding: 1px 5px; border-radius: var(--radius-sm);
+}
+.sel-name:hover { border-color: var(--line); }
+.sel-name-input {
+  width: 140px; padding: 1px 5px; font-weight: 600;
+}
+
+/* Staging: candidates from one or more fills, none of them committed yet. */
+.staging-bar {
+  margin: var(--s-2) 0; padding: var(--s-2) var(--s-3);
+  border: 1px dashed var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+}
+.staging-title { color: var(--accent); }
+.staging-list { display: flex; gap: var(--s-2); overflow-x: auto; padding-bottom: 2px; }
+.staging-item {
+  flex: 0 0 auto; width: 92px; display: flex; flex-direction: column; gap: 3px;
+  background: transparent; border: 2px solid transparent; border-radius: var(--radius-sm);
+  padding: 2px; cursor: pointer; font: inherit; color: var(--text-faint);
+}
+.staging-item.on { border-color: var(--accent); color: var(--text); }
+.staging-item img {
+  width: 100%; aspect-ratio: 1; object-fit: cover; display: block;
+  border-radius: var(--radius-sm); background: var(--bg-3);
+}
+.staging-label {
+  font-size: var(--fs-xs); line-height: 1.25; text-align: left;
+  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.compare-models { display: flex; flex-wrap: wrap; gap: 6px; max-height: 108px; overflow-y: auto; }
 
 /* Canvas + Results rail. The rail collapses under the canvas on narrow
    viewports, where a side column would squeeze the image too far. */

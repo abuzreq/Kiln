@@ -13,9 +13,16 @@ import {
 } from "../sampleSettings.jsx";
 import ModelPicker from "../components/ModelPicker.jsx";
 import { buildContrastMask, floodFillMask, countMaskPixels } from "../contrastMask.js";
+import {
+  newSelection, brushStroke, cachedStroke, invertStroke, alphaToCache, overlayToCache,
+  rasterize, paintBrushPoint,
+} from "../selection.js";
 
 const HISTORY_MAX = 24;
-const MASK_UNDO_MAX = 12;
+// Snapshots used to be PNG data URLs, one per mask edit. Undo is now "drop the
+// last stroke and replay", so an entry is a stroke list -- cheap enough to keep
+// more of, and it covers deselecting as well as painting.
+const SELECTION_UNDO_MAX = 40;
 const CANVAS_TABS = new Set(["create"]);
 
 // Canvas bounds. The floor is a size a brush can still be aimed inside; the
@@ -70,7 +77,16 @@ export default function Play() {
   const [maskTool, setMaskTool] = useState("brush");
   const [wandTolerance, setWandTolerance] = useState(30);
   const [maskVersion, setMaskVersion] = useState(0);
-  const [maskUndoLen, setMaskUndoLen] = useState(0);
+  // The selection the user owns: null when nothing is selected. Its strokes are
+  // the source of truth; the mask canvas is a cache of replaying them.
+  const [selection, setSelection] = useState(null);
+  const [undoLen, setUndoLen] = useState(0);
+  // Candidates from a fill, held until accepted or discarded, so trying a
+  // second model does not destroy the result of the first.
+  const [staging, setStaging] = useState(null);
+  // In-progress frames during a staged run, kept off `frame` so a live preview
+  // cannot overwrite the image the fill is running against.
+  const [livePreview, setLivePreview] = useState(null);
   const [job, setJob] = useState(null);
   // The blank canvas people paint regions onto. Its size is remembered here
   // rather than read from the sampler's image size: a composition can be any
@@ -88,7 +104,10 @@ export default function Play() {
   const maskRef = useRef(null);
   const heroRef = useRef(null);
   const syncMaskOverlayRef = useRef(() => {});
-  const maskUndoRef = useRef([]);
+  const undoRef = useRef([]);
+  // A mirror of `selection`, so the pointer handlers that add strokes can read
+  // the current value without going stale between renders.
+  const selectionRef = useRef(null);
   const [sampleParams, setSampleParamsState] = useState(loadSampleParams);
 
   const setTabStateKey = useCallback((key, valueOrFn, initial) => {
@@ -100,52 +119,92 @@ export default function Play() {
   }, []);
 
   const bumpMask = useCallback(() => setMaskVersion((v) => v + 1), []);
-  // clearMask/clearMaskUndo are defined further down; applyInit needs them.
-  const clearMaskRef = useRef(null);
-  const clearMaskUndoRef = useRef(null);
+  useEffect(() => { selectionRef.current = selection; }, [selection]);
 
-  const pushMaskUndo = useCallback(() => {
-    const c = maskRef.current;
-    if (!c || !c.width || !c.height) return;
-    // Keep the stack on a ref so mid-stroke pushes do not re-render (re-render
-    // was wiping in-progress brush paint from the overlay canvas).
-    const url = c.toDataURL("image/png");
-    maskUndoRef.current = [url, ...maskUndoRef.current].slice(0, MASK_UNDO_MAX);
-    setMaskUndoLen(maskUndoRef.current.length);
-  }, []);
-
-  const clearMaskUndo = useCallback(() => {
-    maskUndoRef.current = [];
-    setMaskUndoLen(0);
-  }, []);
-
-  const undoMask = useCallback(() => {
-    const stack = maskUndoRef.current;
-    if (!stack.length) return;
-    const [prev, ...rest] = stack;
-    maskUndoRef.current = rest;
-    setMaskUndoLen(rest.length);
+  /** Replay a selection onto the mask canvas at its current size. */
+  const rasterizeNow = useCallback((sel, size) => {
     const c = maskRef.current;
     if (!c) return;
-    const im = new Image();
-    im.onload = () => {
-      const w = im.naturalWidth || im.width;
-      const h = im.naturalHeight || im.height;
-      if (c.width !== w || c.height !== h) {
-        c.width = w;
-        c.height = h;
-      } else {
-        c.getContext("2d").clearRect(0, 0, c.width, c.height);
-      }
-      const ctx = c.getContext("2d");
-      ctx.globalCompositeOperation = "source-over";
-      ctx.globalAlpha = 1;
-      ctx.drawImage(im, 0, 0);
-      syncMaskOverlayRef.current();
-      bumpMask();
-    };
-    im.src = prev;
+    const w = size?.w || c.width;
+    const h = size?.h || c.height;
+    if (!w || !h) return;
+    rasterize(sel, c, w, h);
+    syncMaskOverlayRef.current();
+    bumpMask();
   }, [bumpMask]);
+
+  const pushUndo = useCallback((snap) => {
+    undoRef.current = [snap, ...undoRef.current].slice(0, SELECTION_UNDO_MAX);
+    setUndoLen(undoRef.current.length);
+  }, []);
+
+  const clearUndo = useCallback(() => {
+    undoRef.current = [];
+    setUndoLen(0);
+  }, []);
+
+  /** Append a stroke. The caller has usually already drawn it live, so this
+   *  records it for undo and replay rather than repainting. */
+  const addStroke = useCallback((stroke, { redraw = false } = {}) => {
+    const prev = selectionRef.current;
+    pushUndo(prev);
+    const base = prev || newSelection();
+    const next = { ...base, enabled: true, strokes: [...base.strokes, stroke] };
+    selectionRef.current = next;
+    setSelection(next);
+    if (redraw) rasterizeNow(next);
+    else bumpMask();
+  }, [pushUndo, rasterizeNow, bumpMask]);
+
+  const undoSelection = useCallback(() => {
+    const stack = undoRef.current;
+    if (!stack.length) return;
+    const [prev, ...rest] = stack;
+    undoRef.current = rest;
+    setUndoLen(rest.length);
+    selectionRef.current = prev;
+    setSelection(prev);
+    rasterizeNow(prev);
+  }, [rasterizeNow]);
+
+  /** Drop the selection. Undoable, so a mis-click is not destructive. */
+  const deselect = useCallback(() => {
+    const prev = selectionRef.current;
+    if (!prev) return;
+    pushUndo(prev);
+    selectionRef.current = null;
+    setSelection(null);
+    rasterizeNow(null);
+  }, [pushUndo, rasterizeNow]);
+
+  /** Invert on an empty selection means "select everything", which is useful. */
+  const invertSelection = useCallback(() => {
+    addStroke(invertStroke(), { redraw: true });
+  }, [addStroke]);
+
+  const setSelectionEnabled = useCallback((on) => {
+    const prev = selectionRef.current;
+    if (!prev) return;
+    const next = { ...prev, enabled: !!on };
+    selectionRef.current = next;
+    setSelection(next);
+  }, []);
+
+  const renameSelection = useCallback((name) => {
+    const prev = selectionRef.current;
+    if (!prev) return;
+    const next = { ...prev, name: name || prev.name };
+    selectionRef.current = next;
+    setSelection(next);
+  }, []);
+
+  const setSelectionParam = useCallback((k, v) => {
+    const prev = selectionRef.current;
+    if (!prev) return;
+    const next = { ...prev, params: { ...prev.params, [k]: v } };
+    selectionRef.current = next;
+    setSelection(next);
+  }, []);
 
   const setSampleParam = useCallback((k, v) => {
     setSampleParamsState((s) => {
@@ -188,8 +247,13 @@ export default function Play() {
     pushHistory(img, raw, card);
   }, [setFrame, pushHistory]);
 
+  /** Put an earlier result back on the canvas, keeping the selection so you can
+   *  branch from it. Any candidates still being compared are abandoned — the
+   *  image they were filled from is the thing being replaced. */
   const restoreHistory = useCallback((entry) => {
     if (!entry) return;
+    setStaging(null);
+    setLivePreview(null);
     setFrame(entry.img, entry.raw ?? null, entry.card ?? null);
   }, [setFrame]);
 
@@ -203,31 +267,26 @@ export default function Play() {
 
   /** Set (or drop) the init image.
    *
-   *  A mask is painted against one specific picture, so swapping the init out
-   *  from under it would apply an old selection to a new image. Changing the
-   *  init clears the mask unless a caller explicitly opts out.
+   *  This used to clear the selection, on the grounds that a mask belongs to
+   *  the image it was drawn on. But filling a selection reads the *canvas*, not
+   *  the init — an init only affects a full-canvas generation, so it cannot
+   *  invalidate a selection drawn over the canvas. The selection stays.
    */
-  const applyInit = useCallback((src, { keepMask = false } = {}) => {
-    setInitImage((prev) => {
-      if (prev !== src && !keepMask) {
-        clearMaskRef.current?.({ skipUndo: true });
-        clearMaskUndoRef.current?.();
-      }
-      return src || null;
-    });
+  const applyInit = useCallback((src) => {
+    setInitImage(src || null);
   }, []);
 
   const useAsInit = useCallback(() => {
     const src = showRaw && frameRaw ? frameRaw : frame;
     if (!src) return;
     applyInit(src);
-    toast("Canvas set as init — mask cleared", "success");
+    toast("Canvas set as init", "success");
   }, [frame, frameRaw, showRaw, applyInit, toast]);
 
   const useHistoryAsInit = useCallback((entry) => {
     if (!entry?.img) return;
     applyInit(entry.raw || entry.img);
-    toast("Set as init — mask cleared", "success");
+    toast("Set as init", "success");
   }, [applyInit, toast]);
 
   /** Drop the init image, keeping whatever is on the canvas. */
@@ -236,11 +295,14 @@ export default function Play() {
     toast("Init cleared", "success");
   }, [applyInit, toast]);
 
-  /** A blank canvas to paint on: image, init, mask and recipe all reset.
+  /** A blank canvas to paint on: image, init, selection and recipe all reset.
    *
    *  Deliberately *not* set as the init image. An untouched blank canvas is a
-   *  surface to select on, not a picture to work from — with no region painted,
+   *  surface to select on, not a picture to work from — with nothing selected,
    *  Generate should make a new image rather than img2img from empty pixels.
+   *
+   *  This is the one place a selection is dropped without the user saying so,
+   *  and it is the right one: the canvas it belonged to no longer exists.
    */
   const newCanvas = useCallback((w, h, { quiet = false } = {}) => {
     const width = clampCanvasSide(w);
@@ -252,11 +314,15 @@ export default function Play() {
     setFrameRaw(null);
     setFrameCard(null);
     setPendingCard(null);
+    setStaging(null);
+    setLivePreview(null);
     applyInit(null);
-    clearMaskRef.current?.({ skipUndo: true });
-    clearMaskUndoRef.current?.();
+    selectionRef.current = null;
+    setSelection(null);
+    rasterizeNow(null);
+    clearUndo();
     if (!quiet) toast(`Blank canvas — ${width}x${height}`, "success");
-  }, [applyInit, toast]);
+  }, [applyInit, toast, rasterizeNow, clearUndo]);
 
   /** Resizing is the same act as starting over: a new blank ground at that size. */
   const setCanvasSize = useCallback((patch) => {
@@ -299,6 +365,8 @@ export default function Play() {
       const r = await api.post("/perform/read-params", { image: url });
       card = r.card || null;
     } catch { /* not fatal — the image still lands on the canvas */ }
+    setStaging(null);
+    setLivePreview(null);
     setFrame(url, null, card);
     applyInit(url);
     pushHistory(url, null, card);
@@ -306,21 +374,14 @@ export default function Play() {
     toast(card?.params ? "On canvas — Kiln settings found" : "On canvas", "success");
   }, [setFrame, pushHistory, toast]);
 
-  useEffect(() => { clearMaskRef.current = clearMask; });
-  useEffect(() => { clearMaskUndoRef.current = clearMaskUndo; });
-
-  const clearMask = useCallback((opts = {}) => {
-    const c = maskRef.current;
-    if (!c) return;
-    if (!opts.skipUndo) pushMaskUndo();
-    const ctx = c.getContext("2d");
-    ctx.clearRect(0, 0, c.width, c.height);
-    bumpMask();
-  }, [bumpMask, pushMaskUndo]);
-
+  /** The mask as the backend wants it: white where the fill should happen.
+   *
+   *  Returns null for a disabled selection, which is how the enable toggle
+   *  works without every caller having to check it.
+   */
   const getMaskDataUrl = useCallback(() => {
     const c = maskRef.current;
-    if (!c) return null;
+    if (!c || !selection?.enabled) return null;
     const ctx = c.getContext("2d");
     const img = ctx.getImageData(0, 0, c.width, c.height);
     const { data } = img;
@@ -337,8 +398,13 @@ export default function Play() {
     out.height = c.height;
     out.getContext("2d").putImageData(img, 0, 0);
     return out.toDataURL("image/png");
-  }, []);
+  }, [selection]);
 
+  /** A contrast split becomes one stroke, replacing whatever came before it.
+   *
+   *  Replacing rather than adding is what the two preview tiles imply: picking
+   *  the other side should give you the other side, not both sides at once.
+   */
   const applyContrastMask = useCallback(async (imageSrc, options) => {
     const maskCanvas = maskRef.current;
     const hero = heroRef.current;
@@ -353,17 +419,17 @@ export default function Play() {
     const { overlay, w, h } = await buildContrastMask(imageSrc, options);
     if (!overlay || !w || !h) return false;
 
-    pushMaskUndo();
-    maskCanvas.width = w;
-    maskCanvas.height = h;
-    const ctx = maskCanvas.getContext("2d");
-    ctx.globalCompositeOperation = "source-over";
-    ctx.globalAlpha = 1;
-    ctx.putImageData(overlay, 0, 0);
-    syncMaskOverlayRef.current();
-    bumpMask();
+    const stroke = cachedStroke("split", overlayToCache(overlay, w, h), "add");
+    const prev = selectionRef.current;
+    pushUndo(prev);
+    const base = prev || newSelection();
+    const kept = base.strokes.filter((s) => s.type !== "split");
+    const next = { ...base, enabled: true, strokes: [...kept, stroke] };
+    selectionRef.current = next;
+    setSelection(next);
+    rasterizeNow(next, { w, h });
     return true;
-  }, [bumpMask, pushMaskUndo]);
+  }, [pushUndo, rasterizeNow]);
 
   const applyFloodFillMask = useCallback(async (imageSrc, x, y, options = {}) => {
     const maskCanvas = maskRef.current;
@@ -377,34 +443,25 @@ export default function Play() {
     });
     if (!alpha || !w || !h) return false;
 
-    pushMaskUndo();
+    // The flood fill is baked in rather than re-evaluated on replay: it is a
+    // function of the pixels underneath, and a fill changes those, so a live
+    // recomputation would move the selection under the user.
+    const stroke = cachedStroke("wand", alphaToCache(alpha, w, h), erase ? "subtract" : "add");
     if (maskCanvas.width !== w || maskCanvas.height !== h) {
-      maskCanvas.width = w;
-      maskCanvas.height = h;
+      addStroke(stroke, { redraw: true });
+      return true;
     }
+    // Same size, so the new stroke can be composited straight on rather than
+    // replaying the whole list.
     const ctx = maskCanvas.getContext("2d");
-    const existing = ctx.getImageData(0, 0, w, h);
-    const overlay = new ImageData(w, h);
-    for (let i = 0; i < w * h; i += 1) {
-      const o = i * 4;
-      let a;
-      if (erase) {
-        a = alpha[i] > 8 ? 0 : existing.data[o + 3];
-      } else {
-        a = Math.max(existing.data[o + 3], alpha[i]);
-      }
-      overlay.data[o] = 255;
-      overlay.data[o + 1] = 122;
-      overlay.data[o + 2] = 69;
-      overlay.data[o + 3] = a > 8 ? a : 0;
-    }
-    ctx.globalCompositeOperation = "source-over";
     ctx.globalAlpha = 1;
-    ctx.putImageData(overlay, 0, 0);
+    ctx.globalCompositeOperation = erase ? "destination-out" : "source-over";
+    ctx.drawImage(stroke.cache, 0, 0);
+    ctx.globalCompositeOperation = "source-over";
     syncMaskOverlayRef.current();
-    bumpMask();
+    addStroke(stroke);
     return true;
-  }, [bumpMask, wandTolerance, pushMaskUndo]);
+  }, [wandTolerance, addStroke]);
 
   // Busy state is derived here rather than inside each tab: Play stays mounted,
   // so the indicator keeps updating after you navigate away from a running job.
@@ -426,15 +483,69 @@ export default function Play() {
     tabState["sweep.twoD"] ? (tabState["sweep.param2"] ?? "eta") : null,
   ].filter(Boolean);
 
-  const canvasImage = showRaw && frameRaw ? frameRaw : frame;
+  /** Stage fill results instead of committing them.
+   *
+   *  `frame` stays the image the fill ran against, so a second fill with a
+   *  different model starts from the same place rather than stacking on top of
+   *  the first one's output. That is what makes comparing models possible.
+   */
+  const stageResults = useCallback((items, base) => {
+    if (!items?.length) return;
+    setLivePreview(null);
+    setStaging((prev) => {
+      if (prev) {
+        return { ...prev, items: [...prev.items, ...items], index: prev.items.length };
+      }
+      return { base, items, index: 0 };
+    });
+  }, []);
+
+  const setStageIndex = useCallback((i) => {
+    setStaging((prev) => {
+      if (!prev) return prev;
+      const n = prev.items.length;
+      return { ...prev, index: ((i % n) + n) % n };
+    });
+  }, []);
+
+  const acceptStaging = useCallback(() => {
+    setStaging((prev) => {
+      const pick = prev?.items?.[prev.index];
+      if (pick) commitFrame(pick.img, pick.raw, pick.card);
+      return null;
+    });
+    setLivePreview(null);
+  }, [commitFrame]);
+
+  const discardStaging = useCallback(() => {
+    setStaging((prev) => {
+      if (prev) setFrame(prev.base.img, prev.base.raw, prev.base.card);
+      return null;
+    });
+    setLivePreview(null);
+  }, [setFrame]);
+
+  const staged = staging ? staging.items[staging.index] : null;
+  // What the fill runs against: the pre-fill image while staging, so trying a
+  // second model compares rather than compounds.
+  const fillBase = staging ? staging.base : { img: frame, raw: frameRaw, card: frameCard };
+  const displayFrame = livePreview || (staged ? staged.img : frame);
+  const displayRaw = livePreview ? null : (staged ? staged.raw : frameRaw);
+  const canvasImage = showRaw && displayRaw ? displayRaw : displayFrame;
   // Still the untouched blank ground: nothing has been generated, dropped or
-  // restored over it. Region fill has to know, because a partial run started
+  // restored over it. A fill has to know, because a partial run started
   // from empty pixels gives back the empty pixels it started from.
-  const canvasIsBlank = !!frame && frame === blankFrameRef.current;
-  const activeSeed = frameCard?.params?.seed ?? null;
+  const canvasIsBlank = !!frame && frame === blankFrameRef.current && !staging;
+  const activeSeed = (staged ? staged.card : frameCard)?.params?.seed ?? null;
   const genRunning = !!(job && job.status === "running");
   const genPaused = genRunning && !!job?.detail?.paused;
-  const canUndoMask = maskUndoLen > 0;
+  const canUndoSelection = undoLen > 0;
+  const selectionPixels = useMemo(
+    () => countMaskPixels(maskRef.current),
+    // maskVersion is the signal; the pixels live on a ref.
+    [maskVersion],
+  );
+  const hasSelection = !!selection?.enabled && selectionPixels > 0;
 
   // Play opens on a blank canvas rather than an empty box, so the brush and
   // region tools have something to work on from the first moment. Once only:
@@ -466,8 +577,12 @@ export default function Play() {
     brushSize, setBrushSize, brushHard, setBrushHard, eraser, setEraser,
     maskTool, setMaskTool, wandTolerance, setWandTolerance,
     maskRef, heroRef,
-    syncMaskOverlayRef, clearMask, getMaskDataUrl, applyContrastMask, applyFloodFillMask,
-    pushMaskUndo, undoMask, clearMaskUndo, canUndoMask,
+    syncMaskOverlayRef, getMaskDataUrl, applyContrastMask, applyFloodFillMask,
+    selection, selectionPixels, hasSelection, addStroke, rasterizeNow,
+    deselect, invertSelection, setSelectionEnabled, renameSelection, setSelectionParam,
+    undoSelection, canUndoSelection,
+    staging, staged, fillBase, stageResults, setStageIndex, acceptStaging, discardStaging,
+    setLivePreview,
     sampleParams, setSampleParam, mergeSampleParams, maskVersion, bumpMask,
     canvasSize, setCanvasSize, newCanvas, canvasIsBlank,
     tabState, setTabStateKey,
@@ -523,19 +638,20 @@ export default function Play() {
 function PlayCanvas({ brushable }) {
   const { toast } = useApp();
   const {
-    frame, frameRaw, showRaw, setShowRaw, initImage, progress, heroRef,
+    frameRaw, showRaw, setShowRaw, initImage, progress, heroRef, canvasImage,
     frameCard, pendingCard, setPendingCard, applyCard, activeSeed, useAsInit,
     clearInit, clearCanvas, canvasSize, setCanvasSize, newCanvas, loadFile,
-    maskRef, maskVersion, clearMask,
+    selection, selectionPixels, deselect, invertSelection, setSelectionEnabled,
+    renameSelection, staging, staged,
   } = usePlay();
-  const shown = showRaw && frameRaw ? frameRaw : frame;
+  const shown = canvasImage;
   const [busy, setBusy] = useState(false);
+  const [renaming, setRenaming] = useState(false);
   const openRef = useRef(null);
-  // Whether a selection is live decides what the Generate button does, so it
-  // belongs next to the picture rather than folded into a sidebar section --
-  // the orange overlay says an area is marked, not that the next run will be
-  // confined to it.
-  const maskPixels = useMemo(() => countMaskPixels(maskRef.current), [maskVersion, maskRef]);
+  // While staging, everything in this header describes the candidate on screen
+  // rather than the image it was filled from.
+  const shownCard = staged ? staged.card : frameCard;
+  const shownRaw = staged ? staged.raw : frameRaw;
 
   const download = async () => {
     if (!shown) return;
@@ -543,10 +659,10 @@ function PlayCanvas({ brushable }) {
     try {
       // Routed through the API so the PNG keeps its embedded recipe — a plain
       // <a download> on the canvas data URL would hand over a stripped file.
-      const seed = frameCard?.params?.seed;
+      const seed = shownCard?.params?.seed;
       await downloadPost(
         "/perform/export",
-        { image: shown, card: frameCard, filename: seed != null ? `kiln-${seed}` : "kiln" },
+        { image: shown, card: shownCard, filename: seed != null ? `kiln-${seed}` : "kiln" },
         seed != null ? `kiln-${seed}.png` : "kiln.png",
       );
     } catch (e) { toast(e.message, "error"); }
@@ -563,7 +679,7 @@ function PlayCanvas({ brushable }) {
             {activeSeed != null && !progress && (
               <span className="pill mono" title="Seed that produced this image">seed {activeSeed}</span>
             )}
-            {frameRaw && (
+            {shownRaw && (
               <Tooltip text="Show the image straight from the sampler, before post-processing and upscaling. Useful for judging what the model actually produced.">
                 <label className="row center gap-1 has-tip">
                   <input type="checkbox" checked={showRaw} onChange={(e) => setShowRaw(e.target.checked)} />
@@ -589,17 +705,55 @@ function PlayCanvas({ brushable }) {
             </div>
           </div>
         )}
-        {maskPixels > 0 && (
-          <div className="callout row between center wrap gap-2" role="status">
-            <span>
-              <strong>Selection active</strong> — {maskPixels.toLocaleString()} px.
-              {" "}The next run changes only this area; the rest of the canvas is kept.
+        {selection && (
+          <div className={`selection-bar ${selection.enabled ? "" : "off"}`} role="status">
+            <Tooltip text={selection.enabled
+              ? "Turn the selection off without losing it — the next run treats the whole canvas."
+              : "Turn the selection back on."}>
+              <button
+                type="button"
+                className={`sel-eye ${selection.enabled ? "on" : ""}`}
+                aria-pressed={selection.enabled}
+                aria-label={selection.enabled ? "Disable selection" : "Enable selection"}
+                onClick={() => setSelectionEnabled(!selection.enabled)}
+              >
+                {selection.enabled ? "◉" : "○"}
+              </button>
+            </Tooltip>
+            {renaming ? (
+              <input
+                type="text"
+                className="sel-name-input"
+                defaultValue={selection.name}
+                autoFocus
+                aria-label="Selection name"
+                onBlur={(e) => { renameSelection(e.target.value.trim()); setRenaming(false); }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") { renameSelection(e.target.value.trim()); setRenaming(false); }
+                  if (e.key === "Escape") setRenaming(false);
+                }}
+              />
+            ) : (
+              <button type="button" className="sel-name" onClick={() => setRenaming(true)} title="Rename">
+                {selection.name}
+              </button>
+            )}
+            <span className="sub sel-note">
+              {selectionPixels.toLocaleString()} px —{" "}
+              {selection.enabled
+                ? "the next run changes only this area"
+                : "off, so the next run treats the whole canvas"}
             </span>
-            <button type="button" className="btn ghost sm" onClick={() => clearMask()}>
-              Deselect
-            </button>
+            <div className="spacer" />
+            <Tooltip text="Swap what is selected for what is not. With nothing selected, this selects the whole canvas.">
+              <button type="button" className="btn ghost sm" onClick={invertSelection}>Invert</button>
+            </Tooltip>
+            <Tooltip text="Drop the selection. Ctrl+Z brings it back.">
+              <button type="button" className="btn ghost sm" onClick={() => deselect()}>Deselect</button>
+            </Tooltip>
           </div>
         )}
+        {staging && <StagingBar />}
         <div className={`hero ${brushable ? "brushable" : ""}`} ref={heroRef}>
           {shown ? <img src={shown} alt="canvas" /> : (
             <span className="sub">Generate, drop, or paste an image.</span>
@@ -760,13 +914,17 @@ function ResultsRail() {
 function MaskOverlay({ active }) {
   const {
     maskRef, heroRef, brushSize, brushHard, eraser, canvasImage,
-    syncMaskOverlayRef, bumpMask, maskTool, applyFloodFillMask, wandTolerance,
-    pushMaskUndo,
+    syncMaskOverlayRef, maskTool, applyFloodFillMask, wandTolerance,
+    addStroke, rasterizeNow, selection,
   } = usePlay();
   const drawing = useRef(false);
   const last = useRef(null);
   const wandBusy = useRef(false);
-  const strokePushed = useRef(false);
+  // Points of the stroke in progress, normalised, recorded as they are painted.
+  const points = useRef([]);
+  const radiusRef = useRef(0);
+  const selRef = useRef(selection);
+  useEffect(() => { selRef.current = selection; }, [selection]);
 
   const syncSize = () => {
     const c = maskRef.current;
@@ -790,22 +948,12 @@ function MaskOverlay({ active }) {
     const w = img.naturalWidth;
     const h = img.naturalHeight;
     if (c.width !== w || c.height !== h) {
-      // Setting width/height clears the canvas, so the mask is carried over on
-      // another canvas. This used to go through toDataURL + Image.onload, which
-      // was wrong twice over: the encode is a synchronous PNG on the main
-      // thread (and this runs on *every* live preview frame, each a different
-      // size, so a 50-step run paid for 50 of them -- that is the stall people
-      // hit when brushing right after generating), and the restore landed a
-      // frame later, wiping anything painted in between. drawImage is immediate
-      // and scales in one step.
-      const snap = document.createElement("canvas");
-      snap.width = c.width;
-      snap.height = c.height;
-      const had = c.width > 0 && c.height > 0;
-      if (had) snap.getContext("2d").drawImage(c, 0, 0);
-      c.width = w;
-      c.height = h;
-      if (had) c.getContext("2d").drawImage(snap, 0, 0, w, h);
+      // Setting width/height clears the canvas, so the selection has to be put
+      // back. It used to be rescaled from the old raster; now the strokes are
+      // replayed at the new size, which is both sharper and the reason stroke
+      // coordinates are stored normalised. rasterize() sets the dimensions
+      // itself, so the next syncSize sees a match and this cannot recurse.
+      rasterizeNow(selRef.current, { w, h });
     }
   };
 
@@ -830,110 +978,172 @@ function MaskOverlay({ active }) {
     };
   }, [canvasImage, syncMaskOverlayRef]);
 
-  const stamp = (ctx, x, y, radius) => {
-    ctx.globalCompositeOperation = eraser ? "destination-out" : "source-over";
-    if (brushHard) {
-      ctx.fillStyle = eraser ? "rgba(0,0,0,1)" : "rgba(255,122,69,0.7)";
-      ctx.beginPath();
-      ctx.arc(x, y, radius, 0, Math.PI * 2);
-      ctx.fill();
-      return;
-    }
-    const g = ctx.createRadialGradient(x, y, 0, x, y, radius);
-    if (eraser) {
-      g.addColorStop(0, "rgba(0,0,0,0.85)");
-      g.addColorStop(0.55, "rgba(0,0,0,0.35)");
-      g.addColorStop(1, "rgba(0,0,0,0)");
-    } else {
-      g.addColorStop(0, "rgba(255,122,69,0.55)");
-      g.addColorStop(0.55, "rgba(255,122,69,0.22)");
-      g.addColorStop(1, "rgba(255,122,69,0)");
-    }
-    ctx.fillStyle = g;
-    ctx.beginPath();
-    ctx.arc(x, y, radius, 0, Math.PI * 2);
-    ctx.fill();
+  const pointAt = (e) => {
+    const c = maskRef.current;
+    const r = c.getBoundingClientRect();
+    return {
+      x: ((e.clientX - r.left) / r.width) * c.width,
+      y: ((e.clientY - r.top) / r.height) * c.height,
+      scale: c.width / Math.max(r.width, 1),
+    };
   };
 
+  /** Paint live, and record the point for the stroke being built.
+   *
+   *  Painting incrementally rather than replaying the stroke list on every
+   *  pointermove keeps the hot path exactly as cheap as it was; the list is
+   *  only replayed on undo, invert and resize.
+   */
   const paint = (e) => {
     if (!active) return;
     const c = maskRef.current;
     if (!c) return;
-    const r = c.getBoundingClientRect();
-    const x = ((e.clientX - r.left) / r.width) * c.width;
-    const y = ((e.clientY - r.top) / r.height) * c.height;
+    const pt = pointAt(e);
     const ctx = c.getContext("2d");
-    const radius = (brushSize / 2) * (c.width / Math.max(r.width, 1));
-    const prev = last.current;
-    if (prev && brushHard) {
-      ctx.globalCompositeOperation = eraser ? "destination-out" : "source-over";
-      ctx.strokeStyle = eraser ? "rgba(0,0,0,1)" : "rgba(255,122,69,0.7)";
-      ctx.lineWidth = radius * 2;
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-      ctx.beginPath();
-      ctx.moveTo(prev.x, prev.y);
-      ctx.lineTo(x, y);
-      ctx.stroke();
-    } else if (prev && !brushHard) {
-      const dx = x - prev.x;
-      const dy = y - prev.y;
-      const dist = Math.hypot(dx, dy);
-      const step = Math.max(radius * 0.35, 1);
-      const n = Math.max(1, Math.ceil(dist / step));
-      for (let i = 1; i <= n; i++) {
-        stamp(ctx, prev.x + (dx * i) / n, prev.y + (dy * i) / n, radius);
-      }
-    } else {
-      stamp(ctx, x, y, radius);
-    }
-    last.current = { x, y };
+    const radius = (brushSize / 2) * pt.scale;
+    radiusRef.current = radius;
+    paintBrushPoint(ctx, last.current, pt, radius, { hard: brushHard, erase: eraser });
+    ctx.globalCompositeOperation = "source-over";
+    last.current = { x: pt.x, y: pt.y };
+    points.current.push({ x: pt.x / c.width, y: pt.y / c.height });
   };
 
   const endStroke = () => {
-    if (drawing.current) bumpMask();
+    const c = maskRef.current;
+    if (drawing.current && points.current.length && c?.width) {
+      addStroke(brushStroke({
+        points: points.current,
+        size: (radiusRef.current * 2) / c.width,
+        hard: brushHard,
+        mode: eraser ? "subtract" : "add",
+      }));
+    }
     drawing.current = false;
     last.current = null;
-    strokePushed.current = false;
+    points.current = [];
   };
 
   const wandClick = async (e) => {
     if (!active || !canvasImage || wandBusy.current) return;
     const c = maskRef.current;
     if (!c) return;
-    const r = c.getBoundingClientRect();
-    const x = ((e.clientX - r.left) / r.width) * c.width;
-    const y = ((e.clientY - r.top) / r.height) * c.height;
+    const pt = pointAt(e);
     wandBusy.current = true;
     try {
-      await applyFloodFillMask(canvasImage, x, y, { tolerance: wandTolerance, eraser });
+      await applyFloodFillMask(canvasImage, pt.x, pt.y, { tolerance: wandTolerance, eraser });
     } finally {
       wandBusy.current = false;
     }
   };
 
+  // A disabled selection still shows, faintly: otherwise "off" and "deleted"
+  // look identical and the eye toggle appears to have thrown the work away.
+  const dim = selection && !selection.enabled;
+
   return (
     <canvas
-      className={`mask-overlay ${active ? "on" : ""} ${maskTool === "wand" ? "wand" : ""}`}
+      className={`mask-overlay ${active ? "on" : ""} ${maskTool === "wand" ? "wand" : ""} ${dim ? "dim" : ""}`}
       ref={maskRef}
+      role="img"
+      aria-label={maskTool === "wand"
+        ? "Selection overlay — click to select a matching area"
+        : "Selection overlay — drag to paint a selection"}
       onPointerDown={(e) => {
         if (maskTool === "wand") {
           wandClick(e);
           return;
         }
-        e.target.setPointerCapture(e.pointerId);
+        // Throws if the pointer id is not an active pointer, which is the case
+        // for synthetic events. Capture is a nicety -- losing it should not
+        // cost the stroke.
+        try { e.target.setPointerCapture(e.pointerId); } catch { /* not fatal */ }
         syncSize();
-        if (!strokePushed.current) {
-          pushMaskUndo();
-          strokePushed.current = true;
-        }
         drawing.current = true;
         last.current = null;
+        points.current = [];
         paint(e);
       }}
       onPointerMove={(e) => { if (maskTool === "brush" && drawing.current) paint(e); }}
       onPointerUp={endStroke}
       onPointerCancel={endStroke}
     />
+  );
+}
+
+/** Which fields actually differ across a set of candidates.
+ *
+ *  Labelling a comparison by seed is useless when the seed is the one thing
+ *  held fixed — the useful label is whatever was varied to produce the set.
+ */
+const META_KEYS = ["model", "bend", "change", "seed"];
+
+function metaText(key, v) {
+  if (v == null || v === "") return key === "bend" ? "no bend" : null;
+  if (key === "change") return `change ${Math.round(v * 100)}%`;
+  if (key === "seed") return `seed ${v}`;
+  return String(v);
+}
+
+function stageLabels(items) {
+  const varying = META_KEYS.filter(
+    (k) => new Set(items.map((it) => it.meta?.[k] ?? "")).size > 1,
+  );
+  const use = varying.length ? varying : ["seed"];
+  return items.map((it, i) => {
+    const bits = use.map((k) => metaText(k, it.meta?.[k])).filter(Boolean);
+    return bits.length ? bits.join(" · ") : `Try ${i + 1}`;
+  });
+}
+
+/** Candidates from one or more fills, held until accepted or discarded. */
+function StagingBar() {
+  const { staging, setStageIndex, acceptStaging, discardStaging } = usePlay();
+  const labels = useMemo(() => stageLabels(staging.items), [staging.items]);
+
+  useEffect(() => {
+    const onKey = (e) => {
+      const t = e.target;
+      const tag = t?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t?.isContentEditable) return;
+      if (e.key === "ArrowLeft") { e.preventDefault(); setStageIndex(staging.index - 1); }
+      else if (e.key === "ArrowRight") { e.preventDefault(); setStageIndex(staging.index + 1); }
+      else if (e.key === "Enter") { e.preventDefault(); acceptStaging(); }
+      else if (e.key === "Escape") { e.preventDefault(); discardStaging(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [staging.index, setStageIndex, acceptStaging, discardStaging]);
+
+  return (
+    <div className="staging-bar">
+      <div className="row between center wrap gap-2 mb-2">
+        <span className="sub">
+          <strong className="staging-title">Trying {staging.items.length}</strong>
+          {" "}— the canvas still holds the image these ran against. Nothing is changed until you accept.
+        </span>
+        <div className="row gap-2">
+          <Tooltip text="Put the highlighted result on the canvas and into Results. (Enter)">
+            <button type="button" className="btn sm primary" onClick={acceptStaging}>Accept</button>
+          </Tooltip>
+          <Tooltip text="Throw all of these away and go back to the image you started from. (Esc)">
+            <button type="button" className="btn ghost sm" onClick={discardStaging}>Discard</button>
+          </Tooltip>
+        </div>
+      </div>
+      <div className="staging-list">
+        {staging.items.map((it, i) => (
+          <button
+            key={it.id}
+            type="button"
+            className={`staging-item ${i === staging.index ? "on" : ""}`}
+            onClick={() => setStageIndex(i)}
+            title={labels[i]}
+          >
+            <img src={it.img} alt="" />
+            <span className="staging-label">{labels[i]}</span>
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }

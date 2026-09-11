@@ -7,9 +7,7 @@ import {
   buildSamplePayload, buildInpaintPayload, changeToParams, effectiveSteps, skippedSteps,
   fillSizeFor, solverCanResample, LIVE_PARAM_KEYS,
   liveEditLabels, joinLabels } from "../sampleSettings.jsx";
-import {
-  contrastPreview, compositePostprocWithMask, countMaskPixels,
-} from "../contrastMask.js";
+import { contrastPreview, compositePostprocWithMask } from "../contrastMask.js";
 import { bendPresetSynopsis, bendPresetSummary } from "../bendSynopsis.js";
 
 const DEFAULT_PP = { contrast: 1, gamma: 1, saturation: 1, eqhist: 0, unsharp: 0, noise: 0 };
@@ -54,8 +52,10 @@ export default function CreatePanel() {
     canvasImage, sampleParams,
     brushSize, setBrushSize, brushHard, setBrushHard, eraser, setEraser,
     maskTool, setMaskTool, wandTolerance, setWandTolerance,
-    clearMask, getMaskDataUrl, applyContrastMask, maskRef, maskVersion, frameCard,
-    undoMask, clearMaskUndo, canUndoMask, tab,
+    getMaskDataUrl, applyContrastMask, frameCard,
+    selection, selectionPixels, hasSelection, deselect, invertSelection, setSelectionParam,
+    undoSelection, canUndoSelection, tab,
+    staging, fillBase, stageResults, setLivePreview,
     job, setJob, genRunning, genPaused, canvasIsBlank,
   } = usePlay();
 
@@ -70,30 +70,52 @@ export default function CreatePanel() {
   const [pp, setPp] = useState(DEFAULT_PP);
   const [bendPresets, setBendPresets] = useState([]);
   const [genBendPreset, setGenBendPreset] = useState(() => loadStored("kiln.genBendPreset"));
-  const [regionBendPreset, setRegionBendPreset] = useState(() => loadStored("kiln.regionBendPreset"));
   const [srFactor, setSrFactor] = useState(2);
   const [srSharpen, setSrSharpen] = useState(0.5);
   const [srBusy, setSrBusy] = useState(false);
   const [genChange, setGenChange] = useState(0.7);
-  const [regionChange, setRegionChange] = useState(0.65);
+
+  // Everything that scopes to the selected area now lives on the selection, so
+  // there is one Change slider rather than two that looked alike and took turns
+  // being the one that mattered. Defaults here cover "nothing selected yet",
+  // where the controls are shown but inert.
+  const sel = selection?.params || {};
+  const regionChange = sel.change ?? 0.65;
+  const feather = sel.feather ?? 8;
+  // RePaint resampling, on at 2 passes by default: the fill agrees with what
+  // surrounds it far better than in a single pass, and most of that gain is
+  // already there at two. 1 is off, which is how fills used to work.
+  const resample = sel.harmonize ?? 2;
+  const regionBendPreset = sel.bendPreset ?? "";
 
   // A fill on a blank canvas has to run the whole schedule. Change works by
   // skipping the early, high-noise steps to preserve what is already there --
   // and on empty pixels there is nothing worth preserving, so a partial run
   // just hands back the blank it started from. Snapped to full whenever the
   // canvas is blank; it stays editable, with a warning below if it is turned
-  // down. Keyed on the frame as well, so pressing New canvas restores full
-  // Change rather than carrying a turned-down value onto a fresh blank.
+  // down.
   useEffect(() => {
-    if (canvasIsBlank) setRegionChange(1);
-  }, [canvasIsBlank, frame]);
-  // RePaint resampling, on at 2 passes by default: the fill agrees with what
-  // surrounds it far better than in a single pass, and most of that gain is
-  // already there at two. 1 is off, which is how fills used to work.
-  const [resample, setResample] = useState(2);
+    if (canvasIsBlank && selection && selection.params.change !== 1) {
+      setSelectionParam("change", 1);
+    }
+  }, [canvasIsBlank, frame, selection, setSelectionParam]);
+
   const canResample = solverCanResample(sampleParams.sampler);
-  const [feather, setFeather] = useState(8);
+  // One control, two homes: a selection carries its own Change and bend preset,
+  // and the whole-canvas equivalents stay on the panel. Which one the control
+  // is editing is spelled out in its label rather than left to be inferred.
+  const changeValue = hasSelection ? (sel.change ?? 0.65) : genChange;
+  const setChangeValue = (v) => (
+    hasSelection ? setSelectionParam("change", v) : setGenChange(v)
+  );
+  const bendValue = hasSelection ? (sel.bendPreset ?? "") : genBendPreset;
+  const setBendValue = (v) => (
+    hasSelection ? setSelectionParam("bendPreset", v) : setGenBendPreset(v)
+  );
   const [variations, setVariations] = useState(1);
+  // Models to fill the same selection with, one after another, so they can be
+  // compared side by side in staging.
+  const [tryModels, setTryModels] = useState([]);
   const [splitMethod, setSplitMethod] = useState("luminance");
   const [brightnessThreshold, setBrightnessThreshold] = useState(128);
   const [contrastThreshold, setContrastThreshold] = useState(0);
@@ -130,26 +152,30 @@ export default function CreatePanel() {
   useEffect(() => {
     if (tab !== "create") return undefined;
     const onKey = (e) => {
-      const z = e.key === "z" || e.key === "Z";
-      if (!z || !(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
       const t = e.target;
       const tag = t?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t?.isContentEditable) return;
-      if (!canUndoMask) return;
-      e.preventDefault();
-      undoMask();
+      const k = e.key.toLowerCase();
+      if (k === "z" && !e.shiftKey) {
+        if (!canUndoSelection) return;
+        e.preventDefault();
+        undoSelection();
+      } else if (k === "d" && !e.shiftKey) {
+        e.preventDefault();
+        deselect();
+      } else if (k === "i" && e.shiftKey) {
+        e.preventDefault();
+        invertSelection();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [tab, canUndoMask, undoMask]);
+  }, [tab, canUndoSelection, undoSelection, deselect, invertSelection]);
 
   useEffect(() => {
     localStorage.setItem("kiln.genBendPreset", genBendPreset);
   }, [genBendPreset]);
-
-  useEffect(() => {
-    localStorage.setItem("kiln.regionBendPreset", regionBendPreset);
-  }, [regionBendPreset]);
 
   const splitOpts = useMemo(() => {
     const base = splitMethod === "luminance"
@@ -163,11 +189,8 @@ export default function CreatePanel() {
     setSplitPreview(null);
   }, [canvasImage, splitOpts]);
 
-  const maskPixels = useMemo(
-    () => countMaskPixels(maskRef.current),
-    [maskVersion, maskRef],
-  );
-  const hasMask = maskPixels > 0;
+  const maskPixels = selectionPixels;
+  const hasMask = hasSelection;
 
   useEffect(() => {
     if (!ppSource) return;
@@ -191,11 +214,20 @@ export default function CreatePanel() {
       } catch { /* ignore transient errors while dragging sliders */ }
     }, 220);
     return () => clearTimeout(t);
-  }, [pp, ppOn, ppSource, frameRaw, setFrame, getMaskDataUrl, maskVersion]);
+  }, [pp, ppOn, ppSource, frameRaw, setFrame, getMaskDataUrl, selectionPixels]);
 
   const onJob = (j) => {
     setJob(j);
     if (j.detail?.frame) setFrame(j.detail.frame, j.detail.frame_raw, j.detail.card);
+    setProgress(j.status === "running" ? { value: j.progress, message: j.message } : null);
+  };
+
+  // Live frames from a fill go to a preview slot rather than onto the canvas:
+  // `frame` is the image the fill is running against, and overwriting it would
+  // mean the next model in a comparison started from a half-finished result.
+  const onFillJob = (j) => {
+    setJob(j);
+    if (j.detail?.frame) setLivePreview(j.detail.frame);
     setProgress(j.status === "running" ? { value: j.progress, message: j.message } : null);
   };
 
@@ -216,9 +248,9 @@ export default function CreatePanel() {
         setMaskSide(side);
         const def = SPLIT_SIDES.find((x) => x.id === side);
         const label = splitMethod === "luminance" ? def?.luminance : def?.contrast;
-        toast(`Masked the ${(label || side).toLowerCase()} side`, "success");
+        toast(`Selected the ${(label || side).toLowerCase()} side`, "success");
       } else {
-        toast("Could not apply mask", "error");
+        toast("Could not build the selection", "error");
       }
     } catch (e) {
       toast(e.message, "error");
@@ -265,50 +297,104 @@ export default function CreatePanel() {
   const clearInit = () => {
     setInitImage(null);
     setFrame(null, null);
-    clearMask({ skipUndo: true });
-    clearMaskUndo();
     setSplitPreview(null);
   };
 
-  // A selection outlives the fill it drove. Trying a second model, or a
-  // different setting, on the same area is the whole point of having selected
-  // it -- and a wand selection cannot be redrawn by hand anyway, least of all
-  // once the fill has changed the pixels it was derived from. Deselecting is
-  // the user's call, never a side effect of generating.
-  const finishJob = (done, region) => {
+  /** Every frame a finished job produced, oldest first. */
+  const framesOf = (done) => {
+    const frames = done.detail?.frames;
+    const framesRaw = done.detail?.frames_raw;
+    const cards = done.detail?.cards;
+    const cardFor = (i) => cards?.[i] ?? done.detail?.card ?? null;
+    if (frames?.length) {
+      return frames.map((img, i) => ({ img, raw: framesRaw?.[i] ?? null, card: cardFor(i) }));
+    }
+    if (done.detail?.frame) {
+      return [{ img: done.detail.frame, raw: done.detail.frame_raw ?? null, card: cardFor(0) }];
+    }
+    return [];
+  };
+
+  /** A whole-canvas generation has nothing underneath to protect, so it lands
+   *  on the canvas directly the way it always has. */
+  const finishGeneration = (done) => {
     setProgress(null);
     if (done.status === "error") toast(done.message, "error");
     if (done.status === "done") setSplitPending(true);
     if (done.status === "done" || done.status === "cancelled") {
-      const frames = done.detail?.frames;
-      const framesRaw = done.detail?.frames_raw;
-      const cards = done.detail?.cards;
-      const cardFor = (i) => cards?.[i] ?? done.detail?.card ?? null;
-      const kept = region ? " — selection kept" : "";
-      if (frames?.length > 1) {
-        frames.forEach((img, i) => {
-          const raw = framesRaw?.[i] ?? null;
-          if (i === frames.length - 1) commitFrame(img, raw, cardFor(i));
-          else pushHistory(img, raw, cardFor(i));
-        });
-        if (done.status === "done") toast(`${frames.length} variations saved to Results${kept}`, "success");
-        else toast(`Stopped — ${frames.length} variation(s) saved${kept}`, "success");
-      } else if (done.detail?.frame) {
-        commitFrame(done.detail.frame, done.detail.frame_raw, cardFor(0));
-        if (done.status === "cancelled") toast(`Stopped — saved to Results${kept}`, "success");
-        else if (region) toast("Filled — selection kept, try another model or setting", "success");
+      const out = framesOf(done);
+      out.forEach((f, i) => {
+        if (i === out.length - 1) commitFrame(f.img, f.raw, f.card);
+        else pushHistory(f.img, f.raw, f.card);
+      });
+      if (out.length > 1) {
+        toast(`${out.length} variations saved to Results`, "success");
+      } else if (out.length && done.status === "cancelled") {
+        toast("Stopped — saved to Results", "success");
       }
     }
     setJob(null);
     pausedSnapshot.current = null;
   };
 
+  /** A fill reworks pixels that are already there, so it is staged rather than
+   *  committed: the canvas keeps the image it ran against until you accept.
+   *  That is what lets a second model be tried against the same starting point
+   *  instead of compounding on the first one's output. */
+  const finishFill = (done, meta) => {
+    setProgress(null);
+    setLivePreview(null);
+    if (done.status === "error") toast(done.message, "error");
+    if (done.status === "done") setSplitPending(true);
+    if (done.status === "done" || done.status === "cancelled") {
+      const out = framesOf(done).map((f) => ({
+        ...f,
+        id: Math.random().toString(36).slice(2),
+        meta: { ...meta, seed: f.card?.params?.seed ?? meta.seed },
+      }));
+      if (out.length) stageResults(out, fillBase);
+    }
+    setJob(null);
+    pausedSnapshot.current = null;
+  };
+
+  /** Describe a fill well enough for staging to label it. */
+  const fillMeta = (modelP, bendName) => ({
+    model: (models || []).find((m) => m.path === modelP)?.name || "model",
+    bend: bendName || "",
+    change: brushHard ? 1 : regionChange,
+    seed: sampleParams.seed === "" ? null : sampleParams.seed,
+  });
+
+  /** One masked run against the staging base. Returns when the job settles. */
+  const runFill = async (modelP, mask, batchSize) => {
+    const bendName = regionBendPreset || genBendPreset || "";
+    const genBends = resolveBends(bendPresets, regionBendPreset)
+      || resolveBends(bendPresets, genBendPreset);
+    const mapped = changeToParams(brushHard ? 1 : regionChange, sampleParams.steps, true);
+    const body = buildInpaintPayload(sampleParams, {
+      model_path: modelP,
+      init_image: fillBase.img,
+      mask,
+      bends: genBends,
+      bend_preset: bendName,
+      feather: brushHard ? 0 : feather,
+      overrides: { ...mapped, resample: canResample ? resample : 1 },
+      batch_size: batchSize,
+    });
+    const { job: j } = await api.post("/perform/inpaint", body);
+    onFillJob(j);
+    const done = await pollJob(j.id, onFillJob, 300);
+    finishFill(done, fillMeta(modelP, bendName));
+    return done;
+  };
+
   const run = async () => {
     if (!modelPath) { toast("Pick a model first", "error"); return; }
     const mask = getMaskDataUrl();
 
-    if (mask && !frame) {
-      toast("Put an image on the canvas to fill a region", "error");
+    if (mask && !fillBase.img) {
+      toast("Put an image on the canvas to fill a selection", "error");
       return;
     }
 
@@ -316,23 +402,7 @@ export default function CreatePanel() {
 
     try {
       if (mask) {
-        const genBends = resolveBends(bendPresets, regionBendPreset)
-          || resolveBends(bendPresets, genBendPreset);
-        const mapped = changeToParams(brushHard ? 1 : regionChange, sampleParams.steps, true);
-        const body = buildInpaintPayload(sampleParams, {
-          model_path: modelPath,
-          init_image: frame,
-          mask,
-          bends: genBends,
-          bend_preset: regionBendPreset || genBendPreset || "",
-          feather: brushHard ? 0 : feather,
-          overrides: { ...mapped, resample: canResample ? resample : 1 },
-          batch_size: batchSize,
-        });
-        const { job: j } = await api.post("/perform/inpaint", body);
-        onJob(j);
-        const done = await pollJob(j.id, onJob, 300);
-        finishJob(done, true);
+        await runFill(modelPath, mask, batchSize);
       } else {
         const genBends = resolveBends(bendPresets, genBendPreset);
         const mapped = changeToParams(genChange, sampleParams.steps, !!initImage);
@@ -348,9 +418,30 @@ export default function CreatePanel() {
         const { job: j } = await api.post("/perform/sample", body);
         onJob(j);
         const done = await pollJob(j.id, onJob, 300);
-        finishJob(done, false);
+        finishGeneration(done);
       }
-    } catch (e) { toast(e.message, "error"); setProgress(null); setJob(null); }
+    } catch (e) { toast(e.message, "error"); setProgress(null); setLivePreview(null); setJob(null); }
+  };
+
+  /** Fill the same selection with each chosen model in turn.
+   *
+   *  The literal shape of "try different adjustments on a selected area": all
+   *  of them run against the same base and land in staging together, so the
+   *  comparison is side by side rather than from memory.
+   */
+  const runTryModels = async () => {
+    const mask = getMaskDataUrl();
+    if (!mask) { toast("Select an area first", "error"); return; }
+    if (!fillBase.img) { toast("Put an image on the canvas first", "error"); return; }
+    if (tryModels.length < 2) { toast("Pick at least two models to compare", "error"); return; }
+    try {
+      for (const p of tryModels) {
+        // eslint-disable-next-line no-await-in-loop
+        const done = await runFill(p, mask, 1);
+        if (done.status === "cancelled") break;
+      }
+      toast(`Filled with ${tryModels.length} models — compare below the canvas`, "success");
+    } catch (e) { toast(e.message, "error"); setProgress(null); setLivePreview(null); setJob(null); }
   };
 
   // What the live settings were when the run was paused. Resume sends only what
@@ -422,7 +513,7 @@ export default function CreatePanel() {
     ? `${runSteps} of ${sampleParams.steps} steps`
     : `${runSteps} steps`;
   const generateHint = hasMask
-    ? `Painted region · ${maskPixels.toLocaleString()} px · ${stepText}`
+    ? `${selection.name} · ${maskPixels.toLocaleString()} px · ${stepText}`
     : initImage
       ? `Full canvas · from init · ${sampleParams.image_size}px · ${stepText}`
       : `Full canvas · new generation · ${sampleParams.image_size}px · ${stepText}`;
@@ -455,33 +546,40 @@ export default function CreatePanel() {
             : "Makes a new image, or reworks an init image. Select an area below to rework only that part instead."}
         </p>
 
+        {/* One Change slider, scoped by whatever is selected. There used to be
+            two of these with the same name in different sections, only one of
+            which did anything at any moment. */}
+        {(hasMask || initImage) && (
+          <Slider
+            label={hasMask ? `Change · ${selection.name}` : "Change · whole image"}
+            value={changeValue}
+            min={0}
+            max={1}
+            step={0.05}
+            disabled={hasMask && brushHard}
+            onChange={setChangeValue}
+            fmt={(v) => `${v < 0.3 ? "subtle" : v < 0.7 ? "medium" : "strong"} · ${effectiveSteps(v, sampleParams.steps, true)} steps`}
+            tip={(hasMask
+              ? `How strongly the model restyles ${selection.name}.`
+              : "How far to move from the init image. Subtle keeps more of it; strong invents more.")
+              + "\n\nWhat it does is skip steps. The first steps of the schedule are the high-noise "
+              + "ones that would wipe out what is already there, so the run starts partway down "
+              + "instead: the lower the Change, the more of those steps are skipped and the less is "
+              + "altered. Right now it skips "
+              + `${skippedSteps(changeValue, sampleParams.steps, true)} of ${sampleParams.steps} steps`
+              + ", which is why the run is shorter than the Steps box says. It also sets how much "
+              + "extra noise is mixed in at each remaining step."
+              + (hasMask
+                ? "\n\nThis one belongs to the selection, and is remembered with it."
+                : "")}
+          />
+        )}
         {initImage && !hasMask && (
-          <>
-            <Slider
-              label="Change · whole image"
-              value={genChange}
-              min={0}
-              max={1}
-              step={0.05}
-              onChange={setGenChange}
-              fmt={(v) => `${v < 0.3 ? "subtle" : v < 0.7 ? "medium" : "strong"} · ${effectiveSteps(v, sampleParams.steps, true)} steps`}
-              tip={"How far to move from the init image. Subtle keeps more of it; strong invents more."
-                + "\n\nWhat it does is skip steps. The first steps of the schedule are the high-noise "
-                + "ones that would wipe the init image out, so the run starts partway down instead: the "
-                + "lower the Change, the more of those steps are skipped and the less the init image is "
-                + "altered. Right now it skips "
-                + `${skippedSteps(genChange, sampleParams.steps, true)} of ${sampleParams.steps} steps`
-                + ", which is why the run is shorter than the Steps box says. It also sets how much "
-                + "extra noise is mixed in at each remaining step."
-                + "\n\nThis one governs the whole image. Region has its own Change for a painted area — "
-                + "only one applies, depending on whether a mask is painted."}
-            />
-            <div className="row center gap-2 mb-2">
-              <div className="thumb-sm"><img src={initImage} alt="init" /></div>
-              <span className="sub grow">Init image set</span>
-              <button type="button" className="btn ghost sm" onClick={clearInit}>Clear init</button>
-            </div>
-          </>
+          <div className="row center gap-2 mb-2">
+            <div className="thumb-sm"><img src={initImage} alt="init" /></div>
+            <span className="sub grow">Init image set</span>
+            <button type="button" className="btn ghost sm" onClick={clearInit}>Clear init</button>
+          </div>
         )}
         {hasMask && initImage && (
           <p className="hint mb-2">Filling a selection uses the canvas. Deselect to generate from the init image instead.</p>
@@ -496,27 +594,29 @@ export default function CreatePanel() {
               min={1}
               max={4}
               step={1}
-              tip="How many seeds to sample in one GPU run (1–4). With a fixed Seed, uses seed, seed+1, …. All land in Results."
+              tip="How many seeds to sample in one GPU run (1–4). With a fixed Seed, uses seed, seed+1, …. All land together for comparison."
             />
           </div>
           {bendPresets.length > 0 && (
             <div className="grow">
               <Select
-                label="Bend preset"
-                value={genBendPreset}
-                onChange={setGenBendPreset}
+                label={hasMask ? `Bend preset · ${selection.name}` : "Bend preset"}
+                value={bendValue}
+                onChange={setBendValue}
                 options={bendOptions}
                 tip={bendTip(
-                  genBendPreset,
-                  "Optional layer tweaks saved in Play ▸ Bend, applied to the whole canvas.",
+                  bendValue,
+                  hasMask
+                    ? "Optional layer tweaks saved in Play ▸ Bend, applied when filling this selection. Remembered with it."
+                    : "Optional layer tweaks saved in Play ▸ Bend, applied to the whole canvas.",
                 )}
               />
             </div>
           )}
         </div>
-        {genBendPreset && presetByName(genBendPreset) && (
+        {bendValue && presetByName(bendValue) && (
           <p className="hint mb-2 mono-hint">
-            {bendPresetSynopsis(presetByName(genBendPreset), ops)}
+            {bendPresetSynopsis(presetByName(bendValue), ops)}
           </p>
         )}
 
@@ -575,13 +675,27 @@ export default function CreatePanel() {
             <button
               type="button"
               className="btn ghost sm"
-              onClick={undoMask}
-              disabled={!canUndoMask}
-              title="Undo last mask edit (Ctrl+Z)"
+              onClick={undoSelection}
+              disabled={!canUndoSelection}
+              title="Undo the last selection change (Ctrl+Z)"
             >
               Undo
             </button>
-            <button type="button" className="btn ghost sm" onClick={() => clearMask()} disabled={!hasMask}>
+            <button
+              type="button"
+              className="btn ghost sm"
+              onClick={invertSelection}
+              title="Swap selected for unselected (Ctrl+Shift+I)"
+            >
+              Invert
+            </button>
+            <button
+              type="button"
+              className="btn ghost sm"
+              onClick={() => deselect()}
+              disabled={!selection}
+              title="Drop the selection (Ctrl+D)"
+            >
               Deselect
             </button>
           </div>
@@ -620,37 +734,23 @@ export default function CreatePanel() {
             tip="Brush diameter in canvas pixels." />
         )}
 
+        {/* Change moved up to Generate, where it is one slider instead of two.
+            What is left here is the geometry of the fill, which is a property
+            of the selection and belongs beside the tools that make it. */}
         {!brushHard && (
-          <div className="row gap-2">
-            <div className="grow">
-              <Slider
-                label={hasMask ? "Change · painted region" : "Change · painted region (paint one first)"}
-                value={regionChange}
-                min={0}
-                max={1}
-                step={0.05}
-                onChange={setRegionChange}
-                fmt={(v) => `${v < 0.3 ? "subtle" : v < 0.7 ? "medium" : "strong"} · ${effectiveSteps(v, sampleParams.steps, true)} steps`}
-                tip={"How strongly the model restyles the painted region."
-                  + "\n\nWhat it does is skip steps. The first steps of the schedule are the high-noise "
-                  + "ones that would wipe out what is already there, so the fill starts partway down "
-                  + "instead: the lower the Change, the more of those steps are skipped and the less the "
-                  + "region is altered. Right now it skips "
-                  + `${skippedSteps(brushHard ? 1 : regionChange, sampleParams.steps, true)} of ${sampleParams.steps} steps`
-                  + ", which is why the fill is shorter than the Steps box says. It also sets how much "
-                  + "extra noise is mixed in at each remaining step."
-                  + "\n\nThis one governs the painted area only. Generate has its own Change for the whole "
-                  + "image — only one applies, depending on whether a mask is painted."
-                  + (hasMask ? "" : "\n\nNothing is painted yet, so this has no effect right now.")}
-              />
-            </div>
-            <div className="grow">
-              <Slider label="Feather" value={feather} min={0} max={32} step={1} onChange={setFeather}
-                tip="Soft edge blend for the inpaint mask." />
-            </div>
-          </div>
+          <Slider
+            label="Feather"
+            value={feather}
+            min={0}
+            max={32}
+            step={1}
+            disabled={!selection}
+            onChange={(v) => setSelectionParam("feather", Math.round(v))}
+            tip={"Soft edge blend where the fill meets the rest of the canvas."
+              + (selection ? "\n\nRemembered with this selection." : "\n\nSelect an area first.")}
+          />
         )}
-        {canvasIsBlank && !brushHard && regionChange < 1 && (
+        {canvasIsBlank && selection && !brushHard && regionChange < 1 && (
           <p className="callout mb-2">
             The canvas is blank, so anything below full Change keeps most of the empty
             pixels — a fill needs the whole schedule when there is nothing underneath
@@ -664,8 +764,8 @@ export default function CreatePanel() {
           min={1}
           max={8}
           step={1}
-          onChange={(v) => setResample(Math.round(v))}
-          disabled={!canResample}
+          onChange={(v) => setSelectionParam("harmonize", Math.round(v))}
+          disabled={!canResample || !selection}
           fmt={(v) => (v <= 1 ? "off" : `${v} passes · about ${v}x slower`)}
           tip={"Lets the fill settle into what is around it, instead of only matching at the "
             + "edge. On at 2 passes by default; turn it off for the old single-pass behaviour, "
@@ -754,30 +854,53 @@ export default function CreatePanel() {
           onClick={() => applySplit(maskSide)}
           disabled={!splitPreview || splitBusy}
         >
-          {splitBusy && splitPreview ? "Applying…" : "Apply to mask"}
+          {splitBusy && splitPreview ? "Applying…" : "Apply to selection"}
         </button>
 
-        {bendPresets.length > 0 && (
-          <div className="mt-2">
-            <Select
-              label="Bend preset for the region"
-              value={regionBendPreset}
-              onChange={setRegionBendPreset}
-              options={[
-                { value: "", label: "Same as generation", title: "Reuse the bend chosen above." },
-                ...bendOptions.slice(1),
-              ]}
-              tip={bendTip(
-                regionBendPreset,
-                "Optional bend used only when a mask is painted. “Same as generation” reuses the one above.",
-              )}
-            />
-            {regionBendPreset && presetByName(regionBendPreset) && (
-              <p className="hint mb-0 mt-1 mono-hint">
-                {bendPresetSynopsis(presetByName(regionBendPreset), ops)}
-              </p>
-            )}
-          </div>
+        <div className="section-title mt-2">Compare models</div>
+        <p className="hint mb-2">
+          Fill this selection with each of these in turn, against the same starting image,
+          and put the results side by side.
+        </p>
+        <div className="compare-models">
+          {(models || []).map((m) => {
+            const on = tryModels.includes(m.path);
+            return (
+              <button
+                key={m.path}
+                type="button"
+                className={`pill chip ${on ? "on" : ""}`}
+                aria-pressed={on}
+                title={m.path}
+                onClick={() => setTryModels((s) => (
+                  on ? s.filter((p) => p !== m.path) : [...s, m.path].slice(0, 4)
+                ))}
+              >
+                {m.name}
+              </button>
+            );
+          })}
+        </div>
+        <button
+          type="button"
+          className="btn sm mt-2"
+          onClick={runTryModels}
+          disabled={genRunning || tryModels.length < 2 || !hasMask}
+        >
+          {genRunning
+            ? "Running…"
+            : tryModels.length < 2
+              ? "Pick two or more models"
+              : `Fill with ${tryModels.length} models`}
+        </button>
+        {!hasMask && (
+          <p className="hint mb-0 mt-1">Select an area first.</p>
+        )}
+        {hasMask && sampleParams.seed === "" && (
+          <p className="hint mb-0 mt-1">
+            The seed is set to draw a new one each run, so these would differ by seed as
+            well as by model. Pin a seed in Sample settings to compare the models alone.
+          </p>
         )}
       </Disclose>
 
@@ -789,6 +912,15 @@ export default function CreatePanel() {
         extra={ppOn ? <span className="pill on">post-process on</span> : null}
         tip="Adjustments applied to the finished image, not to sampling."
       >
+        {/* These edit the canvas, and while results are staged the canvas is
+            deliberately still the image they were filled from — so saying which
+            picture a slider would act on is impossible until one is chosen. */}
+        {staging && (
+          <p className="callout mb-2">
+            Accept or discard the results below the canvas first — until then these would
+            apply to the image they were filled from, not to what you are looking at.
+          </p>
+        )}
         <div className="row between center wrap gap-2 mb-2">
           <p className="hint mb-0 grow">
             {hasMask
@@ -796,23 +928,28 @@ export default function CreatePanel() {
               : "Applied to the whole canvas."}
           </p>
           <label className="row center gap-2">
-            <input type="checkbox" checked={ppOn} onChange={(e) => setPpOn(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={ppOn}
+              disabled={!!staging}
+              onChange={(e) => setPpOn(e.target.checked)}
+            />
             <span className="sub">Post-process</span>
           </label>
         </div>
 
         <Slider label="Contrast" value={pp.contrast} min={0.5} max={2} step={0.05}
-          onChange={(v) => setPpField("contrast", v)} disabled={!ppOn}
+          onChange={(v) => setPpField("contrast", v)} disabled={!ppOn || !!staging}
           tip="Boost or flatten contrast after sampling." />
         <Slider label="Gamma" value={pp.gamma} min={0.5} max={2} step={0.05}
-          onChange={(v) => setPpField("gamma", v)} disabled={!ppOn}
+          onChange={(v) => setPpField("gamma", v)} disabled={!ppOn || !!staging}
           tip="Brighten (lower) or darken (higher) midtones." />
         <Slider label="Sharpen" value={pp.unsharp} min={0} max={4} step={0.1}
-          onChange={(v) => setPpField("unsharp", v)} disabled={!ppOn}
+          onChange={(v) => setPpField("unsharp", v)} disabled={!ppOn || !!staging}
           tip="Unsharp-mask strength on the finished image." />
 
         <div className="section-title mt-2">Upscale</div>
-        <p className="hint mb-2">Enlarges the finished image with Lanczos resampling. Ignores the mask.</p>
+        <p className="hint mb-2">Enlarges the finished image with Lanczos resampling. Ignores the selection.</p>
         <div className="row gap-2 center">
           <div className="w-100">
             <Num label="Scale" value={srFactor} onChange={setSrFactor} min={2} max={4} step={1}
@@ -822,7 +959,12 @@ export default function CreatePanel() {
             <Slider label="Sharpen" value={srSharpen} min={0} max={3} step={0.1} onChange={setSrSharpen}
               tip="Unsharp-mask strength applied after enlarging." />
           </div>
-          <button type="button" className="btn sm self-end mb-2" onClick={upscale} disabled={srBusy || !frame}>
+          <button
+            type="button"
+            className="btn sm self-end mb-2"
+            onClick={upscale}
+            disabled={srBusy || !frame || !!staging}
+          >
             {srBusy ? "…" : "Upscale"}
           </button>
         </div>
