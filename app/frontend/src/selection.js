@@ -1,38 +1,19 @@
-/** The selection entity: an area of the canvas the user owns.
+/** Strokes, and how to replay them into a mask.
  *
- *  A selection used to be whatever pixels happened to be sitting on the mask
- *  canvas at the moment Generate was pressed. That made it impossible to undo
- *  precisely, to invert, to disable without losing, or to survive a resize —
- *  and it was silently thrown away after every fill.
+ *  A mask used to be whatever pixels happened to be sitting on the overlay at
+ *  the moment Generate was pressed. That made it impossible to undo precisely,
+ *  to invert, to hide without losing, or to survive a resize — and it was
+ *  silently thrown away after every fill.
  *
- *  Here it is a list of strokes. The mask canvas is a cache of replaying them,
- *  so undo is "drop the last stroke and replay", and a resize is "replay at the
- *  new size". Coordinates are normalised 0..1 so neither depends on the pixel
- *  dimensions the strokes happened to be drawn at.
+ *  Here it is a list of strokes belonging to an inpaint mask entity (see
+ *  layers.js). The overlay is a cache of replaying them, so undo is "drop the
+ *  last stroke and replay", and a resize is "replay at the new size".
+ *  Coordinates are normalised 0..1 so neither depends on the pixel dimensions
+ *  the strokes happened to be drawn at.
  */
 
 /** The overlay tint. Matches .mask-overlay in styles.css. */
 export const MASK_RGB = [255, 122, 69];
-
-const DEFAULT_PARAMS = {
-  change: 0.65,
-  feather: 8,
-  harmonize: 2,
-  bendPreset: "",
-};
-
-let counter = 0;
-
-export function newSelection(name) {
-  counter += 1;
-  return {
-    id: Math.random().toString(36).slice(2),
-    name: name || `Selection ${counter}`,
-    enabled: true,
-    strokes: [],
-    params: { ...DEFAULT_PARAMS },
-  };
-}
 
 /** A freehand brush stroke. Points and size are normalised to the canvas. */
 export function brushStroke({ points, size, hard, mode }) {
@@ -178,8 +159,8 @@ function replayBrush(ctx, stroke, w, h) {
   }
 }
 
-/** Replay a selection's strokes onto `target` at w x h. */
-export function rasterize(selection, target, w, h) {
+/** Replay one mask's strokes onto `target` at w x h. */
+export function rasterize(mask, target, w, h) {
   if (!target || !w || !h) return;
   if (target.width !== w || target.height !== h) {
     target.width = w;
@@ -189,7 +170,7 @@ export function rasterize(selection, target, w, h) {
   ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = "source-over";
   ctx.clearRect(0, 0, w, h);
-  for (const s of selection?.strokes || []) {
+  for (const s of mask?.strokes || []) {
     if (s.type === "invert") {
       ctx.globalCompositeOperation = "source-over";
       invertCanvas(ctx, w, h);
@@ -200,9 +181,4 @@ export function rasterize(selection, target, w, h) {
     else if (s.cache) ctx.drawImage(s.cache, 0, 0, w, h);
   }
   ctx.globalCompositeOperation = "source-over";
-}
-
-/** Has anything been drawn at all? Cheaper than counting pixels. */
-export function hasStrokes(selection) {
-  return !!selection?.strokes?.length;
 }

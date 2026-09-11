@@ -191,8 +191,9 @@ body {
 .hero.brushable { cursor: crosshair; }
 .hero.painting { cursor: crosshair; }
 
-/* The selection's own strip, directly above the picture: what is selected, and
-   what the next run will therefore do. */
+/* A strip directly above the picture saying what the next run will do. The
+   controls for it live in the Layers panel; this is only the consequence, which
+   is the part that has to be legible at the instant the button is pressed. */
 .selection-bar {
   display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap;
   margin: var(--s-2) 0; padding: var(--s-2) var(--s-3);
@@ -218,40 +219,72 @@ body {
   width: 140px; padding: 1px 5px; font-weight: 600;
 }
 
-/* Staging: candidates from one or more fills, none of them committed yet. */
-.staging-bar {
-  margin: var(--s-2) 0; padding: var(--s-2) var(--s-3);
-  border: 1px dashed var(--accent);
-  border-radius: var(--radius-sm);
+/* Layers panel: raster layers and inpaint masks, the two entity groups. */
+.layers-panel { padding: var(--s-2) var(--s-3); min-width: 0; }
+.layer-group-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .06em;
+  color: var(--text-faint); border-bottom: 1px solid var(--line);
+  padding-bottom: 2px; margin-bottom: var(--s-2);
+}
+.layer-row {
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  padding: var(--s-2); margin-bottom: var(--s-2); cursor: pointer;
   background: var(--bg-2);
 }
-.staging-title { color: var(--accent); }
-.staging-list { display: flex; gap: var(--s-2); overflow-x: auto; padding-bottom: 2px; }
-.staging-item {
-  flex: 0 0 auto; width: 92px; display: flex; flex-direction: column; gap: 3px;
-  background: transparent; border: 2px solid transparent; border-radius: var(--radius-sm);
-  padding: 2px; cursor: pointer; font: inherit; color: var(--text-faint);
+.layer-row.on { border-color: var(--accent); background: var(--accent-soft); }
+/* A hidden entity is dimmed, not removed: it still has a row, a name and its
+   settings, and the eye has to look like it hid something rather than lost it. */
+.layer-row.off { opacity: .55; }
+.layer-head { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.layer-head .sel-name {
+  flex: 1 1 auto; min-width: 0; text-align: left;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--fs-sm);
 }
-.staging-item.on { border-color: var(--accent); color: var(--text); }
-.staging-item img {
-  width: 100%; aspect-ratio: 1; object-fit: cover; display: block;
-  border-radius: var(--radius-sm); background: var(--bg-3);
+.layer-head .sel-name-input { flex: 1 1 auto; min-width: 0; width: auto; }
+.layer-lock {
+  background: transparent; border: none; cursor: pointer; padding: 0 2px;
+  font-size: var(--fs-xs); opacity: .5; line-height: 1;
 }
-.staging-label {
-  font-size: var(--fs-xs); line-height: 1.25; text-align: left;
-  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+.layer-lock.on { opacity: 1; }
+.layer-body { display: flex; gap: var(--s-2); align-items: center; margin-top: 4px; }
+/* A fill layer is transparent nearly everywhere, so on a flat background its
+   thumbnail reads as an empty square. The checkerboard makes "transparent
+   here" look deliberate, and shows how much of the canvas the layer covers. */
+.layer-thumb {
+  width: 40px; height: 40px; flex: 0 0 40px; object-fit: cover;
+  border-radius: var(--radius-sm); display: block;
+  background-color: var(--bg-3);
+  background-image:
+    linear-gradient(45deg, var(--line) 25%, transparent 25%, transparent 75%, var(--line) 75%),
+    linear-gradient(45deg, var(--line) 25%, transparent 25%, transparent 75%, var(--line) 75%);
+  background-size: 10px 10px;
+  background-position: 0 0, 5px 5px;
 }
+.layer-body .field { margin-bottom: 0; }
+.layer-actions { display: flex; gap: 3px; align-items: center; margin-top: 4px; }
+.btn.xs { padding: 1px 6px; font-size: var(--fs-xs); }
+.btn.xs.w-full { width: 100%; margin-top: 4px; }
 
-/* Canvas + Results rail. The rail collapses under the canvas on narrow
-   viewports, where a side column would squeeze the image too far. */
-.play-stage.with-results {
+/* Canvas + the right rail (Layers, then Results). The rail collapses under the
+   canvas on narrow viewports, where a side column would squeeze the image too
+   far. */
+.play-rail {
+  display: flex; flex-direction: column; gap: var(--s-3);
+  min-width: 0; position: sticky; top: 0;
+  max-height: calc(100vh - var(--topbar-h) - var(--content-pad-y) * 2);
+  overflow-y: auto;
+}
+@media (max-width: 1100px) { .play-rail { position: static; max-height: none; overflow: visible; } }
+.play-stage.with-rail {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 168px;
+  grid-template-columns: minmax(0, 1fr) 232px;
   gap: var(--s-3);
   align-items: start;
 }
 @media (max-width: 1100px) {
-  .play-stage.with-results { grid-template-columns: 1fr; }
+  .play-stage.with-rail { grid-template-columns: 1fr; }
   .results-rail-list {
     flex-direction: row;
     max-height: none;
@@ -260,12 +293,7 @@ body {
   }
   .results-rail .play-result { width: 112px; flex: 0 0 112px; }
 }
-.results-rail {
-  padding: var(--s-2) var(--s-3);
-  min-width: 0;
-  position: sticky;
-  top: 0;
-}
+.results-rail { padding: var(--s-2) var(--s-3); min-width: 0; }
 .results-rail .play-result { width: 100%; }
 .results-rail .play-result-thumb {
   width: 100%;
