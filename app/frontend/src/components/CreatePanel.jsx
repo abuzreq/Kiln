@@ -113,9 +113,6 @@ export default function CreatePanel() {
     hasSelection ? setSelectionParam("bendPreset", v) : setGenBendPreset(v)
   );
   const [variations, setVariations] = useState(1);
-  // Models to fill the same selection with, one after another, so they can be
-  // compared side by side in staging.
-  const [tryModels, setTryModels] = useState([]);
   const [splitMethod, setSplitMethod] = useState("luminance");
   const [brightnessThreshold, setBrightnessThreshold] = useState(128);
   const [contrastThreshold, setContrastThreshold] = useState(0);
@@ -420,27 +417,6 @@ export default function CreatePanel() {
         const done = await pollJob(j.id, onJob, 300);
         finishGeneration(done);
       }
-    } catch (e) { toast(e.message, "error"); setProgress(null); setLivePreview(null); setJob(null); }
-  };
-
-  /** Fill the same selection with each chosen model in turn.
-   *
-   *  The literal shape of "try different adjustments on a selected area": all
-   *  of them run against the same base and land in staging together, so the
-   *  comparison is side by side rather than from memory.
-   */
-  const runTryModels = async () => {
-    const mask = getMaskDataUrl();
-    if (!mask) { toast("Select an area first", "error"); return; }
-    if (!fillBase.img) { toast("Put an image on the canvas first", "error"); return; }
-    if (tryModels.length < 2) { toast("Pick at least two models to compare", "error"); return; }
-    try {
-      for (const p of tryModels) {
-        // eslint-disable-next-line no-await-in-loop
-        const done = await runFill(p, mask, 1);
-        if (done.status === "cancelled") break;
-      }
-      toast(`Filled with ${tryModels.length} models — compare below the canvas`, "success");
     } catch (e) { toast(e.message, "error"); setProgress(null); setLivePreview(null); setJob(null); }
   };
 
@@ -857,50 +833,8 @@ export default function CreatePanel() {
           {splitBusy && splitPreview ? "Applying…" : "Apply to selection"}
         </button>
 
-        <div className="section-title mt-2">Compare models</div>
-        <p className="hint mb-2">
-          Fill this selection with each of these in turn, against the same starting image,
-          and put the results side by side.
-        </p>
-        <div className="compare-models">
-          {(models || []).map((m) => {
-            const on = tryModels.includes(m.path);
-            return (
-              <button
-                key={m.path}
-                type="button"
-                className={`pill chip ${on ? "on" : ""}`}
-                aria-pressed={on}
-                title={m.path}
-                onClick={() => setTryModels((s) => (
-                  on ? s.filter((p) => p !== m.path) : [...s, m.path].slice(0, 4)
-                ))}
-              >
-                {m.name}
-              </button>
-            );
-          })}
-        </div>
-        <button
-          type="button"
-          className="btn sm mt-2"
-          onClick={runTryModels}
-          disabled={genRunning || tryModels.length < 2 || !hasMask}
-        >
-          {genRunning
-            ? "Running…"
-            : tryModels.length < 2
-              ? "Pick two or more models"
-              : `Fill with ${tryModels.length} models`}
-        </button>
         {!hasMask && (
-          <p className="hint mb-0 mt-1">Select an area first.</p>
-        )}
-        {hasMask && sampleParams.seed === "" && (
-          <p className="hint mb-0 mt-1">
-            The seed is set to draw a new one each run, so these would differ by seed as
-            well as by model. Pin a seed in Sample settings to compare the models alone.
-          </p>
+          <p className="hint mb-0 mt-2">Select an area to fill.</p>
         )}
       </Disclose>
 

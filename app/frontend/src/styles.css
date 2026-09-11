@@ -178,11 +178,16 @@ body {
 .mask-overlay {
   position: absolute; z-index: 2; pointer-events: none; touch-action: none; cursor: crosshair;
 }
+/* Shown through, not painted over. A wand or contrast selection stores alpha
+   255, so at full strength it hid the very pixels you were judging. This is a
+   CSS opacity on purpose: it changes only what is displayed, while the alpha in
+   the backing store still carries mask strength for getImageData. */
+.mask-overlay { opacity: 0.5; }
 .mask-overlay.on { pointer-events: auto; }
 .mask-overlay.wand { cursor: cell; }
-/* A disabled selection still shows, faintly — otherwise "off" and "deleted"
+/* A disabled selection still shows, fainter — otherwise "off" and "deleted"
    look the same and the eye toggle appears to have thrown the work away. */
-.mask-overlay.dim { opacity: 0.3; }
+.mask-overlay.dim { opacity: 0.18; }
 .hero.brushable { cursor: crosshair; }
 .hero.painting { cursor: crosshair; }
 
@@ -236,7 +241,6 @@ body {
   font-size: var(--fs-xs); line-height: 1.25; text-align: left;
   overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
 }
-.compare-models { display: flex; flex-wrap: wrap; gap: 6px; max-height: 108px; overflow-y: auto; }
 
 /* Canvas + Results rail. The rail collapses under the canvas on narrow
    viewports, where a side column would squeeze the image too far. */
