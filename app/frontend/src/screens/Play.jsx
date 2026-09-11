@@ -12,7 +12,7 @@ import {
   LIVE_PARAM_KEYS,
 } from "../sampleSettings.jsx";
 import ModelPicker from "../components/ModelPicker.jsx";
-import { buildContrastMask, floodFillMask } from "../contrastMask.js";
+import { buildContrastMask, floodFillMask, countMaskPixels } from "../contrastMask.js";
 
 const HISTORY_MAX = 24;
 const MASK_UNDO_MAX = 12;
@@ -526,10 +526,16 @@ function PlayCanvas({ brushable }) {
     frame, frameRaw, showRaw, setShowRaw, initImage, progress, heroRef,
     frameCard, pendingCard, setPendingCard, applyCard, activeSeed, useAsInit,
     clearInit, clearCanvas, canvasSize, setCanvasSize, newCanvas, loadFile,
+    maskRef, maskVersion, clearMask,
   } = usePlay();
   const shown = showRaw && frameRaw ? frameRaw : frame;
   const [busy, setBusy] = useState(false);
   const openRef = useRef(null);
+  // Whether a selection is live decides what the Generate button does, so it
+  // belongs next to the picture rather than folded into a sidebar section --
+  // the orange overlay says an area is marked, not that the next run will be
+  // confined to it.
+  const maskPixels = useMemo(() => countMaskPixels(maskRef.current), [maskVersion, maskRef]);
 
   const download = async () => {
     if (!shown) return;
@@ -581,6 +587,17 @@ function PlayCanvas({ brushable }) {
                 Dismiss
               </button>
             </div>
+          </div>
+        )}
+        {maskPixels > 0 && (
+          <div className="callout row between center wrap gap-2" role="status">
+            <span>
+              <strong>Selection active</strong> — {maskPixels.toLocaleString()} px.
+              {" "}The next run changes only this area; the rest of the canvas is kept.
+            </span>
+            <button type="button" className="btn ghost sm" onClick={() => clearMask()}>
+              Deselect
+            </button>
           </div>
         )}
         <div className={`hero ${brushable ? "brushable" : ""}`} ref={heroRef}>

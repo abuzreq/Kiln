@@ -270,7 +270,12 @@ export default function CreatePanel() {
     setSplitPreview(null);
   };
 
-  const finishJob = (done, clearAfter) => {
+  // A selection outlives the fill it drove. Trying a second model, or a
+  // different setting, on the same area is the whole point of having selected
+  // it -- and a wand selection cannot be redrawn by hand anyway, least of all
+  // once the fill has changed the pixels it was derived from. Deselecting is
+  // the user's call, never a side effect of generating.
+  const finishJob = (done, region) => {
     setProgress(null);
     if (done.status === "error") toast(done.message, "error");
     if (done.status === "done") setSplitPending(true);
@@ -279,21 +284,19 @@ export default function CreatePanel() {
       const framesRaw = done.detail?.frames_raw;
       const cards = done.detail?.cards;
       const cardFor = (i) => cards?.[i] ?? done.detail?.card ?? null;
+      const kept = region ? " — selection kept" : "";
       if (frames?.length > 1) {
         frames.forEach((img, i) => {
           const raw = framesRaw?.[i] ?? null;
           if (i === frames.length - 1) commitFrame(img, raw, cardFor(i));
           else pushHistory(img, raw, cardFor(i));
         });
-        if (done.status === "done") toast(`${frames.length} variations saved to Results`, "success");
-        else toast(`Stopped — ${frames.length} variation(s) saved`, "success");
+        if (done.status === "done") toast(`${frames.length} variations saved to Results${kept}`, "success");
+        else toast(`Stopped — ${frames.length} variation(s) saved${kept}`, "success");
       } else if (done.detail?.frame) {
         commitFrame(done.detail.frame, done.detail.frame_raw, cardFor(0));
-        if (done.status === "cancelled") toast("Stopped — saved to Results", "success");
-      }
-      if (clearAfter && (frames?.length || done.detail?.frame)) {
-        clearMask({ skipUndo: true });
-        clearMaskUndo();
+        if (done.status === "cancelled") toast(`Stopped — saved to Results${kept}`, "success");
+        else if (region) toast("Filled — selection kept, try another model or setting", "success");
       }
     }
     setJob(null);
@@ -447,8 +450,9 @@ export default function CreatePanel() {
         <h3>Generate</h3>
         <p className="hint mb-2">
           {hasMask
-            ? "A mask is painted — Generate fills that region on the canvas."
-            : "Makes a new image, or reworks an init image. Paint a region below to fill only that area instead."}
+            ? "A selection is active — this reworks only that area and leaves the rest of the canvas alone. "
+              + "The selection stays after each fill, so you can try another model or setting on the same area."
+            : "Makes a new image, or reworks an init image. Select an area below to rework only that part instead."}
         </p>
 
         {initImage && !hasMask && (
@@ -480,7 +484,7 @@ export default function CreatePanel() {
           </>
         )}
         {hasMask && initImage && (
-          <p className="hint mb-2">Region fill uses the canvas. Clear the mask to generate from init instead.</p>
+          <p className="hint mb-2">Filling a selection uses the canvas. Deselect to generate from the init image instead.</p>
         )}
 
         <div className="row gap-2 wrap">
@@ -549,23 +553,23 @@ export default function CreatePanel() {
             </div>
           ) : (
             <button type="button" className="btn primary w-full mt-2" onClick={run} disabled={!modelPath}>
-              Generate
+              {hasMask ? "Fill selection" : "Generate"}
             </button>
           )}
         </div>
       </div>
 
-      {/* ——— 2. Region ————————————————————————————————— */}
+      {/* ——— 2. Selection —————————————————————————————— */}
       <Disclose
-        title="Region"
+        title="Selection"
         defaultOpen
         className="create-section"
         extra={hasMask ? <span className="pill on">{maskPixels.toLocaleString()} px</span> : null}
-        tip="Select part of the canvas so Generate reworks only that area."
+        tip="Select part of the canvas so Generate reworks only that area. The selection stays until you deselect it."
       >
         <div className="row between center wrap gap-2 mb-2">
           <p className="hint mb-0 grow">
-            Brush, wand, or split by contrast, then Generate fills only that area.
+            Brush, wand, or split by contrast. Fill selection then reworks just that area.
           </p>
           <div className="row center gap-2">
             <button
@@ -578,7 +582,7 @@ export default function CreatePanel() {
               Undo
             </button>
             <button type="button" className="btn ghost sm" onClick={() => clearMask()} disabled={!hasMask}>
-              Clear
+              Deselect
             </button>
           </div>
         </div>
@@ -788,7 +792,7 @@ export default function CreatePanel() {
         <div className="row between center wrap gap-2 mb-2">
           <p className="hint mb-0 grow">
             {hasMask
-              ? "Post-process follows the painted mask; upscale always uses the whole canvas."
+              ? "Post-process follows the selection; upscale always uses the whole canvas."
               : "Applied to the whole canvas."}
           </p>
           <label className="row center gap-2">
