@@ -401,6 +401,75 @@ def captures():
     return ok({"captures": out, "files": [e["path"] for e in out]})
 
 
+ASSET_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+
+
+def _asset_entry(p):
+    from PIL import Image
+
+    entry = {"path": str(p), "name": p.stem, "mtime": p.stat().st_mtime}
+    try:
+        with Image.open(p) as im:
+            entry["size"] = list(im.size)
+    except Exception:  # noqa: BLE001
+        entry["size"] = None
+    return entry
+
+
+@bp.get("/assets")
+def assets():
+    """Images the user has brought in, newest first. See Workspace.assets."""
+    from app.core.config import workspace
+
+    paths = [p for p in workspace.assets.iterdir() if p.suffix.lower() in ASSET_EXTS]
+    paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return ok({"assets": [_asset_entry(p) for p in paths[:200]]})
+
+
+@bp.post("/assets")
+def add_asset():
+    """Keep an image as an asset. Saved as PNG so any embedded recipe survives."""
+    import re
+    import time
+    from app.core.config import workspace
+
+    body = request.get_json(force=True, silent=True) or {}
+    (image,) = require(body, "image")
+    img = from_data_url(image)
+    # The name comes from a filename the user did not choose for us, so it is
+    # cleaned rather than refused: "Screenshot (3).png" is a perfectly good
+    # asset, and rejecting it made the panel look like it had ignored the drop.
+    stem = re.sub(r"[^\w \-.]+", "-", str(body.get("name") or "")).strip(" -.")[:96]
+    stem = stem or f"asset_{int(time.time())}"
+    out = workspace.assets / f"{stem}.png"
+    # Never overwrite: two drops of files with the same name are two assets.
+    n = 2
+    while out.exists():
+        out = workspace.assets / f"{stem} {n}.png"
+        n += 1
+    save_with_params(img, out, body.get("card") or read_params(img))
+    return ok({"asset": _asset_entry(out)})
+
+
+@bp.delete("/assets")
+def delete_asset():
+    from pathlib import Path
+
+    from app.core.config import workspace
+
+    body = request.get_json(force=True, silent=True) or {}
+    (path,) = require(body, "path")
+    p = Path(path)
+    try:
+        p.resolve().relative_to(workspace.assets.resolve())
+    except (ValueError, OSError):
+        return err("refusing to delete outside the assets folder", 400)
+    if not p.exists():
+        return err("not found", 404)
+    p.unlink()
+    return ok({"deleted": str(p)})
+
+
 @bp.get("/sweeps")
 def sweeps():
     """Sweep grids and animations.

@@ -12,8 +12,49 @@
  *  the strokes happened to be drawn at.
  */
 
-/** The overlay tint. Matches .mask-overlay in styles.css. */
-export const MASK_RGB = [255, 122, 69];
+/** The mask colour.
+ *
+ *  Only the alpha of a rasterised mask carries meaning — it is the per-pixel
+ *  denoise strength, and getMaskDataUrl overwrites the colour channels with it
+ *  before sending. The RGB here is what the hatch on the canvas is drawn in
+ *  (see hatchTile): blue, so a mask never reads as part of the picture, which
+ *  the old accent-orange tint did.
+ */
+export const MASK_RGB = [77, 163, 255];
+
+/** The tile the mask is displayed with: slanted lines over a faint wash.
+ *
+ *  Both live in one tile so a single source-in pass over the mask raster
+ *  scales them by mask strength together; a second pass would multiply the
+ *  alpha twice and the lines would all but vanish on a soft edge.
+ *
+ *  `scale` is canvas pixels per CSS pixel. The period is fixed on screen, not
+ *  on the canvas: a 2048-wide mask shown at 700px would otherwise draw its
+ *  lines three screen pixels apart and moiré.
+ */
+export function hatchTile(scale) {
+  const size = Math.max(4, Math.round(10 * scale));
+  const c = document.createElement("canvas");
+  c.width = size;
+  c.height = size;
+  const ctx = c.getContext("2d");
+  const [r, g, b] = MASK_RGB;
+  ctx.fillStyle = `rgba(${r},${g},${b},0.18)`;
+  ctx.fillRect(0, 0, size, size);
+  ctx.strokeStyle = `rgba(${r},${g},${b},0.85)`;
+  ctx.lineWidth = Math.max(1, 1.2 * scale);
+  ctx.lineCap = "square";
+  ctx.beginPath();
+  // The diagonal, plus the two corner halves, so the tile repeats seamlessly.
+  ctx.moveTo(0, size);
+  ctx.lineTo(size, 0);
+  ctx.moveTo(-size / 2, size / 2);
+  ctx.lineTo(size / 2, -size / 2);
+  ctx.moveTo(size / 2, size * 1.5);
+  ctx.lineTo(size * 1.5, size / 2);
+  ctx.stroke();
+  return c;
+}
 
 /** A freehand brush stroke. Points and size are normalised to the canvas. */
 export function brushStroke({ points, size, hard, mode }) {
@@ -33,6 +74,27 @@ export function cachedStroke(type, cache, mode) {
 
 export function invertStroke() {
   return { type: "invert" };
+}
+
+/** Translate everything painted so far by (dx, dy), normalised to the canvas.
+ *
+ *  A stroke rather than a field on the mask, and that matters: an offset
+ *  applied at replay time would shift every stroke painted *after* the move
+ *  too, so a brush stroke would look right live and then jump on release.
+ *  As a stroke it moves what came before it and leaves what comes after it
+ *  where it was painted. Whatever leaves the canvas is clipped, so
+ *  consecutive moves are folded together (see moveMask) and a drag off and
+ *  back is a net zero.
+ */
+export function moveStroke(dx, dy) {
+  return { type: "move", dx, dy };
+}
+
+function shiftCanvas(ctx, w, h, dx, dy) {
+  if (!dx && !dy) return;
+  const img = ctx.getImageData(0, 0, w, h);
+  ctx.clearRect(0, 0, w, h);
+  ctx.putImageData(img, dx, dy);
 }
 
 /** Wrap an alpha channel in an offscreen canvas, tinted, ready to scale. */
@@ -174,6 +236,11 @@ export function rasterize(mask, target, w, h) {
     if (s.type === "invert") {
       ctx.globalCompositeOperation = "source-over";
       invertCanvas(ctx, w, h);
+      continue;
+    }
+    if (s.type === "move") {
+      ctx.globalCompositeOperation = "source-over";
+      shiftCanvas(ctx, w, h, Math.round(s.dx * w), Math.round(s.dy * h));
       continue;
     }
     ctx.globalCompositeOperation = s.mode === "subtract" ? "destination-out" : "source-over";

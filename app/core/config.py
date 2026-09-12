@@ -34,6 +34,7 @@ class Workspace:
         "runs",
         "models",
         "captures",
+        "assets",
         "sweeps",
         "cache",
         "library/bends",
@@ -99,6 +100,14 @@ class Workspace:
         return self.root / "captures"
 
     @property
+    def assets(self) -> Path:
+        """Images the user brought in to work from. Separate from captures: a
+        capture is something Kiln made, an asset is something the user chose to
+        keep at hand -- so it can be placed on a layer again without hunting
+        for the file every time."""
+        return self.root / "assets"
+
+    @property
     def sweeps(self) -> Path:
         """Sweep grids and animations. Separate from captures: a sweep is a
         study of one parameter, not a picture you chose to keep."""
@@ -128,6 +137,7 @@ class Workspace:
             "runs": str(self.runs),
             "models": str(self.models),
             "captures": str(self.captures),
+            "assets": str(self.assets),
             "sweeps": str(self.sweeps),
             "library": str(self.root / "library"),
         }

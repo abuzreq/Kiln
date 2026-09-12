@@ -175,21 +175,56 @@ body {
   background-image: repeating-conic-gradient(var(--bg-1) 0% 25%, var(--bg-3) 0% 50%);
   background-size: 16px 16px;
 }
-.mask-overlay {
-  position: absolute; z-index: 2; pointer-events: none; touch-action: none; cursor: crosshair;
-}
-/* Shown through, not painted over. A wand or contrast selection stores alpha
-   255, so at full strength it hid the very pixels you were judging. This is a
-   CSS opacity on purpose: it changes only what is displayed, while the alpha in
-   the backing store still carries mask strength for getImageData. */
-.mask-overlay { opacity: 0.5; }
+/* The mask stage takes the picture's rectangle (set from JS); everything in it
+   fills it, so the box below can be placed in percentages. */
+.mask-stage { position: absolute; z-index: 2; pointer-events: none; }
+.mask-stage > canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+/* The data store. Its alpha is mask strength, read by getImageData, so it is
+   never styled -- it is simply invisible, and .mask-display shows it as a
+   hatch. opacity rather than visibility, because it still takes the pointer. */
+.mask-overlay { opacity: 0; touch-action: none; cursor: crosshair; }
 .mask-overlay.on { pointer-events: auto; }
 .mask-overlay.wand { cursor: cell; }
-/* A disabled selection still shows, fainter — otherwise "off" and "deleted"
-   look the same and the eye toggle appears to have thrown the work away. */
-.mask-overlay.dim { opacity: 0.18; }
+.mask-overlay.move { cursor: move; }
+/* Shown masks that are off are drawn in it too, at a third of the strength,
+   so "off" and "hidden" read as the two different things they are. */
+.mask-display { pointer-events: none; }
+/* The box around the active mask. Dashed blue with a dark halo so it reads on
+   light and dark ground alike. The box lets the pointer through; only its
+   label is a grip. */
+.mask-bbox {
+  position: absolute; pointer-events: none; box-sizing: border-box;
+  border: 1px dashed rgba(77, 163, 255, .95);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .35), inset 0 0 0 1px rgba(0, 0, 0, .35);
+}
+.mask-bbox-label {
+  position: absolute; left: 0; top: 0; pointer-events: auto; cursor: move; user-select: none;
+  background: rgba(77, 163, 255, .92); color: #fff; font-size: var(--fs-xs); font-weight: 600;
+  padding: 1px 6px; white-space: nowrap; line-height: 1.5; touch-action: none;
+}
 .hero.brushable { cursor: crosshair; }
 .hero.painting { cursor: crosshair; }
+/* Zoom and pan: the picture and its overlay sit in one wrapper that is
+   transformed as a unit. Origin at the top-left so the zoom-about-pointer
+   maths is a plain translate. */
+.canvas-card .hero { touch-action: none; }
+.hero-view {
+  position: relative; display: inline-block; line-height: 0; flex: 0 0 auto;
+  transform-origin: 0 0; will-change: transform;
+}
+.hero.pan-ready, .hero.pan-ready .mask-overlay { cursor: grab; }
+.hero.panning, .hero.panning .mask-overlay { cursor: grabbing; }
+.hero-zoom {
+  position: absolute; top: 6px; right: 6px; z-index: 3;
+  display: flex; align-items: center; gap: 1px; padding: 2px;
+  background: rgba(20, 22, 30, .85); border: 1px solid var(--line); border-radius: 999px;
+}
+.hero-zoom button {
+  background: transparent; border: none; color: var(--text-dim); cursor: pointer;
+  font: inherit; font-size: var(--fs-sm); line-height: 1; padding: 3px 7px; border-radius: 999px;
+}
+.hero-zoom button:hover { background: var(--bg-3); color: var(--text); }
+.hero-zoom .zoom-pct { font-size: var(--fs-xs); min-width: 44px; text-align: center; }
 
 /* A strip directly above the picture saying what the next run will do. The
    controls for it live in the Layers panel; this is only the consequence, which
@@ -204,11 +239,16 @@ body {
 }
 .selection-bar.off { border-left-color: var(--line); background: var(--bg-2); }
 .selection-bar .sel-note { flex: 0 1 auto; min-width: 0; }
+/* Visibility is an eye, not a dot: a dot read as a radio button, as if only
+   one row could be on. Neutral colour so it does not compete with the accent
+   that marks the selected row. */
 .sel-eye {
   background: transparent; border: none; cursor: pointer; font: inherit;
-  color: var(--text-faint); padding: 0 2px; line-height: 1;
+  color: var(--text-faint); padding: 2px; line-height: 0; border-radius: var(--radius-sm);
+  display: inline-flex; align-items: center; flex: 0 0 auto;
 }
-.sel-eye.on { color: var(--accent); }
+.sel-eye.on { color: var(--text); }
+.sel-eye:hover { background: var(--bg-3); color: var(--text); }
 .sel-name {
   background: transparent; border: 1px solid transparent; cursor: text;
   color: var(--text); font: inherit; font-weight: 600;
@@ -227,43 +267,85 @@ body {
   color: var(--text-faint); border-bottom: 1px solid var(--line);
   padding-bottom: 2px; margin-bottom: var(--s-2);
 }
+/* One line per row; the controls unfold under the selected one only. Every row
+   used to carry all of its controls, and three layers were enough to push the
+   masks out of view. */
 .layer-row {
   border: 1px solid var(--line); border-radius: var(--radius-sm);
-  padding: var(--s-2); margin-bottom: var(--s-2); cursor: pointer;
+  padding: 3px var(--s-2); margin-bottom: 4px; cursor: pointer;
   background: var(--bg-2);
 }
+.layer-row:hover { border-color: var(--text-faint); }
+/* Selected: the one row whose controls are open, and (for a mask) the one the
+   brush paints into. The accent belongs to this state alone. */
 .layer-row.on { border-color: var(--accent); background: var(--accent-soft); }
 /* A hidden entity is dimmed, not removed: it still has a row, a name and its
-   settings, and the eye has to look like it hid something rather than lost it. */
-.layer-row.off { opacity: .55; }
-.layer-head { display: flex; align-items: center; gap: 4px; min-width: 0; }
+   settings, and the eye has to look like it hid something rather than lost it.
+   The name goes faint but the eye stays legible, since it is the way back. */
+.layer-row.off .sel-name, .layer-row.off .layer-thumb { opacity: .45; }
+.layer-row.off .sel-name { text-decoration: line-through; text-decoration-color: var(--text-faint); }
+.layer-head { display: flex; align-items: center; gap: 4px; min-width: 0; min-height: 26px; }
 .layer-head .sel-name {
   flex: 1 1 auto; min-width: 0; text-align: left;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: var(--fs-sm);
 }
 .layer-head .sel-name-input { flex: 1 1 auto; min-width: 0; width: auto; }
-.layer-lock {
-  background: transparent; border: none; cursor: pointer; padding: 0 2px;
-  font-size: var(--fs-xs); opacity: .5; line-height: 1;
-}
-.layer-lock.on { opacity: 1; }
-.layer-body { display: flex; gap: var(--s-2); align-items: center; margin-top: 4px; }
 /* A fill layer is transparent nearly everywhere, so on a flat background its
    thumbnail reads as an empty square. The checkerboard makes "transparent
    here" look deliberate, and shows how much of the canvas the layer covers. */
 .layer-thumb {
-  width: 40px; height: 40px; flex: 0 0 40px; object-fit: cover;
-  border-radius: var(--radius-sm); display: block;
+  width: 26px; height: 26px; flex: 0 0 26px; object-fit: cover;
+  border-radius: 3px; display: block;
   background-color: var(--bg-3);
   background-image:
     linear-gradient(45deg, var(--line) 25%, transparent 25%, transparent 75%, var(--line) 75%),
     linear-gradient(45deg, var(--line) 25%, transparent 25%, transparent 75%, var(--line) 75%);
-  background-size: 10px 10px;
-  background-position: 0 0, 5px 5px;
+  background-size: 8px 8px;
+  background-position: 0 0, 4px 4px;
 }
-.layer-body .field { margin-bottom: 0; }
+/* The active layer is where runs land. It is marked even when a mask row is
+   the selected one, because painting a mask must not hide where the fill will
+   go. A tag rather than a border, so it cannot be mistaken for selection. */
+.layer-active-tag {
+  font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .06em;
+  color: var(--accent); flex: 0 0 auto; padding: 0 4px; border-radius: 999px;
+  border: 1px solid var(--accent); line-height: 1.4;
+}
+/* A mask's on/off: whether the next run uses it. Separate from the eye, which
+   only decides whether its hatching is drawn. */
+.layer-onpill {
+  font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .06em; font-weight: 600;
+  flex: 0 0 auto; padding: 0 6px; border-radius: 999px; line-height: 1.5; cursor: pointer;
+  border: 1px solid var(--line); background: var(--bg-3); color: var(--text-faint); font-family: inherit;
+}
+.layer-onpill.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.layer-onpill:hover { color: var(--text); }
+.layer-details { padding: 4px 0 2px; border-top: 1px solid var(--line); margin-top: 3px; }
+/* The Add buttons sit in a tooltip wrapper; let them span the panel. */
+.layers-panel > .tip-wrap { display: block; }
+.layers-panel > .tip-wrap > .btn { width: 100%; }
+
+/* Assets: a grid of thumbnails the user keeps at hand. */
+.assets-panel { padding: var(--s-2) var(--s-3); min-width: 0; }
+.assets-panel.drop-on { outline: 2px dashed var(--accent); outline-offset: -2px; }
+.assets-grid {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px;
+  max-height: 200px; overflow-y: auto; padding-right: 2px;
+}
+.asset { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.asset-thumb {
+  display: block; width: 100%; aspect-ratio: 1; padding: 0; overflow: hidden;
+  border: 1px solid var(--line); border-radius: var(--radius-sm); cursor: pointer;
+  background-color: var(--bg-3);
+}
+.asset-thumb:hover { border-color: var(--accent); }
+.asset-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.asset-actions { display: flex; justify-content: space-between; gap: 2px; flex-wrap: nowrap; }
+.asset-actions .btn { padding: 0 4px; min-width: 0; font-size: var(--fs-xs); line-height: 1.5; }
+.layer-details .slider-row { margin-bottom: 4px; }
 .layer-actions { display: flex; gap: 3px; align-items: center; margin-top: 4px; }
+.layer-actions .tip-wrap { display: flex; }
 .btn.xs { padding: 1px 6px; font-size: var(--fs-xs); }
 .btn.xs.w-full { width: 100%; margin-top: 4px; }
 
@@ -831,7 +913,6 @@ body {
   border-radius: var(--radius-sm);
   padding: 6px 8px;
 }
-.init-pill { gap: 2px; padding-right: 4px; }
 .pill-x {
   background: transparent; border: none; cursor: pointer;
   color: inherit; font: inherit; line-height: 1;
@@ -1444,4 +1525,5 @@ a { color: var(--accent); }
 /* Canvas size row: the numbers sit inline with their buttons, so they are
    sized to the digits rather than stretching like a form field. */
 .canvas-size-row { row-gap: var(--s-1); }
-.canvas-size-input { width: 72px; }
+.canvas-size-pair { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.canvas-size-input { width: 58px; padding: 3px 4px; font-size: var(--fs-sm); text-align: center; }

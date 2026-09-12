@@ -4,22 +4,23 @@ import { BendWorkspace } from "./Craft.jsx";
 import SweepPanel from "./Sweep.jsx";
 import Merge from "./Merge.jsx";
 import { useApp } from "../state.jsx";
-import { api, downloadPost } from "../api.js";
-import { Progress, Slider, Tooltip } from "../components/ui.jsx";
+import { api, downloadPost, mediaUrl, thumbUrl } from "../api.js";
+import { Progress, Slider, Tooltip, TipLabel } from "../components/ui.jsx";
 import { PlayCtx, usePlay, fileToDataUrl } from "./playContext.jsx";
 import {
   loadSampleParams, saveSampleParams, SampleSettingsPanel, paramsFromCard, cardLabel,
   LIVE_PARAM_KEYS,
 } from "../sampleSettings.jsx";
 import ModelPicker from "../components/ModelPicker.jsx";
-import { buildContrastMask, floodFillMask, countMaskPixels } from "../contrastMask.js";
+import { buildContrastMask, floodFillMask, measureMask } from "../contrastMask.js";
 import {
-  brushStroke, cachedStroke, invertStroke, alphaToCache, overlayToCache,
-  paintBrushPoint,
+  brushStroke, cachedStroke, invertStroke, moveStroke, alphaToCache, overlayToCache,
+  paintBrushPoint, rasterize, hatchTile,
 } from "../selection.js";
 import {
-  newRasterLayer, newInpaintMask, newDocument, uniqueName, uniqueFrom, activeMasks,
-  flattenLayers, compositeMasks, punchToMask, layerAlphaToCache, reorder,
+  newRasterLayer, newInpaintMask, newDocument, blankImage, uniqueName, uniqueFrom, activeMasks,
+  maskShown, flattenLayers, compositeMasks, compositeOnto, fitIntoCanvas, imageSize, punchToMask,
+  maskDataUrlFrom, layerAlphaToCache, reorder,
 } from "../layers.js";
 
 const HISTORY_MAX = 24;
@@ -34,6 +35,9 @@ const CANVAS_TABS = new Set(["create"]);
 // to MAX_FILL_SIDE anyway, so nothing is gained by going bigger.
 const CANVAS_MIN = 64;
 const CANVAS_MAX = 2048;
+// An opened image sets the canvas to its own size. Bigger than the typed-in
+// ceiling because an upscale is meant to land bigger than you could type.
+const OPEN_MAX = 4096;
 
 function clampCanvasSide(v) {
   const n = Math.round(Number(v) || 0);
@@ -41,16 +45,16 @@ function clampCanvasSide(v) {
   return Math.max(CANVAS_MIN, Math.min(CANVAS_MAX, n));
 }
 
-/** A transparent-black PNG — the ground a composition is painted on. */
-function blankImage(w, h) {
-  const c = document.createElement("canvas");
-  c.width = w;
-  c.height = h;
-  // New canvases are already (0,0,0,0); clear so that stays true if a browser
-  // ever changes the default.
-  c.getContext("2d").clearRect(0, 0, w, h);
-  return c.toDataURL("image/png");
+/** A canvas size for an opened image: its own, unless that is absurd. */
+function openSize({ w, h }) {
+  const k = Math.min(1, OPEN_MAX / Math.max(w, h, 1));
+  return {
+    w: Math.max(CANVAS_MIN, Math.round(w * k)),
+    h: Math.max(CANVAS_MIN, Math.round(h * k)),
+  };
 }
+
+const fileStem = (name) => (name || "").replace(/\.[^.]+$/, "");
 
 export default function Play() {
   const {
@@ -70,12 +74,10 @@ export default function Play() {
   // edit to it, so there is no longer a separate "raw" frame to keep: the
   // flattened stack *is* the unprocessed image, and Unprocessed just shows it.
   const [postFrame, setPostFrame] = useState(null);
-  const [frameCard, setFrameCard] = useState(null);
   // Per-tab state that has to outlive the tab's own component (see usePlayState).
   const [tabState, setTabState] = useState({});
   const [pendingCard, setPendingCard] = useState(null);
   const [showRaw, setShowRaw] = useState(false);
-  const [initImage, setInitImage] = useState(null);
   const [history, setHistory] = useState([]);
   const [progress, setProgress] = useState(null);
   const [dragOver, setDragOver] = useState(false);
@@ -94,7 +96,14 @@ export default function Play() {
   // The row highlighted in the Layers panel. When it is a mask, it is also what
   // the brush paints into.
   const [selectedId, setSelectedId] = useState(null);
+  // The layer runs write into. Set by selecting a layer row, and kept when a
+  // mask row is selected afterwards, so painting a mask does not change where
+  // the fill lands. There is always one: see pickActiveLayer.
+  const [activeLayerId, setActiveLayerId] = useState(null);
   const [undoLen, setUndoLen] = useState(0);
+  const [redoLen, setRedoLen] = useState(0);
+  // Images the user keeps at hand (the workspace assets folder).
+  const [assets, setAssets] = useState([]);
   // In-progress frames from a running job, kept off the layer stack so a live
   // preview never becomes a layer of its own.
   const [livePreview, setLivePreview] = useState(null);
@@ -116,9 +125,14 @@ export default function Play() {
   const heroRef = useRef(null);
   const syncMaskOverlayRef = useRef(() => {});
   const undoRef = useRef([]);
+  const redoRef = useRef([]);
+  // The coalesce key of the last undo entry, so a slider drag folds into one.
+  const undoKeyRef = useRef(null);
   // A mirror of the entity state, so the pointer handlers that add strokes can
   // read the current value without going stale between renders.
   const docRef = useRef({ rasterLayers: [], inpaintMasks: [], selectedId: null });
+  const activeLayerRef = useRef(null);
+  const canvasSizeRef = useRef(null);
   const [sampleParams, setSampleParamsState] = useState(loadSampleParams);
 
   const setTabStateKey = useCallback((key, valueOrFn, initial) => {
@@ -133,28 +147,69 @@ export default function Play() {
   useEffect(() => {
     docRef.current = { rasterLayers, inpaintMasks, selectedId };
   }, [rasterLayers, inpaintMasks, selectedId]);
+  useEffect(() => { activeLayerRef.current = activeLayerId; }, [activeLayerId]);
+  useEffect(() => { canvasSizeRef.current = canvasSize; }, [canvasSize]);
 
-  /** Redraw the mask overlay: the union of every enabled mask. */
+  /** The layer a run writes into. Always resolves to one: the chosen layer if
+   *  it still exists, else the topmost shown layer, else the top of the stack.
+   *  A document always has at least one layer (deleteEntity keeps the last),
+   *  so a run never has to invent a layer of its own. */
+  const pickActiveLayer = useCallback((doc, id) => (
+    doc.rasterLayers.find((l) => l.id === id)
+    || [...doc.rasterLayers].reverse().find((l) => l.enabled)
+    || doc.rasterLayers[doc.rasterLayers.length - 1]
+    || null
+  ), []);
+
+  /** Highlight a row; a layer row also becomes the active layer. */
+  const selectEntity = useCallback((id) => {
+    setSelectedId(id);
+    if (docRef.current.rasterLayers.some((l) => l.id === id)) {
+      activeLayerRef.current = id;
+      setActiveLayerId(id);
+    }
+  }, []);
+
+  /** Redraw the mask store: the union of every mask that is on. What is
+   *  displayed is the overlay's business (see MaskOverlay), and follows a
+   *  different switch. */
   const rasterizeMasks = useCallback((masks, size) => {
     const c = maskRef.current;
     if (!c) return;
     const w = size?.w || c.width;
     const h = size?.h || c.height;
     if (!w || !h) return;
-    compositeMasks(masks || [], c, w, h);
+    compositeMasks((masks || []).filter((m) => m.enabled), c, w, h);
     syncMaskOverlayRef.current();
     bumpMask();
   }, [bumpMask]);
 
-  const pushUndo = useCallback((snap) => {
+  /** Push an undo snapshot. Consecutive pushes with the same `key` collapse
+   *  into one entry: an opacity drag fires per slider tick, and forty ticks
+   *  used to evict the fill you were trying to undo. */
+  const pushUndo = useCallback((snap, key = null) => {
+    if (key && key === undoKeyRef.current && undoRef.current.length) return;
+    undoKeyRef.current = key;
     undoRef.current = [snap, ...undoRef.current].slice(0, UNDO_MAX);
     setUndoLen(undoRef.current.length);
   }, []);
 
   const clearUndo = useCallback(() => {
     undoRef.current = [];
+    redoRef.current = [];
+    undoKeyRef.current = null;
     setUndoLen(0);
+    setRedoLen(0);
   }, []);
+
+  /** Make `doc` the current document, on screen and in the mirror. */
+  const showDoc = useCallback((doc) => {
+    docRef.current = doc;
+    setRasterLayers(doc.rasterLayers);
+    setInpaintMasks(doc.inpaintMasks);
+    setSelectedId(doc.selectedId);
+    rasterizeMasks(doc.inpaintMasks);
+  }, [rasterizeMasks]);
 
   /** The one mutator every entity edit goes through.
    *
@@ -163,12 +218,17 @@ export default function Play() {
    *  painted stroke, a deleted layer, a reorder and an accepted fill alike --
    *  which is the behaviour that replaced the staging area's Accept/Discard.
    */
-  const edit = useCallback((fn, { redraw = true, undo = true } = {}) => {
+  const edit = useCallback((fn, { redraw = true, undo = true, coalesce = null } = {}) => {
     const prev = docRef.current;
     const patch = typeof fn === "function" ? fn(prev) : fn;
     if (!patch) return;
     const next = { ...prev, ...patch };
-    if (undo) pushUndo(prev);
+    if (undo) {
+      pushUndo(prev, coalesce);
+      // A new edit forks history; what was undone is no longer reachable.
+      redoRef.current = [];
+      setRedoLen(0);
+    }
     docRef.current = next;
     if (patch.rasterLayers) setRasterLayers(patch.rasterLayers);
     if (patch.inpaintMasks) setInpaintMasks(patch.inpaintMasks);
@@ -181,13 +241,27 @@ export default function Play() {
     if (!stack.length) return;
     const [prev, ...rest] = stack;
     undoRef.current = rest;
+    undoKeyRef.current = null;
     setUndoLen(rest.length);
-    docRef.current = prev;
-    setRasterLayers(prev.rasterLayers);
-    setInpaintMasks(prev.inpaintMasks);
-    setSelectedId(prev.selectedId);
-    rasterizeMasks(prev.inpaintMasks);
-  }, [rasterizeMasks]);
+    // Redo exists because Undo is document-wide: one stray Ctrl+Z after a fill
+    // would otherwise cost a GPU run, and Results can only put it back by
+    // replacing the whole stack.
+    redoRef.current = [docRef.current, ...redoRef.current].slice(0, UNDO_MAX);
+    setRedoLen(redoRef.current.length);
+    showDoc(prev);
+  }, [showDoc]);
+
+  const redo = useCallback(() => {
+    const stack = redoRef.current;
+    if (!stack.length) return;
+    const [next, ...rest] = stack;
+    redoRef.current = rest;
+    setRedoLen(rest.length);
+    undoRef.current = [docRef.current, ...undoRef.current].slice(0, UNDO_MAX);
+    undoKeyRef.current = null;
+    setUndoLen(undoRef.current.length);
+    showDoc(next);
+  }, [showDoc]);
 
   /** Which mask the brush paints into.
    *
@@ -196,9 +270,9 @@ export default function Play() {
    *  works without first understanding the panel.
    */
   const paintTargetId = useCallback((doc) => {
-    const sel = doc.inpaintMasks.find((m) => m.id === doc.selectedId && !m.locked);
+    const sel = doc.inpaintMasks.find((m) => m.id === doc.selectedId);
     if (sel) return sel.id;
-    const open = [...doc.inpaintMasks].reverse().find((m) => m.enabled && !m.locked);
+    const open = [...doc.inpaintMasks].reverse().find((m) => m.enabled);
     return open?.id || null;
   }, []);
 
@@ -219,6 +293,7 @@ export default function Play() {
       return {
         inpaintMasks: patchEntity(masks, id, (m) => ({
           enabled: true,
+          visible: true,
           strokes: [...m.strokes, stroke],
         })),
         selectedId: id,
@@ -226,6 +301,7 @@ export default function Play() {
     }, { redraw });
   }, [edit, paintTargetId]);
 
+  /** A layer's shown/hidden, or a mask's on/off. */
   const setEntityEnabled = useCallback((id, on) => {
     edit((doc) => ({
       rasterLayers: patchEntity(doc.rasterLayers, id, { enabled: !!on }),
@@ -233,11 +309,19 @@ export default function Play() {
     }));
   }, [edit]);
 
-  const setEntityLocked = useCallback((id, on) => {
-    edit((doc) => ({
-      rasterLayers: patchEntity(doc.rasterLayers, id, { locked: !!on }),
-      inpaintMasks: patchEntity(doc.inpaintMasks, id, { locked: !!on }),
-    }), { redraw: false });
+  /** A mask's shown/hidden: only what is drawn, never what the run gets. */
+  const setMaskVisible = useCallback((id, on) => {
+    edit((doc) => ({ inpaintMasks: patchEntity(doc.inpaintMasks, id, { visible: !!on }) }));
+  }, [edit]);
+
+  /** Painting into a mask turns it on and shows it, so a stroke never lands
+   *  somewhere it cannot be seen or will not count. Done before the stroke
+   *  starts, so the live brush draws onto a display that already has the
+   *  rest of that mask in it. */
+  const wakeMask = useCallback((id) => {
+    const m = docRef.current.inpaintMasks.find((x) => x.id === id);
+    if (!m || (m.enabled && maskShown(m))) return;
+    edit((doc) => ({ inpaintMasks: patchEntity(doc.inpaintMasks, id, { enabled: true, visible: true }) }));
   }, [edit]);
 
   const renameEntity = useCallback((id, name) => {
@@ -251,15 +335,54 @@ export default function Play() {
   const setLayerOpacity = useCallback((id, v) => {
     edit((doc) => ({
       rasterLayers: patchEntity(doc.rasterLayers, id, { opacity: Math.max(0, Math.min(1, v)) }),
-    }), { redraw: false });
+    }), { redraw: false, coalesce: `opacity:${id}` });
   }, [edit]);
 
+  /** Remove a row. The last layer stays: there is always one to write into. */
   const deleteEntity = useCallback((id) => {
-    edit((doc) => ({
-      rasterLayers: doc.rasterLayers.filter((e) => e.id !== id),
-      inpaintMasks: doc.inpaintMasks.filter((e) => e.id !== id),
-      selectedId: doc.selectedId === id ? null : doc.selectedId,
-    }));
+    edit((doc) => {
+      const isLayer = doc.rasterLayers.some((l) => l.id === id);
+      if (isLayer && doc.rasterLayers.length <= 1) return null;
+      return {
+        rasterLayers: doc.rasterLayers.filter((e) => e.id !== id),
+        inpaintMasks: doc.inpaintMasks.filter((e) => e.id !== id),
+        selectedId: doc.selectedId === id ? null : doc.selectedId,
+      };
+    });
+  }, [edit]);
+
+  /** A new empty layer, on top, selected and active. */
+  const addLayer = useCallback(() => {
+    const { w, h } = canvasSizeRef.current;
+    let id = null;
+    edit((doc) => {
+      const l = newRasterLayer({ name: uniqueName(doc.rasterLayers, "Layer"), image: blankImage(w, h) });
+      id = l.id;
+      return { rasterLayers: [...doc.rasterLayers, l], selectedId: l.id };
+    }, { redraw: false });
+    if (id) { activeLayerRef.current = id; setActiveLayerId(id); }
+  }, [edit]);
+
+  /** A copy of a layer directly above it, selected and active. The way to try
+   *  something else on the same ground without losing what is there. */
+  const duplicateLayer = useCallback((id) => {
+    let newId = null;
+    edit((doc) => {
+      const i = doc.rasterLayers.findIndex((l) => l.id === id);
+      if (i < 0) return null;
+      const src = doc.rasterLayers[i];
+      const copy = newRasterLayer({
+        name: uniqueFrom(doc.rasterLayers, `${src.name} copy`),
+        image: src.image,
+        card: src.card,
+      });
+      copy.opacity = src.opacity;
+      newId = copy.id;
+      const out = [...doc.rasterLayers];
+      out.splice(i + 1, 0, copy);
+      return { rasterLayers: out, selectedId: copy.id };
+    }, { redraw: false });
+    if (newId) { activeLayerRef.current = newId; setActiveLayerId(newId); }
   }, [edit]);
 
   const moveEntity = useCallback((id, delta) => {
@@ -289,11 +412,37 @@ export default function Play() {
       return {
         inpaintMasks: patchEntity(doc.inpaintMasks, target, (m) => ({
           enabled: true,
+          visible: true,
           strokes: [...m.strokes, invertStroke()],
         })),
       };
     });
   }, [edit, paintTargetId]);
+
+  /** Translate a mask by a fraction of the canvas. Consecutive moves fold into
+   *  one stroke, so a drag off the canvas and back loses nothing, and the
+   *  stroke list does not grow by one per nudge. */
+  const moveMask = useCallback((id, dx, dy, { coalesce = null } = {}) => {
+    if (!id || (!dx && !dy)) return;
+    edit((doc) => ({
+      inpaintMasks: patchEntity(doc.inpaintMasks, id, (m) => {
+        const last = m.strokes[m.strokes.length - 1];
+        if (last?.type !== "move") return { strokes: [...m.strokes, moveStroke(dx, dy)] };
+        const nx = last.dx + dx;
+        const ny = last.dy + dy;
+        const rest = m.strokes.slice(0, -1);
+        const still = Math.abs(nx) < 1e-9 && Math.abs(ny) < 1e-9;
+        return { strokes: still ? rest : [...rest, moveStroke(nx, ny)] };
+      }),
+    }), { coalesce });
+  }, [edit]);
+
+  /** Arrow-key move, in canvas pixels. A held key is one undo entry. */
+  const nudgeMask = useCallback((id, px, py) => {
+    const c = maskRef.current;
+    if (!c?.width || !c?.height) return;
+    moveMask(id, px / c.width, py / c.height, { coalesce: `move:${id}` });
+  }, [moveMask]);
 
   const setMaskParam = useCallback((id, k, v) => {
     edit((doc) => {
@@ -307,6 +456,8 @@ export default function Play() {
     }, { redraw: false, undo: false });
   }, [edit, paintTargetId]);
 
+  /** A new layer holding an image, on top of the stack. User-initiated only:
+   *  the Results "Layer" button. Runs never call this. */
   const addRasterLayer = useCallback(({ image, card, name }) => {
     edit((doc) => {
       const l = newRasterLayer({
@@ -320,11 +471,20 @@ export default function Play() {
     }, { redraw: false });
   }, [edit]);
 
-  /** Promote a raster layer's own alpha to a mask.
+  /** Put an image into a layer, replacing what it had. Turns the layer on:
+   *  a run landing in a hidden layer would look like it produced nothing. */
+  const writeLayer = useCallback((id, image, card) => {
+    edit((doc) => ({
+      rasterLayers: patchEntity(doc.rasterLayers, id, { image, card: card ?? null, enabled: true }),
+    }), { redraw: false });
+  }, [edit]);
+
+  /** Select the area a layer covers, and nothing else.
    *
-   *  A fill layer's alpha is exactly the region that fill covered, so this is
-   *  how you rework the same area again with a different model or setting --
-   *  the workflow the whole redesign is for.
+   *  A layer that has only taken fills is transparent everywhere else, so its
+   *  alpha is exactly the ground those fills covered. Every other mask is
+   *  turned off: adding the new mask alongside the old one, which was usually
+   *  still on, made the bar read "2 masks on" and the next fill cover the union.
    */
   const useLayerAsMask = useCallback(async (id) => {
     const layer = docRef.current.rasterLayers.find((l) => l.id === id);
@@ -335,7 +495,10 @@ export default function Play() {
         ...newInpaintMask({ name: uniqueName(doc.inpaintMasks, "Inpaint Mask") }),
         strokes: [cachedStroke("layer", cache, "add")],
       };
-      return { inpaintMasks: [...doc.inpaintMasks, m], selectedId: m.id };
+      return {
+        inpaintMasks: [...doc.inpaintMasks.map((x) => ({ ...x, enabled: false })), m],
+        selectedId: m.id,
+      };
     });
   }, [edit]);
 
@@ -376,26 +539,64 @@ export default function Play() {
   useEffect(() => {
     let live = true;
     flattenLayers(rasterLayers, canvasSize)
-      .then((img) => { if (live) setFrameState(img); })
+      // Every layer hidden is still a canvas -- a blank one to paint a mask on
+      // or generate into -- not an empty box.
+      .then((img) => { if (live) setFrameState(img || blankImage(canvasSize.w, canvasSize.h)); })
       .catch(() => { if (live) setFrameState(null); });
     return () => { live = false; };
   }, [rasterLayers, canvasSize]);
 
-  /** Replace the whole stack with one image. What "open this" and "restore
-   *  that" mean: a different picture, not another layer on the same one. */
-  const setDocumentImage = useCallback((img, card, name) => {
+  /** A new document around one image, at the image's own size.
+   *
+   *  What "open this" means: a different picture, not another layer on the
+   *  same one. The canvas takes the image's size, because flatten stretches
+   *  every layer to the canvas and an opened image should look like itself.
+   *  Masks are kept only when asked (upscale): their strokes are normalised,
+   *  so they replay at the new size. */
+  const openDocument = useCallback(async (img, card, name, { keepMasks = false } = {}) => {
+    const size = openSize(await imageSize(img));
     setLivePreview(null);
-    edit((doc) => ({
-      rasterLayers: img ? [newRasterLayer({ name: name || "Background", image: img, card })] : [],
-      inpaintMasks: doc.inpaintMasks.length ? doc.inpaintMasks : [newInpaintMask({ name: "Inpaint Mask 1" })],
-    }), { redraw: false });
-    setFrameCard(card || null);
+    setPostFrame(null);
+    blankFrameRef.current = null;
+    canvasSizeRef.current = size;
+    setCanvasSizeState(size);
+    let id = null;
+    edit((doc) => {
+      const l = newRasterLayer({ name: name || "Layer 1", image: img, card });
+      id = l.id;
+      return {
+        rasterLayers: [l],
+        inpaintMasks: keepMasks && doc.inpaintMasks.length
+          ? doc.inpaintMasks
+          : [newInpaintMask({ name: "Inpaint Mask 1" })],
+        selectedId: l.id,
+      };
+    });
+    activeLayerRef.current = id;
+    setActiveLayerId(id);
   }, [edit]);
 
-  const restoreHistory = useCallback((entry) => {
-    if (!entry) return;
-    setDocumentImage(entry.img, entry.card ?? null, "Restored");
-  }, [setDocumentImage]);
+  /** Put a result into the active layer. Results are canvas-sized, so this is
+   *  the honest "show me that one again" -- and it used to replace the whole
+   *  stack, which read as layers being deleted by a click meant to look. */
+  const placeHistory = useCallback((entry) => {
+    if (!entry?.img) return;
+    const target = pickActiveLayer(docRef.current, activeLayerRef.current);
+    if (!target) return;
+    writeLayer(target.id, entry.img, entry.card ?? null);
+  }, [pickActiveLayer, writeLayer]);
+
+  /** Bring a result back as a new layer over the stack. */
+  const addHistoryAsLayer = useCallback((entry) => {
+    if (!entry?.img) return;
+    const seed = entry.card?.params?.seed;
+    addRasterLayer({
+      image: entry.img,
+      card: entry.card ?? null,
+      name: seed != null ? `Result · seed ${seed}` : "Result",
+    });
+    toast("Added as a layer", "success");
+  }, [addRasterLayer, toast]);
 
   const removeHistory = useCallback((id) => {
     setHistory((h) => h.filter((x) => x.id !== id));
@@ -405,41 +606,7 @@ export default function Play() {
     setHistory([]);
   }, []);
 
-  /** Set (or drop) the init image.
-   *
-   *  This used to clear the mask, on the grounds that a mask belongs to the
-   *  image it was drawn on. But a fill reads the *canvas*, not the init — an
-   *  init only affects a full-canvas generation, so it cannot invalidate a mask
-   *  drawn over the layers. Masks stay.
-   */
-  const applyInit = useCallback((src) => {
-    setInitImage(src || null);
-  }, []);
-
-  const useAsInit = useCallback(() => {
-    const src = showRaw ? frame : (postFrame || frame);
-    if (!src) return;
-    applyInit(src);
-    toast("Canvas set as init", "success");
-  }, [frame, postFrame, showRaw, applyInit, toast]);
-
-  const useHistoryAsInit = useCallback((entry) => {
-    if (!entry?.img) return;
-    applyInit(entry.raw || entry.img);
-    toast("Set as init", "success");
-  }, [applyInit, toast]);
-
-  /** Drop the init image, keeping whatever is on the canvas. */
-  const clearInit = useCallback(() => {
-    applyInit(null);
-    toast("Init cleared", "success");
-  }, [applyInit, toast]);
-
   /** A new document: one Background layer at that size, one empty mask.
-   *
-   *  Deliberately *not* set as the init image. An untouched blank canvas is a
-   *  surface to select on, not a picture to work from — with nothing masked,
-   *  Generate should make a new image rather than img2img from empty pixels.
    *
    *  This is the one place masks go without the user saying so, and it is the
    *  right one: the canvas they belonged to no longer exists.
@@ -453,18 +620,19 @@ export default function Play() {
     setCanvasSizeState({ w: width, h: height });
     setFrameState(ground);
     setPostFrame(null);
-    setFrameCard(null);
     setPendingCard(null);
     setLivePreview(null);
-    applyInit(null);
     docRef.current = { ...doc, selectedId: doc.inpaintMasks[0].id };
+    canvasSizeRef.current = { w: width, h: height };
     setRasterLayers(doc.rasterLayers);
     setInpaintMasks(doc.inpaintMasks);
     setSelectedId(doc.inpaintMasks[0].id);
+    activeLayerRef.current = doc.rasterLayers[0].id;
+    setActiveLayerId(doc.rasterLayers[0].id);
     rasterizeMasks(doc.inpaintMasks, { w: width, h: height });
     clearUndo();
     if (!quiet) toast(`Blank canvas — ${width}x${height}`, "success");
-  }, [applyInit, toast, rasterizeMasks, clearUndo]);
+  }, [toast, rasterizeMasks, clearUndo]);
 
   /** Resizing is the same act as starting over: a new blank ground at that size. */
   const setCanvasSize = useCallback((patch) => {
@@ -497,6 +665,87 @@ export default function Play() {
     toast(`Seed locked to ${seed}`, "success");
   }, [setSampleParam, toast]);
 
+  // --- Assets: images the user keeps at hand ---------------------------------
+
+  const loadAssets = useCallback(async () => {
+    try {
+      const r = await api.get("/assets");
+      setAssets(r.assets || []);
+    } catch { /* the panel just stays empty */ }
+  }, []);
+  useEffect(() => { loadAssets(); }, [loadAssets]);
+
+  /** Keep an image as an asset. Says so when it cannot: a drop that produces
+   *  nothing looks like the panel ignored it. */
+  const keepAsset = useCallback(async (image, name, card) => {
+    try {
+      const r = await api.post("/assets", { image, name: name || undefined, card: card || undefined });
+      if (r.asset) setAssets((a) => [r.asset, ...a.filter((x) => x.path !== r.asset.path)]);
+      return r.asset || null;
+    } catch (e) {
+      toast(`Could not keep ${name || "the image"} as an asset: ${e.message}`, "error");
+      return null;
+    }
+  }, [toast]);
+
+  const deleteAsset = useCallback(async (asset) => {
+    try {
+      await api.del("/assets", { path: asset.path });
+      setAssets((a) => a.filter((x) => x.path !== asset.path));
+    } catch (e) { toast(e.message, "error"); }
+  }, [toast]);
+
+  /** The asset's bytes as a data URL, which is what layers hold. */
+  const assetDataUrl = useCallback(async (asset) => {
+    const blob = await fetch(mediaUrl(asset.path)).then((r) => {
+      if (!r.ok) throw new Error("Could not read that asset");
+      return r.blob();
+    });
+    return fileToDataUrl(blob);
+  }, []);
+
+  /** Place an asset into the active layer, fitted to the canvas. */
+  const placeAsset = useCallback(async (asset) => {
+    try {
+      const url = await assetDataUrl(asset);
+      const { w, h } = canvasSizeRef.current;
+      const fitted = await fitIntoCanvas(url, w, h);
+      const target = pickActiveLayer(docRef.current, activeLayerRef.current);
+      if (!target) return;
+      let card = null;
+      try { card = (await api.post("/perform/read-params", { image: url })).card || null; } catch { /* none */ }
+      writeLayer(target.id, fitted, card);
+      toast(`Placed into ${target.name}`, "success");
+    } catch (e) { toast(e.message, "error"); }
+  }, [assetDataUrl, pickActiveLayer, writeLayer, toast]);
+
+  /** Open an asset as a new document at its own size. */
+  const openAsset = useCallback(async (asset) => {
+    try {
+      const url = await assetDataUrl(asset);
+      let card = null;
+      try { card = (await api.post("/perform/read-params", { image: url })).card || null; } catch { /* none */ }
+      await openDocument(url, card, asset.name);
+      setPendingCard(card && card.params ? card : null);
+      toast("Opened", "success");
+    } catch (e) { toast(e.message, "error"); }
+  }, [assetDataUrl, openDocument, toast]);
+
+  /** Add files to the assets without touching the canvas. */
+  const addAssetFiles = useCallback(async (files) => {
+    const all = [...(files || [])];
+    const imgs = all.filter((f) => f.type.startsWith("image/"));
+    if (all.length && !imgs.length) { toast("Only images can be assets", "error"); return; }
+    let n = 0;
+    for (const f of imgs) {
+      const url = await fileToDataUrl(f);
+      if (await keepAsset(url, fileStem(f.name))) n += 1;
+    }
+    if (n) toast(n === 1 ? "Added to assets" : `${n} added to assets`, "success");
+  }, [keepAsset, toast]);
+
+  /** Open an image file as the document, and keep it as an asset so it can be
+   *  placed again later without finding the file again. */
   const loadFile = useCallback(async (file) => {
     if (!file || !file.type.startsWith("image/")) return;
     const url = await fileToDataUrl(file);
@@ -507,12 +756,12 @@ export default function Play() {
       const r = await api.post("/perform/read-params", { image: url });
       card = r.card || null;
     } catch { /* not fatal — the image still lands on the canvas */ }
-    setDocumentImage(url, card, "Background");
-    applyInit(url);
+    await openDocument(url, card, fileStem(file.name) || "Layer 1");
     pushHistory(url, null, card);
     setPendingCard(card && card.params ? card : null);
+    keepAsset(url, fileStem(file.name), card);
     toast(card?.params ? "On canvas — Kiln settings found" : "On canvas", "success");
-  }, [setDocumentImage, applyInit, pushHistory, toast]);
+  }, [openDocument, pushHistory, keepAsset, toast]);
 
   /** The mask as the backend wants it: white where the fill should happen.
    *
@@ -521,24 +770,8 @@ export default function Play() {
    *  toggles work without every caller having to check them.
    */
   const getMaskDataUrl = useCallback(() => {
-    const c = maskRef.current;
-    if (!c || !activeMasks(inpaintMasks).length) return null;
-    const ctx = c.getContext("2d");
-    const img = ctx.getImageData(0, 0, c.width, c.height);
-    const { data } = img;
-    let painted = false;
-    for (let i = 0; i < data.length; i += 4) {
-      const a = data[i + 3];
-      if (a > 8) painted = true;
-      data[i] = data[i + 1] = data[i + 2] = a;
-      data[i + 3] = 255;
-    }
-    if (!painted) return null;
-    const out = document.createElement("canvas");
-    out.width = c.width;
-    out.height = c.height;
-    out.getContext("2d").putImageData(img, 0, 0);
-    return out.toDataURL("image/png");
+    if (!activeMasks(inpaintMasks).length) return null;
+    return maskDataUrlFrom(maskRef.current);
   }, [inpaintMasks, maskVersion]);
 
   /** A contrast split becomes one stroke, replacing whatever came before it.
@@ -572,6 +805,7 @@ export default function Play() {
       return {
         inpaintMasks: patchEntity(masks, id, (m) => ({
           enabled: true,
+          visible: true,
           strokes: [...m.strokes.filter((s) => s.type !== "split"), stroke],
         })),
         selectedId: id,
@@ -621,25 +855,31 @@ export default function Play() {
     tabState["sweep.twoD"] ? (tabState["sweep.param2"] ?? "eta") : null,
   ].filter(Boolean);
 
-  /** A finished fill becomes a layer, punched down to the region the mask
-   *  allowed so it stacks over what is there rather than hiding it.
+  /** A finished fill lands in the active layer: punched down to the region the
+   *  mask allowed, then drawn over what the layer already had there.
    *
-   *  This is what replaced the staging area: the fill is added, not applied, so
-   *  there is nothing to accept. Reject it by hiding the layer, deleting it, or
-   *  pressing Undo — and compare two attempts by toggling between two layers.
+   *  So the layer accumulates -- fill one area, then the next, and the layer
+   *  holds both -- and a second attempt at the same area replaces the first
+   *  in that layer. To keep the first, duplicate the layer before filling
+   *  again; to drop the second, Undo. Kiln never adds a layer of its own.
    */
-  const addFillLayer = useCallback(async (img, card, name) => {
-    const punched = await punchToMask(img, maskRef.current);
-    addRasterLayer({ image: punched, card, name });
+  const fillIntoLayer = useCallback(async (img, card, maskSrc) => {
+    const punched = await punchToMask(img, maskSrc);
+    const target = pickActiveLayer(docRef.current, activeLayerRef.current);
+    if (!target) return;
+    const { w, h } = canvasSizeRef.current;
+    const merged = await compositeOnto(target.image, punched, w, h);
+    writeLayer(target.id, merged, card);
     setLivePreview(null);
-  }, [addRasterLayer]);
+  }, [pickActiveLayer, writeLayer]);
 
-  const commitFrame = useCallback((img, raw, card, name) => {
-    addRasterLayer({ image: img, card, name });
+  /** A whole-canvas generation replaces the active layer's image. */
+  const generateIntoLayer = useCallback((img, raw, card) => {
+    const target = pickActiveLayer(docRef.current, activeLayerRef.current);
+    if (target) writeLayer(target.id, img, card);
     pushHistory(img, raw, card);
-    setFrameCard(card || null);
     setLivePreview(null);
-  }, [addRasterLayer, pushHistory]);
+  }, [pickActiveLayer, writeLayer, pushHistory]);
 
   // Post-process sits between the flattened stack and the screen, so
   // Unprocessed shows the stack itself. A live preview outranks both.
@@ -647,21 +887,54 @@ export default function Play() {
   // Still the untouched blank ground: nothing generated, dropped or restored
   // over it. A fill has to know, because a partial run started from empty
   // pixels gives back the empty pixels it started from.
-  const canvasIsBlank = !!frame && frame === blankFrameRef.current;
+  const canvasIsBlank = (!!frame && frame === blankFrameRef.current)
+    || !rasterLayers.some((l) => l.enabled && l.image);
+  // The recipe the canvas carries: that of the topmost shown layer that has
+  // one. A stack has no single recipe, and this is the layer whose pixels are
+  // most of what you see. It used to be a separate state that fills never
+  // updated, so the seed pill and the exported PNG kept naming the layer
+  // underneath.
+  const frameCard = useMemo(
+    () => [...rasterLayers].reverse().find((l) => l.enabled && l.image && l.card)?.card ?? null,
+    [rasterLayers],
+  );
+  const activeLayer = useMemo(
+    () => pickActiveLayer({ rasterLayers }, activeLayerId),
+    [rasterLayers, activeLayerId, pickActiveLayer],
+  );
   const activeSeed = frameCard?.params?.seed ?? null;
   const genRunning = !!(job && job.status === "running");
   const genPaused = genRunning && !!job?.detail?.paused;
   const canUndo = undoLen > 0;
-  const maskPixels = useMemo(
-    () => countMaskPixels(maskRef.current),
+  const canRedo = redoLen > 0;
+  const maskMeasure = useMemo(
+    () => measureMask(maskRef.current),
     // maskVersion is the signal; the pixels live on a ref.
     [maskVersion],
   );
+  const maskPixels = maskMeasure.count;
   const liveMasks = activeMasks(inpaintMasks);
   const hasMask = liveMasks.length > 0 && maskPixels > 0;
   // The mask whose settings the panel edits, and whose name the labels use.
   const activeMask = inpaintMasks.find((m) => m.id === paintTargetId({ ...docRef.current, inpaintMasks, selectedId }))
     || null;
+  // The box drawn around the active mask, in canvas pixels. When it is the
+  // only mask on, the union scan above already measured it; otherwise its own
+  // raster is measured apart from the others.
+  const measureScratch = useRef(null);
+  const liveKey = liveMasks.map((m) => m.id).join(",");
+  const activeBox = useMemo(() => {
+    const c = maskRef.current;
+    if (!c?.width || !activeMask?.enabled || !maskShown(activeMask) || !activeMask.strokes.length) return null;
+    let m = maskMeasure;
+    if (liveKey !== activeMask.id) {
+      if (!measureScratch.current) measureScratch.current = document.createElement("canvas");
+      rasterize(activeMask, measureScratch.current, c.width, c.height);
+      m = measureMask(measureScratch.current);
+    }
+    return m.count ? { count: m.count, bbox: m.bbox, w: c.width, h: c.height } : null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [maskVersion, maskMeasure, activeMask, liveKey]);
 
   // Play opens on a blank canvas rather than an empty box, so the brush and
   // region tools have something to work on from the first moment. Once only:
@@ -685,25 +958,32 @@ export default function Play() {
 
   const value = {
     tab, frame, postFrame, setPostFrame, showRaw, setShowRaw, canvasImage,
-    initImage, setInitImage, applyInit, clearInit, clearCanvas,
-    frameCard, setFrameCard, pendingCard, setPendingCard, applyCard, lockSeed, activeSeed,
-    history, commitFrame, pushHistory, restoreHistory, removeHistory, clearHistory,
-    useAsInit, useHistoryAsInit, loadFile, setDocumentImage,
+    clearCanvas,
+    frameCard, pendingCard, setPendingCard, applyCard, lockSeed, activeSeed,
+    history, generateIntoLayer, fillIntoLayer, pushHistory, placeHistory, addHistoryAsLayer,
+    removeHistory, clearHistory, loadFile, openDocument,
     progress, setProgress,
     brushSize, setBrushSize, brushHard, setBrushHard, eraser, setEraser,
     maskTool, setMaskTool, wandTolerance, setWandTolerance,
     maskRef, heroRef,
     syncMaskOverlayRef, getMaskDataUrl, applyContrastMask, applyFloodFillMask,
     // Canvas entities
-    rasterLayers, inpaintMasks, selectedId, setSelectedId, activeMask,
+    rasterLayers, inpaintMasks, selectedId, selectEntity, activeMask, activeLayer, activeBox,
     maskPixels, hasMask, liveMasks, addStroke, rasterizeMasks,
-    setEntityEnabled, setEntityLocked, renameEntity, setLayerOpacity,
-    deleteEntity, moveEntity, addMask, clearMask, invertMask, setMaskParam,
-    addRasterLayer, useLayerAsMask, addFillLayer,
-    undo, canUndo, setLivePreview,
+    setEntityEnabled, setMaskVisible, wakeMask, renameEntity, setLayerOpacity,
+    deleteEntity, moveEntity, addLayer, duplicateLayer,
+    addMask, clearMask, invertMask, setMaskParam, moveMask, nudgeMask,
+    addRasterLayer, useLayerAsMask,
+    undo, canUndo, redo, canRedo, setLivePreview,
+    // Assets
+    assets, addAssetFiles, deleteAsset, placeAsset, openAsset,
     sampleParams, setSampleParam, mergeSampleParams, maskVersion, bumpMask,
     canvasSize, setCanvasSize, newCanvas, canvasIsBlank,
     tabState, setTabStateKey,
+    // The document as of the last edit, updated synchronously. The overlay
+    // rebuilds its display inside rasterizeMasks, before React has rendered
+    // the new state, so it reads this rather than a prop.
+    docRef,
     job, setJob, genRunning, genPaused,
   };
 
@@ -742,6 +1022,7 @@ export default function Play() {
             >
               <PlayCanvas brushable={!!canvasImage} />
               <div className="play-rail">
+                <AssetsPanel />
                 <LayersPanel />
                 <ResultsRail />
               </div>
@@ -756,18 +1037,116 @@ export default function Play() {
   );
 }
 
+const ZOOM_MIN = 0.25;
+const ZOOM_MAX = 8;
+
 function PlayCanvas({ brushable }) {
   const { toast } = useApp();
   const {
-    postFrame, showRaw, setShowRaw, initImage, progress, heroRef, canvasImage,
-    frameCard, pendingCard, setPendingCard, applyCard, activeSeed, useAsInit,
-    clearInit, clearCanvas, canvasSize, setCanvasSize, newCanvas, loadFile,
+    postFrame, showRaw, setShowRaw, progress, heroRef, canvasImage, syncMaskOverlayRef, tab,
+    frameCard, pendingCard, setPendingCard, applyCard, activeSeed,
+    clearCanvas, canvasSize, setCanvasSize, newCanvas, loadFile,
     activeMask, maskPixels, hasMask, liveMasks,
   } = usePlay();
   const shown = canvasImage;
   const [busy, setBusy] = useState(false);
   const openRef = useRef(null);
   const shownCard = frameCard;
+
+  // Zoom and pan. A CSS transform on the wrapper around the picture and its
+  // mask overlay: the overlay's pointer maths reads client rects, which
+  // already include the transform, so painting needs no changes to follow.
+  const viewRef = useRef(null);
+  const [view, setView] = useState({ s: 1, x: 0, y: 0 });
+  const pan = useRef(null);
+  const [panning, setPanning] = useState(false);
+  const [spaceHeld, setSpaceHeld] = useState(false);
+  const spaceRef = useRef(false);
+
+  // A new document is a new picture; start it at 100%.
+  useEffect(() => { setView({ s: 1, x: 0, y: 0 }); }, [canvasSize.w, canvasSize.h]);
+  // The hatch period is fixed in screen pixels, so a zoom changes it on the
+  // canvas; redraw the overlay once the transform has settled.
+  useEffect(() => { syncMaskOverlayRef.current(); }, [view.s, syncMaskOverlayRef]);
+
+  /** Zoom by `k` about a point given in the wrapper's untransformed space. */
+  const zoomAt = useCallback((k, cx, cy) => {
+    setView((v) => {
+      const s = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, v.s * k));
+      const f = s / v.s;
+      return { s, x: cx - (cx - v.x) * f, y: cy - (cy - v.y) * f };
+    });
+  }, []);
+
+  /** Zoom about what is currently at the middle of the picture. */
+  const zoomStep = (k) => {
+    const w = viewRef.current;
+    if (!w) return;
+    const v = view;
+    zoomAt(k, v.x + (v.s * w.offsetWidth) / 2, v.y + (v.s * w.offsetHeight) / 2);
+  };
+
+  // Wheel zooms about the pointer. A native listener, because React's wheel
+  // handler is passive and cannot stop the page from scrolling instead.
+  useEffect(() => {
+    const hero = heroRef.current;
+    if (!hero) return undefined;
+    const onWheel = (e) => {
+      const w = viewRef.current;
+      if (!w) return;
+      e.preventDefault();
+      const r = hero.getBoundingClientRect();
+      zoomAt(Math.exp(-e.deltaY * 0.0015), e.clientX - r.left - w.offsetLeft, e.clientY - r.top - w.offsetTop);
+    };
+    hero.addEventListener("wheel", onWheel, { passive: false });
+    return () => hero.removeEventListener("wheel", onWheel);
+  }, [heroRef, zoomAt, shown]);
+
+  // Space held turns a drag anywhere on the picture into a pan.
+  useEffect(() => {
+    if (tab !== "create") return undefined;
+    const isTyping = (e) => {
+      const tag = e.target?.tagName;
+      return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || e.target?.isContentEditable;
+    };
+    const down = (e) => {
+      if (e.code !== "Space" || isTyping(e) || e.repeat) return;
+      e.preventDefault();
+      spaceRef.current = true;
+      setSpaceHeld(true);
+    };
+    const up = (e) => {
+      if (e.code !== "Space") return;
+      spaceRef.current = false;
+      setSpaceHeld(false);
+    };
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    return () => {
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+    };
+  }, [tab]);
+
+  /** Pan on the middle button, with Space held, or by dragging the empty
+   *  ground around the picture. Runs in the capture phase so the overlay
+   *  never sees the press as a stroke. */
+  const onHeroPointerDown = (e) => {
+    if (e.target.closest?.(".hero-zoom")) return;
+    const onGround = e.target === heroRef.current || e.target === viewRef.current;
+    if (!(e.button === 1 || spaceRef.current || onGround)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    try { heroRef.current.setPointerCapture(e.pointerId); } catch { /* not fatal */ }
+    pan.current = { px: e.clientX, py: e.clientY, x: view.x, y: view.y };
+    setPanning(true);
+  };
+  const onHeroPointerMove = (e) => {
+    const p = pan.current;
+    if (!p) return;
+    setView((v) => ({ ...v, x: p.x + (e.clientX - p.px), y: p.y + (e.clientY - p.py) }));
+  };
+  const endPan = () => { pan.current = null; setPanning(false); };
 
   const download = async () => {
     if (!shown) return;
@@ -827,34 +1206,69 @@ function PlayCanvas({ brushable }) {
             button. */}
         {hasMask && (
           <div className="selection-bar" role="status">
-            <span className="sub">
-              <strong>{liveMasks.length > 1
-                ? `${liveMasks.length} masks on`
-                : activeMask?.name || "Mask on"}</strong>
-              {" "}— {maskPixels.toLocaleString()} px. The next run changes only this area;
-              the rest of the canvas is kept.
+            <span className="sub grow">
+              <TipLabel tip="The next run changes only this area; the rest of the canvas is kept. Turn the mask off in the Layers panel to run on the whole canvas.">
+                <strong>{liveMasks.length > 1
+                  ? `${liveMasks.length} masks on`
+                  : activeMask?.name || "Mask on"}</strong>
+                {" "}· {maskPixels.toLocaleString()} px
+              </TipLabel>
             </span>
           </div>
         )}
-        <div className={`hero ${brushable ? "brushable" : ""}`} ref={heroRef}>
-          {shown ? <img src={shown} alt="canvas" /> : (
+        <div
+          className={`hero ${brushable ? "brushable" : ""} ${spaceHeld ? "pan-ready" : ""} ${panning ? "panning" : ""}`}
+          ref={heroRef}
+          onPointerDownCapture={onHeroPointerDown}
+          onPointerMove={onHeroPointerMove}
+          onPointerUp={endPan}
+          onPointerCancel={endPan}
+        >
+          {shown ? (
+            <div
+              className="hero-view"
+              ref={viewRef}
+              style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.s})` }}
+            >
+              <img src={shown} alt="canvas" draggable={false} />
+              <MaskOverlay active={brushable} />
+            </div>
+          ) : (
             <span className="sub">Generate, drop, or paste an image.</span>
           )}
-          {shown && <MaskOverlay active={brushable} />}
+          {shown && (
+            <div className="hero-zoom" role="group" aria-label="Zoom">
+              <Tooltip text="Zoom out. The wheel over the picture zooms too.">
+                <button type="button" onClick={() => zoomStep(1 / 1.25)} aria-label="Zoom out">−</button>
+              </Tooltip>
+              <Tooltip text="Back to 100%, centred. Pan by dragging the ground around the picture, with the middle button, or with Space held.">
+                <button type="button" className="zoom-pct mono" onClick={() => setView({ s: 1, x: 0, y: 0 })}>
+                  {Math.round(view.s * 100)}%
+                </button>
+              </Tooltip>
+              <Tooltip text="Zoom in">
+                <button type="button" onClick={() => zoomStep(1.25)} aria-label="Zoom in">+</button>
+              </Tooltip>
+            </div>
+          )}
         </div>
         <div className="row wrap center mt-2 gap-2 canvas-size-row">
-          <span className="sub">Canvas</span>
-          <input
-            type="number" className="canvas-size-input" aria-label="Canvas width"
-            value={canvasSize.w} min={CANVAS_MIN} max={CANVAS_MAX} step={64}
-            onChange={(e) => setCanvasSize({ w: e.target.value })}
-          />
-          <span className="sub">x</span>
-          <input
-            type="number" className="canvas-size-input" aria-label="Canvas height"
-            value={canvasSize.h} min={CANVAS_MIN} max={CANVAS_MAX} step={64}
-            onChange={(e) => setCanvasSize({ h: e.target.value })}
-          />
+          <Tooltip text="Canvas size in pixels. Changing it starts a new blank canvas with New canvas.">
+            <span className="sub has-tip">Canvas</span>
+          </Tooltip>
+          <span className="canvas-size-pair">
+            <input
+              type="number" className="canvas-size-input" aria-label="Canvas width"
+              value={canvasSize.w} min={CANVAS_MIN} max={CANVAS_MAX} step={64}
+              onChange={(e) => setCanvasSize({ w: e.target.value })}
+            />
+            <span className="sub">×</span>
+            <input
+              type="number" className="canvas-size-input" aria-label="Canvas height"
+              value={canvasSize.h} min={CANVAS_MIN} max={CANVAS_MAX} step={64}
+              onChange={(e) => setCanvasSize({ h: e.target.value })}
+            />
+          </span>
           <Tooltip text="Start again on a blank canvas at this size. Whatever is on the canvas now stays in Results, so this does not lose it.">
             <button type="button" className="btn sm" onClick={() => newCanvas(canvasSize.w, canvasSize.h)}>
               New canvas
@@ -882,29 +1296,9 @@ function PlayCanvas({ brushable }) {
             </Tooltip>
           )}
           {shown && <CaptureButton image={shown} card={frameCard} label="Capture" />}
-          {shown && (
-            <Tooltip text="Use the current canvas as the starting image for the next full generation (img2img). This clears the mask — a mask belongs to the image it was painted on.">
-              <button type="button" className="btn sm" onClick={useAsInit}>Use as init</button>
-            </Tooltip>
-          )}
-          {initImage && (
-            <Tooltip text="An init image is set: the next full generation starts from it. Remove it to generate from scratch again.">
-              <span className="pill on init-pill">
-                init set
-                <button
-                  type="button"
-                  className="pill-x"
-                  aria-label="Clear init image"
-                  onClick={clearInit}
-                >
-                  ✕
-                </button>
-              </span>
-            </Tooltip>
-          )}
           <div className="spacer" />
           {shown && (
-            <Tooltip text="Back to a blank canvas at the current size — drops the init and any painted mask with it. The image itself stays in Results.">
+            <Tooltip text="Back to a blank canvas at the current size — drops every layer and mask. The image itself stays in Results.">
               <button type="button" className="btn ghost sm" onClick={clearCanvas}>Clear canvas</button>
             </Tooltip>
           )}
@@ -938,8 +1332,8 @@ function CaptureButton({ image, card, label = "Save", className = "btn sm" }) {
  */
 function ResultsRail() {
   const {
-    history, frame, restoreHistory, removeHistory, clearHistory,
-    useHistoryAsInit, applyCard,
+    history, frame, placeHistory, removeHistory, clearHistory,
+    addHistoryAsLayer, applyCard, activeLayer,
   } = usePlay();
   if (!history.length) return null;
 
@@ -958,17 +1352,17 @@ function ResultsRail() {
               <button
                 type="button"
                 className="play-result-thumb"
-                onClick={() => restoreHistory(h)}
+                onClick={() => placeHistory(h)}
                 aria-label={`Result ${i + 1}${seed != null ? `, seed ${seed}` : ""}`}
-                title={cardLabel(h.card) || `Result ${i + 1}`}
+                title={`${cardLabel(h.card) || `Result ${i + 1}`} — click to put it into ${activeLayer?.name || "the active layer"}`}
               >
                 <img src={h.img} alt="" />
                 <span className="play-result-idx">#{i + 1}</span>
               </button>
               <span className="play-result-seed mono">{seed != null ? `seed ${seed}` : "—"}</span>
               <div className="play-result-actions">
-                <Tooltip text="Use as init image">
-                  <button type="button" className="btn xs" onClick={() => useHistoryAsInit(h)}>Init</button>
+                <Tooltip text="Add on top of the layer stack, keeping what is there">
+                  <button type="button" className="btn xs" onClick={() => addHistoryAsLayer(h)}>Layer</button>
                 </Tooltip>
                 <CaptureButton image={h.img} card={h.card} label="Save" className="btn xs" />
                 <Tooltip text={h.card?.params ? "Load this image's settings into the sampler" : "No settings recorded for this image"}>
@@ -993,11 +1387,44 @@ function ResultsRail() {
   );
 }
 
+/** A canvas kept on a ref, made on first use. */
+function scratchOf(ref) {
+  if (!ref.current) ref.current = document.createElement("canvas");
+  return ref.current;
+}
+
+function copyCanvas(src, dstRef) {
+  const dst = scratchOf(dstRef);
+  dst.width = src.width;
+  dst.height = src.height;
+  dst.getContext("2d").drawImage(src, 0, 0);
+  return dst;
+}
+
+/** The mask on the canvas.
+ *
+ *  Two canvases over the picture. `maskRef` is the data store: the union of
+ *  every mask that is on, whose alpha is the per-pixel strength the backend,
+ *  the fill punch and the pixel count all read. The brush paints onto it
+ *  directly. It is invisible.
+ *
+ *  `displayRef` shows the masks that are *shown* -- a different switch. Two
+ *  rasters feed it: the shown masks that are on, hatched in full, and the
+ *  shown masks that are off, hatched faint. Each is the raster drawn through
+ *  a hatch tile with source-in, so the hatch fades with mask strength.
+ *  Keeping store and display apart is what lets the display follow its own
+ *  switch without touching the numbers the run depends on.
+ *
+ *  Around the active mask sits a bounding box with a label that doubles as a
+ *  grip; with the Move tool the whole overlay drags. A drag translates cached
+ *  rasters of the active mask and the rest, and commits one `move` stroke on
+ *  release -- replaying every stroke per pointermove would not keep up.
+ */
 function MaskOverlay({ active }) {
   const {
-    maskRef, heroRef, brushSize, brushHard, eraser, canvasImage,
+    maskRef, heroRef, brushSize, brushHard, eraser, canvasImage, frame,
     syncMaskOverlayRef, maskTool, applyFloodFillMask, wandTolerance,
-    addStroke, rasterizeMasks, inpaintMasks, liveMasks,
+    addStroke, rasterizeMasks, activeMask, activeBox, moveMask, wakeMask, docRef,
   } = usePlay();
   const drawing = useRef(false);
   const last = useRef(null);
@@ -1005,20 +1432,90 @@ function MaskOverlay({ active }) {
   // Points of the stroke in progress, normalised, recorded as they are painted.
   const points = useRef([]);
   const radiusRef = useRef(0);
-  const masksRef = useRef(inpaintMasks);
-  useEffect(() => { masksRef.current = inpaintMasks; }, [inpaintMasks]);
+  // The masks as of the last edit -- not the rendered prop, which is one
+  // render behind at the moment the display is rebuilt.
+  const masksNow = () => docRef.current.inpaintMasks;
+  const displayRef = useRef(null);
+  const stageRef = useRef(null);
+  const boxRef = useRef(null);
+  const hatch = useRef({ scale: 0, pattern: null });
+  // What the display is made of: the masks that are on and shown. The live
+  // brush paints into it alongside the store.
+  const visOnRef = useRef(null);
+  const hatchScratch = useRef(null);
+  // A drag in progress: where it started, and the rasters it slides around.
+  const moving = useRef(null);
+  const snapOwn = useRef(null);
+  const snapStore = useRef(null);
+  const snapVisOn = useRef(null);
+
+  const hatchFor = (ctx, scale) => {
+    if (!hatch.current.pattern || Math.abs(hatch.current.scale - scale) > 0.01) {
+      hatch.current = { scale, pattern: ctx.createPattern(hatchTile(scale), "repeat") };
+    }
+    return hatch.current.pattern;
+  };
+
+  /** Rebuild the display raster from the mask list: masks that are on and
+   *  shown. An off mask is not drawn whatever its eye says -- off means out
+   *  of the way -- and the eye keeps its state for when it is on again.
+   *  `excludeId` leaves one mask out, for a drag that draws it separately. */
+  const drawVisible = (excludeId = null) => {
+    const c = maskRef.current;
+    if (!c?.width) return;
+    const shown = masksNow().filter((m) => m.enabled && maskShown(m) && m.id !== excludeId);
+    compositeMasks(shown, scratchOf(visOnRef), c.width, c.height);
+  };
+
+  /** `src` as hatching, into `scratch`. */
+  const hatchInto = (src, scratch, scale) => {
+    if (scratch.width !== src.width || scratch.height !== src.height) {
+      scratch.width = src.width;
+      scratch.height = src.height;
+    }
+    const ctx = scratch.getContext("2d");
+    ctx.globalCompositeOperation = "source-over";
+    ctx.clearRect(0, 0, scratch.width, scratch.height);
+    ctx.drawImage(src, 0, 0);
+    ctx.globalCompositeOperation = "source-in";
+    ctx.fillStyle = hatchFor(ctx, scale);
+    ctx.fillRect(0, 0, scratch.width, scratch.height);
+    ctx.globalCompositeOperation = "source-over";
+  };
+
+  /** Redraw the display: the hatch, where the shown masks are. */
+  const paintDisplay = () => {
+    const c = maskRef.current;
+    const d = displayRef.current;
+    if (!c || !d || !c.width || !c.height || !visOnRef.current) return;
+    if (d.width !== c.width || d.height !== c.height) {
+      d.width = c.width;
+      d.height = c.height;
+    }
+    const r = c.getBoundingClientRect();
+    const scale = c.width / Math.max(r.width, 1);
+    const scratch = scratchOf(hatchScratch);
+    hatchInto(visOnRef.current, scratch, scale);
+    const ctx = d.getContext("2d");
+    ctx.globalCompositeOperation = "source-over";
+    ctx.clearRect(0, 0, d.width, d.height);
+    ctx.drawImage(scratch, 0, 0);
+  };
 
   const syncSize = () => {
     const c = maskRef.current;
+    const stage = stageRef.current;
     const hero = heroRef.current;
     const img = hero?.querySelector("img");
-    if (!c || !img) return;
-    const r = img.getBoundingClientRect();
-    const hr = hero.getBoundingClientRect();
-    c.style.left = `${r.left - hr.left}px`;
-    c.style.top = `${r.top - hr.top}px`;
-    c.style.width = `${r.width}px`;
-    c.style.height = `${r.height}px`;
+    if (!c || !stage || !img) return;
+    // The stage takes the picture's layout box inside the view wrapper; both
+    // canvases and the box fill it, so the box can be placed in percentages
+    // and never needs re-laying. Offsets, not client rects: the wrapper is
+    // transformed for zoom and pan, and the stage is transformed with it.
+    stage.style.left = `${img.offsetLeft}px`;
+    stage.style.top = `${img.offsetTop}px`;
+    stage.style.width = `${img.offsetWidth}px`;
+    stage.style.height = `${img.offsetHeight}px`;
     // Resize only once the new frame has actually decoded. A freshly generated
     // image reports naturalWidth 0 for the first moments after its src changes,
     // and this used to fall back to 512 and resize the canvas to it -- which
@@ -1035,8 +1532,11 @@ function MaskOverlay({ active }) {
       // replayed at the new size, which is both sharper and the reason stroke
       // coordinates are stored normalised. compositeMasks() sets the dimensions
       // itself, so the next syncSize sees a match and this cannot recurse.
-      rasterizeMasks(masksRef.current, { w, h });
+      rasterizeMasks(masksNow(), { w, h });
+      return;
     }
+    drawVisible();
+    paintDisplay();
   };
 
   useEffect(() => {
@@ -1081,13 +1581,73 @@ function MaskOverlay({ active }) {
     const c = maskRef.current;
     if (!c) return;
     const pt = pointAt(e);
-    const ctx = c.getContext("2d");
     const radius = (brushSize / 2) * pt.scale;
     radiusRef.current = radius;
-    paintBrushPoint(ctx, last.current, pt, radius, { hard: brushHard, erase: eraser });
-    ctx.globalCompositeOperation = "source-over";
+    const opts = { hard: brushHard, erase: eraser };
+    // Into the store, and into the display's "shown and on" raster: the mask
+    // being painted is both, because pointerdown woke it.
+    for (const target of [c, visOnRef.current]) {
+      if (!target) continue;
+      const ctx = target.getContext("2d");
+      paintBrushPoint(ctx, last.current, pt, radius, opts);
+      ctx.globalCompositeOperation = "source-over";
+    }
     last.current = { x: pt.x, y: pt.y };
     points.current.push({ x: pt.x / c.width, y: pt.y / c.height });
+    paintDisplay();
+  };
+
+  /** Start dragging the active mask: snapshot it, the store without it, and
+   *  the display rasters without it. */
+  const beginMove = (e) => {
+    const c = maskRef.current;
+    if (!active || !c?.width || !activeMask?.enabled || !maskShown(activeMask) || !activeMask.strokes.length) return;
+    e.stopPropagation();
+    e.preventDefault();
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* not fatal */ }
+    rasterize(activeMask, scratchOf(snapOwn), c.width, c.height);
+    compositeMasks(
+      masksNow().filter((m) => m.enabled && m.id !== activeMask.id),
+      scratchOf(snapStore), c.width, c.height,
+    );
+    drawVisible(activeMask.id);
+    copyCanvas(visOnRef.current, snapVisOn);
+    const pt = pointAt(e);
+    moving.current = { x: pt.x, y: pt.y, scale: pt.scale, dx: 0, dy: 0 };
+  };
+
+  /** Slide the snapshots; nothing is committed until release. */
+  const moveTo = (e) => {
+    const mv = moving.current;
+    const c = maskRef.current;
+    if (!mv || !c) return;
+    const pt = pointAt(e);
+    mv.dx = Math.round(pt.x - mv.x);
+    mv.dy = Math.round(pt.y - mv.y);
+    const redraw = (target, base) => {
+      const ctx = target.getContext("2d");
+      ctx.globalCompositeOperation = "source-over";
+      ctx.clearRect(0, 0, target.width, target.height);
+      ctx.drawImage(base, 0, 0);
+      ctx.drawImage(snapOwn.current, mv.dx, mv.dy);
+    };
+    redraw(c, snapStore.current);
+    redraw(visOnRef.current, snapVisOn.current);
+    paintDisplay();
+    if (boxRef.current) {
+      boxRef.current.style.transform = `translate(${mv.dx / mv.scale}px, ${mv.dy / mv.scale}px)`;
+    }
+  };
+
+  /** Commit the drag as one move stroke, one undo entry. */
+  const endMove = () => {
+    const mv = moving.current;
+    const c = maskRef.current;
+    moving.current = null;
+    if (boxRef.current) boxRef.current.style.transform = "";
+    if (!mv || !c?.width) return;
+    if (mv.dx || mv.dy) moveMask(activeMask.id, mv.dx / c.width, mv.dy / c.height);
+    else rasterizeMasks(masksNow());
   };
 
   const endStroke = () => {
@@ -1105,83 +1665,158 @@ function MaskOverlay({ active }) {
     points.current = [];
   };
 
+  // The wand samples the stack itself, not what is on screen: with post-process
+  // on, the screen is a display stage, and the fill it is selecting for reads
+  // the stack. Selecting on one and filling on the other made the region and
+  // the fill disagree at every post-processed edge.
   const wandClick = async (e) => {
-    if (!active || !canvasImage || wandBusy.current) return;
+    if (!active || !frame || wandBusy.current) return;
     const c = maskRef.current;
     if (!c) return;
     const pt = pointAt(e);
     wandBusy.current = true;
     try {
-      await applyFloodFillMask(canvasImage, pt.x, pt.y, { tolerance: wandTolerance, eraser });
+      await applyFloodFillMask(frame, pt.x, pt.y, { tolerance: wandTolerance, eraser });
     } finally {
       wandBusy.current = false;
     }
   };
 
-  // With every mask hidden the overlay still shows, faintly: otherwise "hidden"
-  // and "deleted" look identical and the eye appears to have thrown work away.
-  const dim = inpaintMasks.some((m) => m.strokes.length) && !liveMasks.length;
+  const pct = (v, of) => `${(v / of) * 100}%`;
 
   return (
-    <canvas
-      className={`mask-overlay ${active ? "on" : ""} ${maskTool === "wand" ? "wand" : ""} ${dim ? "dim" : ""}`}
-      ref={maskRef}
-      role="img"
-      aria-label={maskTool === "wand"
-        ? "Inpaint mask — click to select a matching area"
-        : "Inpaint mask — drag to paint"}
-      onPointerDown={(e) => {
-        if (maskTool === "wand") {
-          wandClick(e);
-          return;
-        }
-        // Throws if the pointer id is not an active pointer, which is the case
-        // for synthetic events. Capture is a nicety -- losing it should not
-        // cost the stroke.
-        try { e.target.setPointerCapture(e.pointerId); } catch { /* not fatal */ }
-        syncSize();
-        drawing.current = true;
-        last.current = null;
-        points.current = [];
-        paint(e);
-      }}
-      onPointerMove={(e) => { if (maskTool === "brush" && drawing.current) paint(e); }}
-      onPointerUp={endStroke}
-      onPointerCancel={endStroke}
-    />
+    <div className="mask-stage" ref={stageRef}>
+      <canvas className="mask-display" ref={displayRef} aria-hidden="true" />
+      <canvas
+        className={`mask-overlay ${active ? "on" : ""} ${maskTool === "wand" ? "wand" : ""} ${maskTool === "move" ? "move" : ""}`}
+        ref={maskRef}
+        role="img"
+        aria-label={maskTool === "wand"
+          ? "Inpaint mask — click to select a matching area"
+          : maskTool === "move"
+            ? "Inpaint mask — drag to move"
+            : "Inpaint mask — drag to paint"}
+        onPointerDown={(e) => {
+          if (maskTool === "wand") {
+            wandClick(e);
+            return;
+          }
+          if (maskTool === "move") {
+            beginMove(e);
+            return;
+          }
+          // Throws if the pointer id is not an active pointer, which is the case
+          // for synthetic events. Capture is a nicety -- losing it should not
+          // cost the stroke.
+          try { e.target.setPointerCapture(e.pointerId); } catch { /* not fatal */ }
+          if (activeMask) wakeMask(activeMask.id);
+          syncSize();
+          drawing.current = true;
+          last.current = null;
+          points.current = [];
+          paint(e);
+        }}
+        onPointerMove={(e) => {
+          if (moving.current) moveTo(e);
+          else if (maskTool === "brush" && drawing.current) paint(e);
+        }}
+        onPointerUp={() => (moving.current ? endMove() : endStroke())}
+        onPointerCancel={() => (moving.current ? endMove() : endStroke())}
+      />
+      {activeBox && (
+        <div
+          className="mask-bbox"
+          ref={boxRef}
+          style={{
+            left: pct(activeBox.bbox.x0, activeBox.w),
+            top: pct(activeBox.bbox.y0, activeBox.h),
+            width: pct(activeBox.bbox.x1 - activeBox.bbox.x0, activeBox.w),
+            height: pct(activeBox.bbox.y1 - activeBox.bbox.y0, activeBox.h),
+          }}
+        >
+          {/* The label is the grip: draggable with any tool, while the box
+              itself lets the pointer through so painting inside it still works. */}
+          <span
+            className="mask-bbox-label"
+            title="Drag to move the mask"
+            onPointerDown={beginMove}
+            onPointerMove={moveTo}
+            onPointerUp={endMove}
+            onPointerCancel={endMove}
+          >
+            {activeMask?.name} · {activeBox.count.toLocaleString()} px
+          </span>
+        </div>
+      )}
+    </div>
   );
 }
 
-/** One row in the Layers panel. */
-function EntityRow({ entity, extra }) {
+/** An eye, open or crossed. Visibility used to be a filled/hollow dot, which
+ *  read as a radio button -- as if only one row could be on at a time. */
+function EyeIcon({ off }) {
+  return (
+    <svg
+      width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
+    >
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" />
+      <circle cx="12" cy="12" r="3" />
+      {off && <line x1="4" y1="4" x2="20" y2="20" />}
+    </svg>
+  );
+}
+
+/** One row in the Layers panel: one line, and its controls only when selected.
+ *
+ *  Three independent states, each with its own cue so none reads as another:
+ *
+ *    shown / hidden   the eye, and a dimmed row when hidden -- any number of
+ *                     rows can be on, it is not a choice between them
+ *    selected         the highlighted row; what the details unfold under, and
+ *                     for a mask, what the brush paints into
+ *    active (layers)  the ACTIVE tag; where a run lands. Follows selection of
+ *                     a layer row and stays when a mask row is selected next
+ *
+ *  Every row used to show all of its controls all the time, which made three
+ *  layers enough to push the rest of the panel below the fold.
+ */
+function EntityRow({
+  entity, thumb, details, headExtra, active = false, canDelete = true, shown, onShow, eyeTip,
+}) {
   const {
-    selectedId, setSelectedId, setEntityEnabled, setEntityLocked,
-    renameEntity, deleteEntity, moveEntity,
+    selectedId, selectEntity, setEntityEnabled, renameEntity, deleteEntity, moveEntity,
   } = usePlay();
   const [renaming, setRenaming] = useState(false);
   const on = selectedId === entity.id;
+  // The eye is shown/hidden. For a layer that is its one switch (`enabled`);
+  // a mask has a separate one (`visible`) and the caller passes it in.
+  const isShown = shown ?? entity.enabled;
+  const toggleShown = onShow ?? ((v) => setEntityEnabled(entity.id, v));
 
   return (
     <div
-      className={`layer-row ${on ? "on" : ""} ${entity.enabled ? "" : "off"}`}
+      className={`layer-row ${on ? "on" : ""} ${isShown ? "" : "off"} ${active ? "active" : ""}`}
       role="button"
       tabIndex={0}
       aria-pressed={on}
-      onClick={() => setSelectedId(entity.id)}
-      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setSelectedId(entity.id); } }}
+      title={active ? `${entity.name} — runs land here` : undefined}
+      onClick={() => selectEntity(entity.id)}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectEntity(entity.id); } }}
     >
       <div className="layer-head">
-        <Tooltip text={entity.enabled ? "Hide — keeps it, ignores it" : "Show"}>
+        <Tooltip text={eyeTip || (isShown ? "Hide — kept, but not part of the canvas" : "Show")}>
           <button
             type="button"
-            className={`sel-eye ${entity.enabled ? "on" : ""}`}
-            aria-label={entity.enabled ? `Hide ${entity.name}` : `Show ${entity.name}`}
-            aria-pressed={entity.enabled}
-            onClick={(e) => { e.stopPropagation(); setEntityEnabled(entity.id, !entity.enabled); }}
+            className={`sel-eye ${isShown ? "on" : ""}`}
+            aria-label={isShown ? `Hide ${entity.name}` : `Show ${entity.name}`}
+            aria-pressed={isShown}
+            onClick={(e) => { e.stopPropagation(); toggleShown(!isShown); }}
           >
-            {entity.enabled ? "◉" : "○"}
+            <EyeIcon off={!isShown} />
           </button>
         </Tooltip>
+        {thumb}
         {renaming ? (
           <input
             type="text"
@@ -1200,97 +1835,181 @@ function EntityRow({ entity, extra }) {
           <button
             type="button"
             className="sel-name grow"
-            title="Rename"
-            onClick={(e) => { e.stopPropagation(); setRenaming(true); }}
+            title="Double-click to rename"
+            onClick={(e) => { e.stopPropagation(); selectEntity(entity.id); }}
+            onDoubleClick={(e) => { e.stopPropagation(); setRenaming(true); }}
           >
             {entity.name}
           </button>
         )}
-        <Tooltip text={entity.locked ? "Unlock" : "Lock — no edits until unlocked"}>
-          <button
-            type="button"
-            className={`layer-lock ${entity.locked ? "on" : ""}`}
-            aria-label={entity.locked ? `Unlock ${entity.name}` : `Lock ${entity.name}`}
-            aria-pressed={entity.locked}
-            onClick={(e) => { e.stopPropagation(); setEntityLocked(entity.id, !entity.locked); }}
-          >
-            {entity.locked ? "🔒" : "🔓"}
-          </button>
-        </Tooltip>
+        {headExtra}
+        {active && <span className="layer-active-tag" aria-label="Active layer">active</span>}
       </div>
-      {extra}
-      <div className="layer-actions">
-        <button type="button" className="btn xs ghost" title="Move up"
-          onClick={(e) => { e.stopPropagation(); moveEntity(entity.id, 1); }}>↑</button>
-        <button type="button" className="btn xs ghost" title="Move down"
-          onClick={(e) => { e.stopPropagation(); moveEntity(entity.id, -1); }}>↓</button>
-        <div className="spacer" />
-        <button type="button" className="btn xs ghost danger" title="Delete"
-          onClick={(e) => { e.stopPropagation(); deleteEntity(entity.id); }}>Delete</button>
-      </div>
+      {on && (
+        <div className="layer-details">
+          {details}
+          <div className="layer-actions">
+            <button type="button" className="btn xs ghost" title="Move up"
+              onClick={(e) => { e.stopPropagation(); moveEntity(entity.id, 1); }}>↑</button>
+            <button type="button" className="btn xs ghost" title="Move down"
+              onClick={(e) => { e.stopPropagation(); moveEntity(entity.id, -1); }}>↓</button>
+            <div className="spacer" />
+            <button type="button" className="btn xs ghost danger"
+              title={canDelete ? "Delete" : "The last layer stays — there is always one to work in"}
+              disabled={!canDelete}
+              onClick={(e) => { e.stopPropagation(); deleteEntity(entity.id); }}>Delete</button>
+          </div>
+        </div>
+      )}
     </div>
+  );
+}
+
+/** Images the user keeps at hand: the workspace assets folder.
+ *
+ *  Anything opened onto the canvas lands here too, so a picture only ever has
+ *  to be found in the file browser once. Click places into the active layer,
+ *  fitted to the canvas; Open makes it the document at its own size.
+ */
+function AssetsPanel() {
+  const { assets, addAssetFiles, deleteAsset, placeAsset, openAsset, activeLayer } = usePlay();
+  const [over, setOver] = useState(false);
+  const fileRef = useRef(null);
+
+  return (
+    <aside
+      className={`card assets-panel ${over ? "drop-on" : ""}`}
+      aria-label="Assets"
+      onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setOver(true); }}
+      onDragLeave={() => setOver(false)}
+      onDrop={(e) => {
+        // Stop here: the stage underneath would open the file as the canvas.
+        e.preventDefault();
+        e.stopPropagation();
+        setOver(false);
+        addAssetFiles(e.dataTransfer.files);
+      }}
+    >
+      <div className="row between center mb-2">
+        <h3 className="mb-0">Assets <span className="sub">· {assets.length}</span></h3>
+        <Tooltip text="Keep images here to place on a layer later, without finding the file again. Dropping files on this panel does the same.">
+          <button type="button" className="btn ghost sm" onClick={() => fileRef.current?.click()}>Add…</button>
+        </Tooltip>
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/*"
+          multiple
+          className="hidden-file"
+          onChange={(e) => { addAssetFiles(e.target.files); e.target.value = ""; }}
+        />
+      </div>
+      {assets.length === 0 ? (
+        <p className="hint mb-0">Drop images here, or Add… — they stay for next time.</p>
+      ) : (
+        <div className="assets-grid">
+          {assets.map((a) => (
+            <div key={a.path} className="asset">
+              <button
+                type="button"
+                className="asset-thumb"
+                title={`${a.name}${a.size ? ` · ${a.size[0]}×${a.size[1]}` : ""} — click to place into ${activeLayer?.name || "the active layer"}`}
+                onClick={() => placeAsset(a)}
+              >
+                <img src={thumbUrl(a.path)} alt={a.name} loading="lazy" />
+              </button>
+              <div className="asset-actions">
+                <button type="button" className="btn xs ghost" title="Open as a new canvas at its own size"
+                  onClick={() => openAsset(a)}>Open</button>
+                <button type="button" className="btn xs ghost" title="Remove from assets" aria-label={`Remove ${a.name}`}
+                  onClick={() => deleteAsset(a)}>×</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </aside>
   );
 }
 
 /** Canvas entities, in the two groups InvokeAI splits them into.
  *
- *  Raster layers are the picture: hiding, reordering or deleting one changes
- *  what the canvas is, and therefore what the next run starts from. Inpaint
- *  masks are where a run is allowed to change things, and a mask is live for
- *  exactly as long as its row is shown — which is the answer to "should the
- *  mask survive a generation": it survives because nothing hid it.
+ *  Masks come first because they decide what the next run does, so they have
+ *  to stay in view. Raster layers are the picture: hiding, reordering or
+ *  deleting one changes what the canvas is, and therefore what the next run
+ *  starts from — and one of them is active, which is where the run lands.
+ *  Layers are made by the user, never by a run. A mask is live for exactly as
+ *  long as its row is shown — which is the answer to "should the mask survive
+ *  a generation": it survives because nothing hid it.
  */
 function LayersPanel() {
   const {
-    rasterLayers, inpaintMasks, setLayerOpacity, useLayerAsMask,
-    addMask, clearMask, invertMask, maskPixels, liveMasks, undo, canUndo,
+    rasterLayers, inpaintMasks, setLayerOpacity, useLayerAsMask, activeLayer,
+    addLayer, duplicateLayer, setEntityEnabled, setMaskVisible,
+    addMask, clearMask, invertMask, maskPixels, liveMasks, undo, canUndo, redo, canRedo,
   } = usePlay();
 
   return (
     <aside className="card layers-panel">
       <div className="row between center mb-2">
         <h3 className="mb-0">Layers</h3>
-        <Tooltip text="Step back one edit — a fill, a painted stroke, a delete, a reorder. (Ctrl+Z)">
-          <button type="button" className="btn ghost sm" onClick={undo} disabled={!canUndo}>Undo</button>
-        </Tooltip>
+        <div className="row gap-1">
+          <Tooltip text="Step back one edit — a fill, a painted stroke, a delete, a reorder. (Ctrl+Z)">
+            <button type="button" className="btn ghost sm" onClick={undo} disabled={!canUndo}>Undo</button>
+          </Tooltip>
+          <Tooltip text="Put back what Undo took away. (Ctrl+Shift+Z)">
+            <button type="button" className="btn ghost sm" onClick={redo} disabled={!canRedo}>Redo</button>
+          </Tooltip>
+        </div>
       </div>
 
       <div className="layer-group-head">
-        <span>Raster layers</span>
+        <span>Layers</span>
         <span className="sub">{rasterLayers.length}</span>
       </div>
-      {rasterLayers.length === 0 && <p className="hint mb-2">Nothing yet.</p>}
+      <Tooltip text="A new empty layer on top. Runs land in the active layer, so make one to keep the next attempt apart from what is here.">
+        <button type="button" className="btn sm w-full mb-2" onClick={addLayer}>Add layer</button>
+      </Tooltip>
       {/* Topmost first, which is how a stack reads. */}
       {[...rasterLayers].reverse().map((l) => (
         <EntityRow
           key={l.id}
           entity={l}
-          extra={(
+          active={activeLayer?.id === l.id}
+          canDelete={rasterLayers.length > 1}
+          thumb={l.image ? <img className="layer-thumb" src={l.image} alt="" /> : null}
+          details={(
             <>
-              <div className="layer-body">
-                {l.image && <img className="layer-thumb" src={l.image} alt="" />}
-                <div className="grow">
-                  <Slider
-                    label="Opacity"
-                    value={l.opacity ?? 1}
-                    min={0}
-                    max={1}
-                    step={0.05}
-                    onChange={(v) => setLayerOpacity(l.id, v)}
-                    fmt={(v) => `${Math.round(v * 100)}%`}
-                  />
-                </div>
+              <Slider
+                label="Opacity"
+                value={l.opacity ?? 1}
+                min={0}
+                max={1}
+                step={0.05}
+                onChange={(v) => setLayerOpacity(l.id, v)}
+                fmt={(v) => `${Math.round(v * 100)}%`}
+              />
+              <div className="layer-actions">
+                <Tooltip text="A copy of this layer above it, made active — try something else on the same ground and keep this one.">
+                  <button
+                    type="button"
+                    className="btn xs"
+                    onClick={(e) => { e.stopPropagation(); duplicateLayer(l.id); }}
+                  >
+                    Duplicate
+                  </button>
+                </Tooltip>
+                <Tooltip text="Select exactly the area this layer covers, and nothing else. On a layer that has only taken fills, that is the ground those fills covered.">
+                  <button
+                    type="button"
+                    className="btn xs ghost"
+                    onClick={(e) => { e.stopPropagation(); useLayerAsMask(l.id); }}
+                    disabled={!l.image}
+                  >
+                    Select area
+                  </button>
+                </Tooltip>
               </div>
-              <Tooltip text="Select the area this layer covers. A fill layer covers exactly the region it filled, so this is how you rework the same place again.">
-                <button
-                  type="button"
-                  className="btn xs w-full"
-                  onClick={(e) => { e.stopPropagation(); useLayerAsMask(l.id); }}
-                  disabled={!l.image}
-                >
-                  Use as mask
-                </button>
-              </Tooltip>
             </>
           )}
         />
@@ -1300,11 +2019,35 @@ function LayersPanel() {
         <span>Inpaint masks</span>
         <span className="sub">{liveMasks.length ? `${maskPixels.toLocaleString()} px` : "none on"}</span>
       </div>
+      <Tooltip text="A new empty mask, selected so the brush paints into it. Every mask that is on counts for the next run.">
+        <button type="button" className="btn sm w-full mb-2" onClick={addMask}>Add mask</button>
+      </Tooltip>
       {[...inpaintMasks].reverse().map((m) => (
         <EntityRow
           key={m.id}
           entity={m}
-          extra={(
+          shown={maskShown(m)}
+          onShow={(v) => setMaskVisible(m.id, v)}
+          eyeTip={maskShown(m)
+            ? "Hide the hatching. Whether the next run uses the mask is the on/off switch, not this."
+            : "Show the hatching"}
+          headExtra={(
+            <Tooltip text={m.enabled
+              ? "On — the next run changes this area. Click to turn it off; it is then not drawn either."
+              : "Off — the next run ignores this area and it is not drawn. Click to turn it on."}
+            >
+              <button
+                type="button"
+                className={`layer-onpill ${m.enabled ? "on" : ""}`}
+                aria-pressed={m.enabled}
+                aria-label={m.enabled ? `Turn ${m.name} off` : `Turn ${m.name} on`}
+                onClick={(e) => { e.stopPropagation(); setEntityEnabled(m.id, !m.enabled); }}
+              >
+                {m.enabled ? "on" : "off"}
+              </button>
+            </Tooltip>
+          )}
+          details={(
             <div className="layer-actions">
               <button type="button" className="btn xs ghost" title="Swap masked for unmasked"
                 onClick={(e) => { e.stopPropagation(); invertMask(m.id); }}>Invert</button>
@@ -1315,7 +2058,6 @@ function LayersPanel() {
           )}
         />
       ))}
-      <button type="button" className="btn sm w-full mt-2" onClick={addMask}>Add mask</button>
     </aside>
   );
 }

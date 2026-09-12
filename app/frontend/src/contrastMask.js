@@ -337,16 +337,39 @@ export async function compositePostprocWithMask(baseSrc, processedSrc, maskDataU
   return c.toDataURL("image/png");
 }
 
-/** Count painted mask pixels from a mask canvas element. */
-export function countMaskPixels(maskCanvas) {
-  if (!maskCanvas?.width || !maskCanvas?.height) return 0;
-  const { data } = maskCanvas.getContext("2d").getImageData(0, 0, maskCanvas.width, maskCanvas.height);
+/** Painted pixels of a mask canvas: how many, and the box around them.
+ *
+ *  One pass gives both, so the bounding box costs nothing over the count that
+ *  was already being taken. `bbox` is in canvas pixels, x1/y1 exclusive, null
+ *  when nothing is painted.
+ */
+export function measureMask(maskCanvas) {
+  if (!maskCanvas?.width || !maskCanvas?.height) return { count: 0, bbox: null };
+  const w = maskCanvas.width;
+  const h = maskCanvas.height;
+  const { data } = maskCanvas.getContext("2d").getImageData(0, 0, w, h);
   let count = 0;
-  for (let i = 3; i < data.length; i += 4) {
-    if (data[i] > 8) count += 1;
+  let x0 = w;
+  let y0 = h;
+  let x1 = -1;
+  let y1 = -1;
+  for (let y = 0; y < h; y += 1) {
+    let i = y * w * 4 + 3;
+    for (let x = 0; x < w; x += 1, i += 4) {
+      if (data[i] > 8) {
+        count += 1;
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+      }
+    }
   }
-  return count;
+  return { count, bbox: count ? { x0, y0, x1: x1 + 1, y1: y1 + 1 } : null };
 }
+
+/** Count painted mask pixels from a mask canvas element. */
+export const countMaskPixels = (maskCanvas) => measureMask(maskCanvas).count;
 
 /**
  * Contiguous flood fill from a seed pixel (magic wand).

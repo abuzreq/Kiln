@@ -14,25 +14,35 @@
  *    through konva. Kiln's layer content arrives as a finished raster from the
  *    sampler, so a raster layer holds an image and only masks keep stroke
  *    lists (see selection.js, which does the replaying).
- *  - No `position`. InvokeAI can move, scale and transform an entity; Kiln has
- *    no tooling for that, and every layer is canvas-aligned. Adding a transform
- *    would be a bigger job than the whole panel.
+ *  - No `position`. InvokeAI can move, scale and transform an entity; Kiln's
+ *    layers are all canvas-aligned. A mask can be moved, but that is a stroke
+ *    in its list (see selection.js `moveStroke`), not a field on the entity.
  */
 
-import { rasterize } from "./selection.js";
+import { rasterize, MASK_RGB } from "./selection.js";
 
 let counter = 0;
 const nextId = () => `e${(counter += 1)}_${Math.random().toString(36).slice(2, 8)}`;
 
+// No `locked` here, unlike InvokeAI. The first cut carried one, and it stopped
+// the brush and nothing else -- delete, move, hide, clear and invert all went
+// through -- which made it a control that mostly did nothing in a rail with no
+// room for one.
 function entityBase(name) {
-  return { id: nextId(), name, enabled: true, locked: false };
+  return { id: nextId(), name, enabled: true };
 }
 
 /** Content. `image` is a full-canvas RGBA data URL, transparent where the
- *  layer contributes nothing — which is how a region fill stacks over what is
- *  already there instead of hiding it. */
-export function newRasterLayer({ name, image = null, card = null }) {
-  return { ...entityBase(name || "Layer"), type: "raster", opacity: 1, image, card };
+ *  layer contributes nothing — which is how a region fill sits over what is
+ *  on the layers below instead of hiding it.
+ *
+ *  Layers are the user's. Kiln never adds one on its own: a run writes into
+ *  the active layer, and how the work is split across layers is how the user
+ *  chose to structure their exploration. `card` is the recipe of whatever last
+ *  wrote into the layer.
+ */
+export function newRasterLayer({ name, image = null, card = null, enabled = true }) {
+  return { ...entityBase(name || "Layer"), type: "raster", opacity: 1, image, card, enabled };
 }
 
 /** Where a fill may change things. `params` is Kiln's equivalent of InvokeAI's
@@ -42,21 +52,43 @@ export function newInpaintMask({ name } = {}) {
   return {
     ...entityBase(name || "Inpaint Mask"),
     type: "mask",
+    // Two switches, unlike a layer's one. `enabled` is whether the next run
+    // takes the mask into account; `visible` is whether its hatching is drawn.
+    // They are independent: a mask can be off but shown (kept in view while
+    // another area is worked on) or on but hidden (out of the way of judging
+    // the pixels underneath).
+    visible: true,
     strokes: [],
     params: { change: 0.65, feather: 8, harmonize: 2, bendPreset: "" },
   };
 }
 
-/** A fresh document. Ships with one empty inpaint mask already present, as
- *  InvokeAI does — it makes the concept discoverable instead of something you
- *  have to know to create. */
+/** Whether a mask's hatching is drawn. Masks made before the flag existed
+ *  have no `visible` and count as shown. */
+export const maskShown = (m) => m?.visible !== false;
+
+/** A fresh document: one layer to work in, one empty inpaint mask.
+ *
+ *  Both exist from the start so that generating and painting need nothing set
+ *  up first -- there is always an active layer for a run to land in, and the
+ *  mask makes the concept discoverable instead of something you have to know
+ *  to create (InvokeAI does the same with its mask). */
 export function newDocument(ground) {
   return {
-    rasterLayers: ground
-      ? [newRasterLayer({ name: "Background", image: ground })]
-      : [],
+    rasterLayers: [newRasterLayer({ name: "Layer 1", image: ground })],
     inpaintMasks: [newInpaintMask({ name: "Inpaint Mask 1" })],
   };
+}
+
+/** A transparent-black PNG of the given size — an empty layer. */
+export function blankImage(w, h) {
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  // New canvases are already (0,0,0,0); clear so that stays true if a browser
+  // ever changes the default.
+  c.getContext("2d").clearRect(0, 0, w, h);
+  return c.toDataURL("image/png");
 }
 
 /** Unique "Name n" within a group. */
@@ -123,8 +155,9 @@ export async function flattenLayers(layers, size) {
   return c.toDataURL("image/png");
 }
 
-/** Rasterise every enabled mask onto one canvas — their union is the mask the
- *  backend is sent. Overlapping masks take the stronger alpha. */
+/** Rasterise the given masks onto one canvas. Overlapping masks take the
+ *  stronger alpha. Callers choose the set: the masks that are on make the
+ *  mask the backend is sent; the masks that are shown make the display. */
 export function compositeMasks(masks, target, w, h) {
   if (!target || !w || !h) return;
   if (target.width !== w || target.height !== h) {
@@ -137,7 +170,7 @@ export function compositeMasks(masks, target, w, h) {
   ctx.clearRect(0, 0, w, h);
   const scratch = document.createElement("canvas");
   for (const m of masks) {
-    if (!m.enabled || !m.strokes.length) continue;
+    if (!m.strokes.length) continue;
     rasterize(m, scratch, w, h);
     ctx.drawImage(scratch, 0, 0);
   }
@@ -162,10 +195,17 @@ export function compositeMasks(masks, target, w, h) {
  *  already decayed to the original, so cutting there changes nothing visible.
  *  It also makes layer opacity meaningful: it now fades the whole fill back
  *  towards what was underneath.
+ *
+ *  `maskSrc` is the very mask the backend was sent (see maskDataUrlFrom): white
+ *  where the fill happened, opaque everywhere. Punching with that rather than
+ *  with the live overlay matters, because the overlay stays paintable while a
+ *  fill runs. The first cut read the overlay when the job *finished*, so
+ *  hiding the mask mid-run punched the result to nothing and the fill was
+ *  silently lost.
  */
-export async function punchToMask(frameSrc, maskCanvas) {
-  if (!frameSrc || !maskCanvas?.width) return frameSrc;
-  const im = await loadImage(frameSrc);
+export async function punchToMask(frameSrc, maskSrc) {
+  if (!frameSrc || !maskSrc) return frameSrc;
+  const [im, mk] = await Promise.all([loadImage(frameSrc), loadImage(maskSrc)]);
   const w = im.naturalWidth || im.width;
   const h = im.naturalHeight || im.height;
   const c = document.createElement("canvas");
@@ -179,21 +219,87 @@ export async function punchToMask(frameSrc, maskCanvas) {
   const ms = document.createElement("canvas");
   ms.width = w;
   ms.height = h;
-  ms.getContext("2d").drawImage(maskCanvas, 0, 0, w, h);
+  ms.getContext("2d").drawImage(mk, 0, 0, w, h);
   const mask = ms.getContext("2d").getImageData(0, 0, w, h);
 
   for (let i = 0; i < w * h; i += 1) {
-    frame.data[i * 4 + 3] = mask.data[i * 4 + 3] > 0 ? 255 : 0;
+    frame.data[i * 4 + 3] = mask.data[i * 4] > 0 ? 255 : 0;
   }
   ctx.putImageData(frame, 0, 0);
   return c.toDataURL("image/png");
 }
 
+/** `top` drawn over `base`, both stretched to the canvas. How a fill lands in
+ *  a layer that already has content: the punched region replaces what the
+ *  layer had there and leaves the rest of the layer alone. */
+export async function compositeOnto(baseSrc, topSrc, w, h) {
+  const [base, top] = await Promise.all([
+    baseSrc ? loadImage(baseSrc) : null,
+    loadImage(topSrc),
+  ]);
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext("2d");
+  if (base) ctx.drawImage(base, 0, 0, w, h);
+  ctx.drawImage(top, 0, 0, w, h);
+  return c.toDataURL("image/png");
+}
+
+/** An image placed on a canvas of a different size: scaled to fit, centred,
+ *  transparent around it. Layers are canvas-aligned and flatten stretches
+ *  every image to the canvas, so an asset of another aspect has to be fitted
+ *  before it becomes a layer's image or it would be distorted. */
+export async function fitIntoCanvas(src, w, h) {
+  const im = await loadImage(src);
+  const iw = im.naturalWidth || im.width;
+  const ih = im.naturalHeight || im.height;
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const k = Math.min(w / iw, h / ih);
+  const dw = Math.round(iw * k);
+  const dh = Math.round(ih * k);
+  c.getContext("2d").drawImage(im, Math.round((w - dw) / 2), Math.round((h - dh) / 2), dw, dh);
+  return c.toDataURL("image/png");
+}
+
+/** Natural size of an image source. */
+export async function imageSize(src) {
+  const im = await loadImage(src);
+  return { w: im.naturalWidth || im.width, h: im.naturalHeight || im.height };
+}
+
+/** The mask as the backend wants it: white where the fill should happen.
+ *
+ *  Reads an overlay canvas whose alpha carries mask strength (the union of
+ *  every enabled mask), and returns null when nothing on it is painted.
+ */
+export function maskDataUrlFrom(c) {
+  if (!c?.width || !c?.height) return null;
+  const ctx = c.getContext("2d");
+  const img = ctx.getImageData(0, 0, c.width, c.height);
+  const { data } = img;
+  let painted = false;
+  for (let i = 0; i < data.length; i += 4) {
+    const a = data[i + 3];
+    if (a > 8) painted = true;
+    data[i] = data[i + 1] = data[i + 2] = a;
+    data[i + 3] = 255;
+  }
+  if (!painted) return null;
+  const out = document.createElement("canvas");
+  out.width = c.width;
+  out.height = c.height;
+  out.getContext("2d").putImageData(img, 0, 0);
+  return out.toDataURL("image/png");
+}
+
 /** A raster layer's own alpha, as a mask stroke cache.
  *
- *  This is what makes "use as mask" work: a fill layer's alpha is exactly the
- *  region that fill covered, so promoting it selects that area again and the
- *  next fill can rework the same place with different settings.
+ *  This is what makes "Select area" work: a layer that has only ever taken
+ *  fills is transparent everywhere else, so its alpha is exactly the ground
+ *  those fills covered, and promoting it selects that area again.
  */
 export async function layerAlphaToCache(image) {
   const im = await loadImage(image);
@@ -205,11 +311,12 @@ export async function layerAlphaToCache(image) {
   const ctx = c.getContext("2d");
   ctx.drawImage(im, 0, 0);
   const d = ctx.getImageData(0, 0, w, h);
+  const [r, g, b] = MASK_RGB;
   for (let i = 0; i < w * h; i += 1) {
     const o = i * 4;
-    d.data[o] = 255;
-    d.data[o + 1] = 122;
-    d.data[o + 2] = 69;
+    d.data[o] = r;
+    d.data[o + 1] = g;
+    d.data[o + 2] = b;
   }
   ctx.putImageData(d, 0, 0);
   return { cache: c, w, h };
