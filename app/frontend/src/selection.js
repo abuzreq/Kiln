@@ -90,6 +90,47 @@ export function moveStroke(dx, dy) {
   return { type: "move", dx, dy };
 }
 
+/** A hard-edged shape: a rectangle or ellipse from two corners, or a polygon
+ *  from its vertices. Normalised, so it replays crisply at any size. Hard by
+ *  design: the mask's Feather softens at fill time, and a shape that is just
+ *  another stroke keeps Move, Invert and Undo working unchanged.
+ */
+export function shapeStroke({ shape, points, mode }) {
+  return { type: "shape", shape, points, mode: mode || "add" };
+}
+
+/** Trace a shape stroke's path in canvas pixels. False if it is degenerate. */
+export function shapePath(ctx, s, w, h) {
+  const p = s.points || [];
+  ctx.beginPath();
+  if (s.shape === "polygon") {
+    if (p.length < 3) return false;
+    ctx.moveTo(p[0].x * w, p[0].y * h);
+    for (let i = 1; i < p.length; i += 1) ctx.lineTo(p[i].x * w, p[i].y * h);
+    ctx.closePath();
+    return true;
+  }
+  if (p.length < 2) return false;
+  const x0 = Math.min(p[0].x, p[1].x) * w;
+  const x1 = Math.max(p[0].x, p[1].x) * w;
+  const y0 = Math.min(p[0].y, p[1].y) * h;
+  const y1 = Math.max(p[0].y, p[1].y) * h;
+  if (x1 - x0 < 1 || y1 - y0 < 1) return false;
+  if (s.shape === "ellipse") {
+    ctx.ellipse((x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0) / 2, (y1 - y0) / 2, 0, 0, Math.PI * 2);
+  } else {
+    ctx.rect(x0, y0, x1 - x0, y1 - y0);
+  }
+  return true;
+}
+
+export function replayShape(ctx, s, w, h) {
+  if (!shapePath(ctx, s, w, h)) return;
+  const [r, g, b] = MASK_RGB;
+  ctx.fillStyle = `rgb(${r},${g},${b})`;
+  ctx.fill();
+}
+
 function shiftCanvas(ctx, w, h, dx, dy) {
   if (!dx && !dy) return;
   const img = ctx.getImageData(0, 0, w, h);
@@ -245,6 +286,7 @@ export function rasterize(mask, target, w, h) {
     }
     ctx.globalCompositeOperation = s.mode === "subtract" ? "destination-out" : "source-over";
     if (s.type === "brush") replayBrush(ctx, s, w, h);
+    else if (s.type === "shape") replayShape(ctx, s, w, h);
     else if (s.cache) ctx.drawImage(s.cache, 0, 0, w, h);
   }
   ctx.globalCompositeOperation = "source-over";

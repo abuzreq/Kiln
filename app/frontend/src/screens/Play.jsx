@@ -4,7 +4,7 @@ import { BendWorkspace } from "./Craft.jsx";
 import SweepPanel from "./Sweep.jsx";
 import Merge from "./Merge.jsx";
 import { useApp } from "../state.jsx";
-import { api, downloadPost, mediaUrl, pollJob, thumbUrl } from "../api.js";
+import { api, downloadPost, mediaUrl, thumbUrl } from "../api.js";
 import { Progress, Slider, Tooltip, TipLabel } from "../components/ui.jsx";
 import { PlayCtx, usePlay, fileToDataUrl } from "./playContext.jsx";
 import {
@@ -15,7 +15,7 @@ import ModelPicker from "../components/ModelPicker.jsx";
 import { buildContrastMask, floodFillMask, measureMask } from "../contrastMask.js";
 import {
   brushStroke, cachedStroke, invertStroke, moveStroke, alphaToCache, overlayToCache,
-  paintBrushPoint, rasterize, hatchTile,
+  paintBrushPoint, rasterize, hatchTile, shapeStroke, replayShape, MASK_RGB,
 } from "../selection.js";
 import {
   newRasterLayer, newInpaintMask, newDocument, blankImage, uniqueName, uniqueFrom, activeMasks,
@@ -85,6 +85,17 @@ export default function Play() {
   const [brushHard, setBrushHard] = useState(false);
   const [eraser, setEraser] = useState(false);
   const [maskTool, setMaskTool] = useState("brush");
+  // The Shape tool's kind, and the Generate panel's settings; both live here
+  // so a tab switch does not reset them.
+  const [shapeKind, setShapeKind] = useState("rect");
+  const [genShape, setGenShape] = useState(() => ({
+    kind: "blobs", seed: Math.floor(Math.random() * 2 ** 31), coverage: 0.3, soften: 4, params: {},
+  }));
+  // A polygon in progress lives in the overlay; it registers these so the
+  // panel's keys (Enter, Esc, Backspace) can reach it, and reports how many
+  // corners are placed so the hint can say so.
+  const polygonRef = useRef({ close: () => {}, cancel: () => {}, pop: () => {} });
+  const [polyCount, setPolyCount] = useState(0);
   const [wandTolerance, setWandTolerance] = useState(30);
   const [maskVersion, setMaskVersion] = useState(0);
   // Canvas entities, in two groups, after InvokeAI's controlLayers store.
@@ -965,6 +976,7 @@ export default function Play() {
     progress, setProgress,
     brushSize, setBrushSize, brushHard, setBrushHard, eraser, setEraser,
     maskTool, setMaskTool, wandTolerance, setWandTolerance,
+    shapeKind, setShapeKind, genShape, setGenShape, polygonRef, polyCount, setPolyCount,
     maskRef, heroRef,
     syncMaskOverlayRef, getMaskDataUrl, applyContrastMask, applyFloodFillMask,
     // Canvas entities
@@ -1041,60 +1053,18 @@ const ZOOM_MIN = 0.25;
 const ZOOM_MAX = 8;
 
 function PlayCanvas({ brushable }) {
-  const { toast, modelPath } = useApp();
+  const { toast } = useApp();
   const {
     postFrame, showRaw, setShowRaw, progress, heroRef, canvasImage, syncMaskOverlayRef, tab,
     frameCard, pendingCard, setPendingCard, applyCard, activeSeed,
     clearCanvas, canvasSize, setCanvasSize, newCanvas, loadFile,
     activeMask, maskPixels, hasMask, liveMasks,
-    frame, canvasIsBlank, sampleParams, setLivePreview, setProgress,
-    generateIntoLayer, fillIntoLayer, pushHistory, genRunning,
   } = usePlay();
   const shown = canvasImage;
   const [busy, setBusy] = useState(false);
   const openRef = useRef(null);
   const shownCard = frameCard;
 
-  // Randomize: one press composes something over the canvas out of shapes,
-  // the models in the library and the bend presets. How it decides is hidden;
-  // what it decided rides in the card, and "What it did" says it in a line.
-  const [rolling, setRolling] = useState(null);
-  const [lastRoll, setLastRoll] = useState(null);
-  const randomize = async () => {
-    if (!modelPath) { toast("Pick a model first", "error"); return; }
-    const blank = canvasIsBlank || !frame;
-    const body = {
-      model_path: modelPath,
-      width: canvasSize.w, height: canvasSize.h,
-      init_image: blank ? null : frame,
-      steps: sampleParams.steps, eta: sampleParams.eta, ema: sampleParams.ema,
-      sampler: sampleParams.sampler, seed: null,
-    };
-    setRolling({ message: "rolling…" });
-    try {
-      const { job: j } = await api.post("/perform/randomize", body);
-      const onJob = (job) => {
-        if (job.detail?.frame) setLivePreview(job.detail.frame);
-        const where = job.detail?.region_name ? ` · ${job.detail.region_name}` : "";
-        const msg = job.status === "running" ? `Rolling${where} · ${job.message}` : null;
-        setRolling(msg ? { message: msg } : null);
-        setProgress(job.status === "running" ? { value: job.progress, message: msg } : null);
-      };
-      onJob(j);
-      const done = await pollJob(j.id, onJob, 300);
-      setProgress(null);
-      if (done.status === "error") { toast(done.message, "error"); }
-      if (done.status === "done" && done.detail?.frame) {
-        const { frame: img, frame_raw: raw, card, mask_union: union, summary, ground } = done.detail;
-        if (ground === "sampled" || !union) generateIntoLayer(img, raw, card);
-        else { await fillIntoLayer(img, card, union); pushHistory(img, raw, card); }
-        setLastRoll({ summary, regions: card?.regions || [], ground });
-        toast(`Randomized · ${card?.regions?.length || 0} areas. Undo to go back, Randomize again for another roll.`, "success");
-      }
-    } catch (e) { toast(e.message, "error"); setProgress(null); }
-    setLivePreview(null);
-    setRolling(null);
-  };
 
   // Zoom and pan. A CSS transform on the wrapper around the picture and its
   // mask overlay: the overlay's pointer maths reads client rects, which
@@ -1329,24 +1299,6 @@ function PlayCanvas({ brushable }) {
             className="hidden-file"
             onChange={(e) => { loadFile(e.target.files?.[0]); e.target.value = ""; }}
           />
-          <div className="spacer" />
-          {lastRoll && !rolling && (
-            <Tooltip text={`What it did: ${lastRoll.summary}
-
-Each area is a shape, a model, how much it changed, and any bend preset. The same seed rolls the same thing; the recipe is in the image.`}>
-              <span className="sub has-tip roll-note">What it did</span>
-            </Tooltip>
-          )}
-          <Tooltip text="Compose something over this canvas from your models and a few random shapes. Every press is a different roll; each result keeps its recipe. Undo goes back.">
-            <button
-              type="button"
-              className="btn sm primary"
-              onClick={randomize}
-              disabled={!!rolling || genRunning || !modelPath}
-            >
-              {rolling ? rolling.message : "Randomize"}
-            </button>
-          </Tooltip>
         </div>
         <div className="row wrap mt-2 gap-2">
           {shown && (
@@ -1486,8 +1438,16 @@ function MaskOverlay({ active }) {
     maskRef, heroRef, brushSize, brushHard, eraser, canvasImage, frame,
     syncMaskOverlayRef, maskTool, applyFloodFillMask, wandTolerance,
     addStroke, rasterizeMasks, activeMask, activeBox, moveMask, wakeMask, docRef,
+    shapeKind, polygonRef, setPolyCount,
   } = usePlay();
   const drawing = useRef(false);
+  // A rectangle or ellipse being dragged, and the corners of a polygon being
+  // placed (canvas pixels). Both preview over snapshots of the rasters and
+  // commit one shape stroke at the end.
+  const shaping = useRef(null);
+  const poly = useRef([]);
+  const snapShape = useRef(null);
+  const snapShapeVis = useRef(null);
   const last = useRef(null);
   const wandBusy = useRef(false);
   // Points of the stroke in progress, normalised, recorded as they are painted.
@@ -1726,6 +1686,156 @@ function MaskOverlay({ active }) {
     points.current = [];
   };
 
+  // --- shapes --------------------------------------------------------
+  const shapeMode = eraser ? "subtract" : "add";
+  const norm = (pt) => {
+    const c = maskRef.current;
+    return { x: pt.x / c.width, y: pt.y / c.height };
+  };
+  /** Snapshot the store and the display raster, so a shape can be previewed
+   *  over them and the preview thrown away between pointer moves. */
+  const snapForShape = () => {
+    const c = maskRef.current;
+    if (!c) return;
+    copyCanvas(c, snapShape);
+    copyCanvas(visOnRef.current, snapShapeVis);
+  };
+  /** Draw the snapshots back, then the stroke over them, into store and display. */
+  const previewShape = (stroke) => {
+    const c = maskRef.current;
+    if (!c) return;
+    const draw = (target, base) => {
+      if (!target || !base) return;
+      const ctx = target.getContext("2d");
+      ctx.globalCompositeOperation = "source-over";
+      ctx.clearRect(0, 0, target.width, target.height);
+      ctx.drawImage(base, 0, 0);
+      ctx.globalCompositeOperation = stroke.mode === "subtract" ? "destination-out" : "source-over";
+      replayShape(ctx, stroke, target.width, target.height);
+      ctx.globalCompositeOperation = "source-over";
+    };
+    draw(c, snapShape.current);
+    draw(visOnRef.current, snapShapeVis.current);
+    paintDisplay();
+  };
+  const beginShape = (e) => {
+    const c = maskRef.current;
+    if (!active || !c?.width) return;
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* not fatal */ }
+    if (activeMask) wakeMask(activeMask.id);
+    syncSize();
+    snapForShape();
+    const pt = pointAt(e);
+    shaping.current = { x: pt.x, y: pt.y, x1: null, y1: null };
+  };
+  const shapeTo = (e) => {
+    const sh = shaping.current;
+    if (!sh) return;
+    const pt = pointAt(e);
+    let { x: x1, y: y1 } = pt;
+    if (e.shiftKey) {
+      // Shift: a square or a circle, growing toward the pointer.
+      const d = Math.max(Math.abs(x1 - sh.x), Math.abs(y1 - sh.y));
+      x1 = sh.x + Math.sign(x1 - sh.x || 1) * d;
+      y1 = sh.y + Math.sign(y1 - sh.y || 1) * d;
+    }
+    sh.x1 = x1;
+    sh.y1 = y1;
+    previewShape(shapeStroke({ shape: shapeKind, points: [norm(sh), norm({ x: x1, y: y1 })], mode: shapeMode }));
+  };
+  const endShape = () => {
+    const sh = shaping.current;
+    shaping.current = null;
+    if (!sh) return;
+    if (sh.x1 == null || Math.abs(sh.x1 - sh.x) < 2 || Math.abs(sh.y1 - sh.y) < 2) {
+      rasterizeMasks(masksNow());
+      return;
+    }
+    addStroke(shapeStroke({ shape: shapeKind, points: [norm(sh), norm({ x: sh.x1, y: sh.y1 })], mode: shapeMode }));
+  };
+
+  /** The polygon so far: its fill once it has three corners, and always its
+   *  outline and corners on the display, so the first two clicks show. */
+  const drawPolyGuides = (all) => {
+    const d = displayRef.current;
+    const c = maskRef.current;
+    if (!d || !c || !all.length) return;
+    const r = c.getBoundingClientRect();
+    const scale = c.width / Math.max(r.width, 1);
+    const ctx = d.getContext("2d");
+    ctx.save();
+    ctx.globalCompositeOperation = "source-over";
+    ctx.strokeStyle = `rgb(${MASK_RGB.join(",")})`;
+    ctx.lineWidth = Math.max(1, 1.5 * scale);
+    ctx.setLineDash([6 * scale, 4 * scale]);
+    ctx.beginPath();
+    ctx.moveTo(all[0].x, all[0].y);
+    for (let i = 1; i < all.length; i += 1) ctx.lineTo(all[i].x, all[i].y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#fff";
+    ctx.strokeStyle = "rgba(0,0,0,0.6)";
+    ctx.lineWidth = Math.max(1, scale);
+    for (const q of all) {
+      ctx.beginPath();
+      ctx.arc(q.x, q.y, 4 * scale, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+    ctx.restore();
+  };
+  const polyPreview = (cursor) => {
+    const all = cursor ? [...poly.current, cursor] : [...poly.current];
+    previewShape(shapeStroke({ shape: "polygon", points: all.map(norm), mode: shapeMode }));
+    drawPolyGuides(all);
+  };
+  const polyClose = () => {
+    const pts = poly.current;
+    poly.current = [];
+    setPolyCount(0);
+    if (pts.length >= 3) addStroke(shapeStroke({ shape: "polygon", points: pts.map(norm), mode: shapeMode }));
+    else rasterizeMasks(masksNow());
+  };
+  const polyCancel = () => {
+    poly.current = [];
+    setPolyCount(0);
+    rasterizeMasks(masksNow());
+  };
+  const polyPop = () => {
+    poly.current.pop();
+    setPolyCount(poly.current.length);
+    if (!poly.current.length) rasterizeMasks(masksNow());
+    else polyPreview(null);
+  };
+  const polyAdd = (e) => {
+    const c = maskRef.current;
+    if (!active || !c?.width) return;
+    const pt = pointAt(e);
+    const pts = poly.current;
+    if (!pts.length) {
+      if (activeMask) wakeMask(activeMask.id);
+      syncSize();
+      snapForShape();
+    } else {
+      const first = pts[0];
+      const lastPt = pts[pts.length - 1];
+      // Clicking the first corner closes; a click on top of the last corner
+      // (the second half of a double-click) adds nothing.
+      if (pts.length >= 3 && Math.hypot(pt.x - first.x, pt.y - first.y) < 10 * pt.scale) { polyClose(); return; }
+      if (Math.hypot(pt.x - lastPt.x, pt.y - lastPt.y) < 3 * pt.scale) return;
+    }
+    pts.push({ x: pt.x, y: pt.y });
+    setPolyCount(pts.length);
+    polyPreview(null);
+  };
+  useEffect(() => {
+    polygonRef.current = { close: polyClose, cancel: polyCancel, pop: polyPop };
+  });
+  // Switching tool or kind abandons a polygon in progress.
+  useEffect(() => {
+    if (poly.current.length && !(maskTool === "shape" && shapeKind === "polygon")) polyCancel();
+  }, [maskTool, shapeKind]);
+
   // The wand samples the stack itself, not what is on screen: with post-process
   // on, the screen is a display stage, and the fill it is selecting for reads
   // the stack. Selecting on one and filling on the other made the region and
@@ -1749,14 +1859,16 @@ function MaskOverlay({ active }) {
     <div className="mask-stage" ref={stageRef}>
       <canvas className="mask-display" ref={displayRef} aria-hidden="true" />
       <canvas
-        className={`mask-overlay ${active ? "on" : ""} ${maskTool === "wand" ? "wand" : ""} ${maskTool === "move" ? "move" : ""}`}
+        className={`mask-overlay ${active ? "on" : ""} ${maskTool === "wand" ? "wand" : ""} ${maskTool === "move" ? "move" : ""} ${maskTool === "shape" && shapeKind !== "generate" ? "shape" : ""}`}
         ref={maskRef}
         role="img"
         aria-label={maskTool === "wand"
           ? "Inpaint mask — click to select a matching area"
           : maskTool === "move"
             ? "Inpaint mask — drag to move"
-            : "Inpaint mask — drag to paint"}
+            : maskTool === "shape"
+              ? (shapeKind === "polygon" ? "Inpaint mask — click to place corners" : "Inpaint mask — drag a shape")
+              : "Inpaint mask — drag to paint"}
         onPointerDown={(e) => {
           if (maskTool === "wand") {
             wandClick(e);
@@ -1764,6 +1876,11 @@ function MaskOverlay({ active }) {
           }
           if (maskTool === "move") {
             beginMove(e);
+            return;
+          }
+          if (maskTool === "shape") {
+            if (shapeKind === "polygon") polyAdd(e);
+            else if (shapeKind !== "generate") beginShape(e);
             return;
           }
           // Throws if the pointer id is not an active pointer, which is the case
@@ -1779,10 +1896,13 @@ function MaskOverlay({ active }) {
         }}
         onPointerMove={(e) => {
           if (moving.current) moveTo(e);
+          else if (shaping.current) shapeTo(e);
+          else if (maskTool === "shape" && shapeKind === "polygon" && poly.current.length) polyPreview(pointAt(e));
           else if (maskTool === "brush" && drawing.current) paint(e);
         }}
-        onPointerUp={() => (moving.current ? endMove() : endStroke())}
-        onPointerCancel={() => (moving.current ? endMove() : endStroke())}
+        onPointerUp={() => (moving.current ? endMove() : shaping.current ? endShape() : endStroke())}
+        onPointerCancel={() => (moving.current ? endMove() : shaping.current ? endShape() : endStroke())}
+        onDoubleClick={() => { if (maskTool === "shape" && shapeKind === "polygon") polyClose(); }}
       />
       {activeBox && (
         <div

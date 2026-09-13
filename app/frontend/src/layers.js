@@ -322,6 +322,34 @@ export async function layerAlphaToCache(image) {
   return { cache: c, w, h };
 }
 
+/** A grayscale mask picture (white = selected), as a mask stroke cache.
+ *
+ *  What the shape generator returns. The red channel becomes the alpha, so a
+ *  softened edge is partial strength exactly as a soft brush is.
+ */
+export async function maskUrlToCache(url) {
+  const im = await loadImage(url);
+  const w = im.naturalWidth || im.width;
+  const h = im.naturalHeight || im.height;
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext("2d");
+  ctx.drawImage(im, 0, 0);
+  const d = ctx.getImageData(0, 0, w, h);
+  const [r, g, b] = MASK_RGB;
+  for (let i = 0; i < w * h; i += 1) {
+    const o = i * 4;
+    const a = d.data[o];
+    d.data[o] = r;
+    d.data[o + 1] = g;
+    d.data[o + 2] = b;
+    d.data[o + 3] = a > 8 ? a : 0;
+  }
+  ctx.putImageData(d, 0, 0);
+  return { cache: c, w, h };
+}
+
 /** Move an entity within its group. Returns a new array. */
 export function reorder(list, id, delta) {
   const i = list.findIndex((e) => e.id === id);

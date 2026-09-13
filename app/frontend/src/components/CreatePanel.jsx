@@ -8,6 +8,8 @@ import {
   fillSizeFor, solverCanResample, LIVE_PARAM_KEYS,
   liveEditLabels, joinLabels } from "../sampleSettings.jsx";
 import { contrastPreview, compositePostprocWithMask } from "../contrastMask.js";
+import { cachedStroke } from "../selection.js";
+import { maskUrlToCache } from "../layers.js";
 import { bendPresetSynopsis, bendPresetSummary } from "../bendSynopsis.js";
 
 const DEFAULT_PP = { contrast: 1, gamma: 1, saturation: 1, eqhist: 0, unsharp: 0, noise: 0 };
@@ -52,6 +54,7 @@ export default function CreatePanel() {
     sampleParams, openDocument,
     brushSize, setBrushSize, brushHard, setBrushHard, eraser, setEraser,
     maskTool, setMaskTool, wandTolerance, setWandTolerance,
+    shapeKind, setShapeKind, genShape, setGenShape, polygonRef, polyCount, addStroke,
     getMaskDataUrl, applyContrastMask, frameCard, activeLayer,
     activeMask, maskPixels, hasMask, invertMask, clearMask, setMaskParam, nudgeMask,
     undo, canUndo, redo, canRedo, tab, setLivePreview,
@@ -161,6 +164,12 @@ export default function CreatePanel() {
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t?.isContentEditable) return;
       // Arrow keys nudge the active mask while the Move tool is up: one canvas
       // pixel, ten with Shift.
+      // A polygon in progress: Enter closes, Esc cancels, Backspace drops a corner.
+      if (maskTool === "shape" && shapeKind === "polygon" && polyCount > 0 && !e.ctrlKey && !e.metaKey) {
+        if (e.key === "Enter") { e.preventDefault(); polygonRef.current.close(); return; }
+        if (e.key === "Escape") { e.preventDefault(); polygonRef.current.cancel(); return; }
+        if (e.key === "Backspace") { e.preventDefault(); polygonRef.current.pop(); return; }
+      }
       if (ARROWS[e.key] && maskTool === "move" && !e.ctrlKey && !e.metaKey && !e.altKey) {
         if (!activeMask) return;
         e.preventDefault();
@@ -188,7 +197,8 @@ export default function CreatePanel() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [tab, canUndo, undo, canRedo, redo, clearMask, invertMask, activeMask, maskTool, nudgeMask]);
+  }, [tab, canUndo, undo, canRedo, redo, clearMask, invertMask, activeMask, maskTool, nudgeMask,
+    shapeKind, polyCount, polygonRef]);
 
   useEffect(() => {
     localStorage.setItem("kiln.genBendPreset", genBendPreset);
@@ -713,8 +723,17 @@ export default function CreatePanel() {
           <div className="seg" role="group" aria-label="Mask tool">
             <button type="button" className={maskTool === "brush" ? "on" : ""} onClick={() => setMaskTool("brush")}>Brush</button>
             <button type="button" className={maskTool === "wand" ? "on" : ""} onClick={() => setMaskTool("wand")}>Wand</button>
+            <button type="button" className={maskTool === "shape" ? "on" : ""} onClick={() => setMaskTool("shape")} title="Rectangles, ellipses, polygons, or generated shapes">Shape</button>
             <button type="button" className={maskTool === "move" ? "on" : ""} onClick={() => setMaskTool("move")}>Move</button>
           </div>
+          {maskTool === "shape" && (
+            <div className="seg" role="group" aria-label="Shape kind">
+              <button type="button" className={shapeKind === "rect" ? "on" : ""} onClick={() => setShapeKind("rect")} title="Drag a rectangle; Shift for a square">Rectangle</button>
+              <button type="button" className={shapeKind === "ellipse" ? "on" : ""} onClick={() => setShapeKind("ellipse")} title="Drag an ellipse; Shift for a circle">Ellipse</button>
+              <button type="button" className={shapeKind === "polygon" ? "on" : ""} onClick={() => setShapeKind("polygon")} title="Click corners on the canvas; Enter or double-click closes">Polygon</button>
+              <button type="button" className={shapeKind === "generate" ? "on" : ""} onClick={() => setShapeKind("generate")} title="Blobs, cells, stripes, a split, or scattered shapes, from a seed">Generate</button>
+            </div>
+          )}
           {maskTool !== "move" && (
             <div className="seg" role="group" aria-label="Paint or erase">
               <button type="button" className={!eraser ? "on" : ""} onClick={() => setEraser(false)}>Paint</button>
@@ -745,6 +764,28 @@ export default function CreatePanel() {
               Drag the mask, or use the arrow keys
             </TipLabel>
           </p>
+        ) : maskTool === "shape" ? (
+          shapeKind === "generate" ? (
+            <GenerateShapePanel
+              genShape={genShape}
+              setGenShape={setGenShape}
+              canvasSize={canvasSize}
+              eraser={eraser}
+              addStroke={addStroke}
+              maskName={maskName}
+            />
+          ) : (
+            <p className="hint mb-2">
+              <TipLabel tip={shapeKind === "polygon"
+                ? "Each click places a corner. Enter, a double-click, or a click on the first corner closes it; Backspace removes the last corner; Esc abandons it. Erase makes a polygon that cuts out of the mask instead."
+                : "Press and drag on the canvas. Shift keeps it square or round. Erase makes a shape that cuts out of the mask instead. Shapes are hard-edged: Feather softens the fill at its edge."}
+              >
+                {shapeKind === "polygon"
+                  ? (polyCount ? `${polyCount} corner${polyCount === 1 ? "" : "s"} placed — Enter closes, Esc cancels` : "Click on the canvas to place corners")
+                  : `Drag on the canvas to draw ${shapeKind === "ellipse" ? "an ellipse" : "a rectangle"}`}
+              </TipLabel>
+            </p>
+          )
         ) : (
           <Slider label="Size" value={brushSize} min={8} max={160} step={2} onChange={setBrushSize}
             tip="Brush diameter in canvas pixels." />
@@ -935,6 +976,126 @@ export default function CreatePanel() {
           </button>
         </div>
       </Disclose>
+    </div>
+  );
+}
+
+
+// The shape generator's kinds and the one or two settings each exposes. The
+// backend does the work (app/core/tools/masks.py); this only names the knobs.
+const GEN_KINDS = [
+  { id: "blobs", label: "Blobs", tip: "Organic islands from layered noise",
+    params: [{ key: "scale", label: "Scale", min: 2, max: 8, step: 1, def: 4, tip: "Bigger numbers, smaller blobs" }] },
+  { id: "cells", label: "Cells", tip: "A patchwork of cells, some of them selected",
+    params: [
+      { key: "cells", label: "Cells", min: 4, max: 32, step: 1, def: 14, tip: "How many cells the canvas is cut into" },
+      { key: "jitter", label: "Wobble", min: 0, max: 1, step: 0.05, def: 0.35, tip: "How much the cell borders wander" },
+    ] },
+  { id: "stripes", label: "Stripes", tip: "Parallel bands at an angle",
+    params: [
+      { key: "angle", label: "Angle", min: 0, max: 179, step: 1, def: 45 },
+      { key: "count", label: "Bands", min: 1, max: 12, step: 1, def: 5 },
+      { key: "wobble", label: "Wobble", min: 0, max: 1, step: 0.05, def: 0.5, tip: "How much the band edges wander" },
+    ] },
+  { id: "split", label: "Split", tip: "The canvas cut into two or three pieces along a wavy line",
+    params: [
+      { key: "pieces", label: "Pieces", min: 2, max: 3, step: 1, def: 2 },
+      { key: "wave", label: "Wave", min: 0, max: 1, step: 0.05, def: 0.6, tip: "How much the cut wanders" },
+      { key: "orientation", label: "Cut", options: [{ value: "v", label: "Left to right" }, { value: "h", label: "Top to bottom" }], def: "v" },
+    ] },
+  { id: "shapes", label: "Scatter", tip: "Scattered circles and stars, some with holes",
+    params: [
+      { key: "count", label: "Shapes", min: 1, max: 12, step: 1, def: 6 },
+      { key: "holes", label: "Holes", options: [{ value: "yes", label: "Some" }, { value: "no", label: "None" }], def: "yes" },
+    ] },
+];
+
+const randomSeed31 = () => Math.floor(Math.random() * 2 ** 31);
+
+/** The Generate arm of the Shape tool: a kind, its knobs, a seed, a live
+ *  preview, and Add to mask. Every Add is one stroke; Shuffle rerolls. */
+function GenerateShapePanel({ genShape, setGenShape, canvasSize, eraser, addStroke, maskName }) {
+  const { toast } = useApp();
+  const [preview, setPreview] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const kind = GEN_KINDS.find((k) => k.id === genShape.kind) || GEN_KINDS[0];
+  const w = canvasSize?.w || 512;
+  const h = canvasSize?.h || 512;
+  const params = { ...Object.fromEntries(kind.params.map((p) => [p.key, p.def])), ...(genShape.params || {}) };
+  // What the backend takes: the same keys, with the select-style knobs decoded.
+  const backendParams = () => {
+    const out = { ...params };
+    if ("holes" in out) out.holes = out.holes !== "no";
+    return out;
+  };
+  const body = (pw, ph) => ({
+    kind: genShape.kind, width: pw, height: ph, seed: genShape.seed,
+    coverage: genShape.coverage, soften: genShape.soften, invert: false, params: backendParams(),
+  });
+  const set = (patch) => setGenShape({ ...genShape, ...patch });
+  const setParam = (key, v) => set({ params: { ...params, [key]: v } });
+
+  useEffect(() => {
+    let live = true;
+    const scale = 256 / Math.max(w, h);
+    const t = setTimeout(() => {
+      api.post("/tools/mask", body(Math.max(16, Math.round(w * scale)), Math.max(16, Math.round(h * scale))))
+        .then((d) => { if (live) setPreview(d.mask); })
+        .catch(() => { if (live) setPreview(null); });
+    }, 200);
+    return () => { live = false; clearTimeout(t); };
+  }, [genShape.kind, genShape.seed, genShape.coverage, genShape.soften, JSON.stringify(params), w, h]);
+
+  const add = async () => {
+    setBusy(true);
+    try {
+      const d = await api.post("/tools/mask", body(w, h));
+      const { cache } = await maskUrlToCache(d.mask);
+      addStroke({
+        ...cachedStroke("generated", cache, eraser ? "subtract" : "add"),
+        gen: { kind: genShape.kind, seed: genShape.seed, coverage: genShape.coverage, soften: genShape.soften, params: backendParams() },
+      });
+    } catch (e) { toast(e.message, "error"); }
+    setBusy(false);
+  };
+
+  return (
+    <div className="gen-panel">
+      <div className="seg seg-sm mb-2" role="group" aria-label="Generated shape">
+        {GEN_KINDS.map((k) => (
+          <button key={k.id} type="button" className={genShape.kind === k.id ? "on" : ""} title={k.tip}
+            onClick={() => set({ kind: k.id, params: {} })}>{k.label}</button>
+        ))}
+      </div>
+      <div className="gen-body">
+        <div className="gen-knobs">
+          <Slider label="Coverage" value={Math.round(genShape.coverage * 100)} min={5} max={80} step={1}
+            onChange={(v) => set({ coverage: v / 100 })} fmt={(v) => `${v} %`}
+            tip="Roughly how much of the canvas the shape covers." />
+          <Slider label="Soften" value={genShape.soften} min={0} max={24} step={1}
+            onChange={(v) => set({ soften: v })}
+            tip="Blur the shape's edge, so it selects at partial strength there, like a soft brush." />
+          {kind.params.map((p) => (p.options ? (
+            <Select key={p.key} label={p.label} value={String(params[p.key])} options={p.options}
+              onChange={(v) => setParam(p.key, v)} tip={p.tip} />
+          ) : (
+            <Slider key={p.key} label={p.label} value={Number(params[p.key])} min={p.min} max={p.max} step={p.step}
+              onChange={(v) => setParam(p.key, v)} tip={p.tip} />
+          )))}
+          <div className="row center gap-2">
+            <Num label="Seed" value={genShape.seed} onChange={(v) => set({ seed: Math.max(0, Math.round(Number(v) || 0)) })}
+              tip="The same seed and settings give the same shape." />
+            <button type="button" className="btn sm" onClick={() => set({ seed: randomSeed31() })} title="A different shape with the same settings">Shuffle</button>
+          </div>
+        </div>
+        <div className="gen-preview" title="What Add to mask will add, white where the mask goes">
+          {preview ? <img src={preview} alt="" /> : <span className="sub">…</span>}
+        </div>
+      </div>
+      <button type="button" className="btn sm primary w-full mt-2" onClick={add} disabled={busy}
+        title={eraser ? `Cut this shape out of ${maskName}` : `Add this shape to ${maskName}`}>
+        {busy ? "Adding…" : eraser ? "Cut from mask" : "Add to mask"}
+      </button>
     </div>
   );
 }

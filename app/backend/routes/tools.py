@@ -222,3 +222,29 @@ def sweep():
     job.thread = t
     t.start()
     return ok({"job": job.to_dict()})
+
+
+@bp.post("/mask")
+def generate_mask():
+    """A procedural mask (white = selected) for the Shape tool's Generate arm.
+
+    Fast enough (tens of milliseconds) to answer inline, so no job. The seed
+    comes back so the panel can show what it used when it was left blank.
+    """
+    from app.core.tools import masks
+
+    body = request.get_json(force=True, silent=True) or {}
+    kind = body.get("kind") or "blobs"
+    if kind not in masks.KINDS:
+        return err(f"unknown shape kind: {kind}", 400)
+    w = as_int(body.get("width", 512), "width", 8, 4096)
+    h = as_int(body.get("height", 512), "height", 8, 4096)
+    seed = resolve_seed(body.get("seed"))
+    img = masks.generate(
+        kind, w, h, seed=seed,
+        coverage=float(body.get("coverage", 0.3)),
+        soften=float(body.get("soften", 0.0)),
+        invert=bool(body.get("invert", False)),
+        params=body.get("params") or {},
+    )
+    return ok({"mask": data_url(img), "seed": seed, "coverage": round(masks.coverage_of(img), 4)})
