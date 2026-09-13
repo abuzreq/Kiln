@@ -6,6 +6,7 @@ import Studio from "./screens/Studio.jsx";
 import Play from "./screens/Play.jsx";
 import LibraryDrawer from "./screens/Library.jsx";
 import WorkspaceModal from "./components/WorkspaceModal.jsx";
+import DiscoveriesDrawer from "./components/DiscoveriesDrawer.jsx";
 import { Seg, SubNav, Tooltip } from "./components/ui.jsx";
 import { MODE_TABS, PREPARE_TABS, PLAY_TABS, PREPARE_TAB_IDS, PLAY_TAB_IDS, anyBusy } from "./navTabs.js";
 
@@ -165,6 +166,10 @@ function Shell() {
           <div className={mode === "play" ? "" : "pane-off"}><Play /></div>
         )}
       </div>
+
+      {/* What the explorer found, along the bottom of every working screen.
+          Hidden on the hub, which has its own overview. */}
+      {!onStart && <DiscoveriesDrawer />}
 
       {assets && <LibraryDrawer onClose={() => setAssets(false)} />}
       {workspaceOpen && <WorkspaceModal onClose={() => setWorkspaceOpen(false)} />}

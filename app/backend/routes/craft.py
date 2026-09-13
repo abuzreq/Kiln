@@ -294,3 +294,64 @@ def merge():
             "block_weights": res.get("block_weights", {}), "which": body.get("which", "both"),
         })
     return ok(res)
+
+
+# --- novelty explorer -------------------------------------------------
+# A background worker over random bend stacks; see app/core/craft/explore.py
+# and docs/exploration-design.md. Run state is in memory, the archive on disk.
+@bp.post("/explore")
+def explore_toggle():
+    from app.core.craft import explore
+
+    body = request.get_json(force=True, silent=True) or {}
+    if body.get("run", True):
+        (model_path,) = require(body, "model_path")
+        return ok(explore.explorer.start(model_path))
+    return ok(explore.explorer.stop())
+
+
+@bp.get("/explore/status")
+def explore_status():
+    from app.core.craft import explore
+
+    return ok(explore.explorer.status())
+
+
+@bp.get("/discoveries")
+def list_discoveries():
+    from app.core.craft import explore
+
+    args = request.args
+    try:
+        since = float(args.get("since") or 0)
+    except ValueError:
+        since = 0.0
+    try:
+        limit = max(1, min(500, int(args.get("limit") or 200)))
+    except ValueError:
+        limit = 200
+    return ok(explore.list_discoveries(
+        model_path=args.get("model_path") or None, since=since,
+        sort=args.get("sort") or "newest", limit=limit,
+    ))
+
+
+@bp.delete("/discoveries/<did>")
+def delete_discovery(did):
+    from app.core.craft import explore
+
+    if not explore.delete_discovery(did, request.args.get("model_path") or None):
+        raise NotFoundError(f"discovery {did} not found")
+    return ok({"deleted": did})
+
+
+@bp.post("/discoveries/<did>/star")
+def star_discovery(did):
+    from app.core.craft import explore
+
+    body = request.get_json(force=True, silent=True) or {}
+    entry = explore.star_discovery(did, body.get("model_path") or None,
+                                   starred=bool(body.get("starred", True)))
+    if entry is None:
+        raise NotFoundError(f"discovery {did} not found")
+    return ok(entry)
