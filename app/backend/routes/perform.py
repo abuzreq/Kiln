@@ -323,6 +323,221 @@ def inpaint():
     return ok({"job": job.to_dict()})
 
 
+# --- Randomize ---------------------------------------------------------
+# One button that composes something over the canvas out of what the user
+# already has: procedural shapes, the models in the library, the bend presets.
+# How it decides is hidden; everything it decided is in the card, and one seed
+# drives every choice, so a roll regenerates from its PNG. See
+# docs/exploration-design.md, "Randomize".
+
+def _change_params(change: float, steps: int) -> dict:
+    """The Create panel's Change slider, mapped as changeToParams does in JS."""
+    c = min(1.0, max(0.0, float(change)))
+    return {"skip": int(round((1 - c) * max(steps - 4, 0) * 0.9)),
+            "noise_level": 0.25 + c * 0.75}
+
+
+def _randomize_models(rng, current: str) -> list[str]:
+    """Up to two other models a roll may reach for, besides the current one."""
+    try:
+        others = [m["path"] for m in manager.scan_public()
+                  if m.get("role") != "checkpoint" and m.get("path") != current]
+    except Exception:  # noqa: BLE001
+        others = []
+    rng.shuffle(others)
+    return others[:2]
+
+
+def _randomize_presets(rng, model_path: str) -> list[dict]:
+    """Bend stacks a roll may apply: starters, saved presets, and discoveries."""
+    from app.core import library
+    from app.core.craft import starters
+
+    out = [{"name": e["name"], "bends": e["bends"]}
+           for e in starters.entries() + library.list_entries("bends") if e.get("bends")]
+    try:
+        from app.core.craft import explore
+
+        found = explore.list_discoveries(model_path=model_path, limit=100)["entries"]
+        if found and rng.random() < 0.3:
+            out = [{"name": f"discovery {e['id']}", "bends": e["bends"]} for e in found]
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _plan_roll(body: dict, seed: int) -> dict:
+    """Every choice a roll makes, from one seed."""
+    import random
+
+    from app.core.tools import masks
+
+    rng = random.Random(seed)
+    current = body["model_path"]
+    steps = int(body.get("steps", 50))
+    others = [] if rng.random() < 0.5 else _randomize_models(rng, current)
+    n = rng.choice([2, 2, 3, 3, 4])
+    regions = []
+    for i in range(n):
+        model = current if i == 0 or not others else rng.choice([current] + others)
+        change = round(rng.uniform(0.45, 0.9), 2)
+        preset = None
+        if rng.random() < 0.4:
+            options = _randomize_presets(rng, model)
+            if options:
+                preset = rng.choice(options)
+        regions.append({
+            "name": f"Area {i + 1}",
+            "mask": masks.random_record(rng),
+            "overlap": rng.random() < 0.3,
+            "model_path": model,
+            "bends": preset["bends"] if preset else None,
+            "bend_preset": preset["name"] if preset else "",
+            "change": change,
+            **_change_params(change, steps),
+            "feather": rng.randint(4, 16),
+            "resample": rng.randint(1, 3),
+            "seed": seed + i + 1,
+        })
+    return {"seed": seed, "regions": regions}
+
+
+def _roll_summary(plan: dict, ground: str) -> str:
+    from pathlib import Path
+
+    parts = []
+    for r in plan["regions"]:
+        bits = [r["mask"]["kind"], Path(r["model_path"]).stem, f"{int(r['change'] * 100)} %"]
+        if r["bend_preset"]:
+            bits.append(r["bend_preset"])
+        parts.append(" · ".join(bits))
+    head = "fresh ground, then " if ground == "sampled" else ""
+    return head + " → ".join(parts)
+
+
+def _randomize_worker(job, body, plan, init_image):
+    from pathlib import Path
+
+    from PIL import Image, ImageChops
+
+    from app.core import library
+    from app.core.engine.inpaint import run_inpaint
+    from app.core.tools import masks
+
+    w, h = int(body["width"]), int(body["height"])
+    shared = {k: body.get(k) for k in ("steps", "eta", "ema", "sampler", "train_steps", "device")
+              if body.get(k) is not None}
+    regions = plan["regions"]
+    ground = "canvas" if init_image is not None else "sampled"
+    n = len(regions) + (1 if ground == "sampled" else 0)
+    state = {"done": 0}
+
+    def _run_region(params, current, mask, feather, bends):
+        bundle = manager.load(params.model_path, ema=params.ema)
+        meta = bundle["meta"]
+        runtime = _build_bend_runtime(bends, meta, bundle["backend"])
+        last = None
+        for frame in run_inpaint(params, current, mask, feather=feather, bend_runtime=runtime,
+                                 cancel=job.cancelled, control=job, mults=meta.mults):
+            last = frame
+            job.progress = (state["done"] + frame["step"] / max(frame["total"], 1)) / n
+            job.detail["step"] = frame["step"]
+            job.detail["total"] = frame["total"]
+            _throttled_preview(job, frame)
+            if job.cancelled():
+                break
+        return last
+
+    try:
+        current = init_image
+        if current is None:
+            # A blank canvas gets a ground first: a plain sample with the
+            # current model, through the same path as a full-change fill.
+            job.message = "ground"
+            job.detail["region_name"] = "ground"
+            params = _params_from_body({**shared, "model_path": body["model_path"],
+                                        "seed": plan["seed"], "skip": 0, "noise_level": 1.0,
+                                        "batch_size": 1, "resample": 1})
+            blank = Image.new("RGB", (w, h), (128, 128, 128))
+            last = _run_region(params, blank, Image.new("L", (w, h), 255), 0.0, None)
+            if last is None or job.cancelled():
+                raise RuntimeError("stopped")
+            current = last["image_pp"]
+            state["done"] += 1
+
+        taken = Image.new("L", (w, h), 0)
+        union = Image.new("L", (w, h), 0)
+        for i, r in enumerate(regions):
+            if job.cancelled():
+                break
+            job.detail["region"] = i
+            job.detail["region_name"] = r["name"]
+            job.message = f"area {i + 1} of {len(regions)}"
+            mask = masks.from_record(r["mask"], w, h)
+            if not r["overlap"] and i > 0:
+                mask = masks.carve(mask, taken)
+            if masks.coverage_of(mask) < 0.01:
+                # carved away to nothing: let it overlap after all
+                mask = masks.from_record(r["mask"], w, h)
+            params = _params_from_body({**shared, "model_path": r["model_path"], "seed": r["seed"],
+                                        "skip": r["skip"], "noise_level": r["noise_level"],
+                                        "resample": r["resample"], "batch_size": 1})
+            last = _run_region(params, current, mask, float(r["feather"]), r["bends"])
+            if last is None:
+                break
+            current = last["image_pp"]
+            taken = ImageChops.lighter(taken, mask)
+            union = ImageChops.lighter(union, mask)
+            r["model"] = ((library.read_card(r["model_path"]) or {}).get("name")
+                          or Path(r["model_path"]).stem)
+            state["done"] += 1
+
+        job.detail["frame"] = data_url(current)
+        job.detail["frame_raw"] = data_url(current)
+        job.detail["mask_union"] = data_url(union)
+        job.detail["ground"] = ground
+        job.detail["summary"] = _roll_summary(plan, ground)
+        job.detail["card"] = {**job.detail["card"], "regions": plan["regions"],
+                              "ground": ground, "summary": job.detail["summary"]}
+        if job.status == "running":
+            job.status = "cancelled" if job.cancelled() else "done"
+            job.progress = 1.0 if job.status == "done" else job.progress
+            job.message = "done" if job.status == "done" else "stopped"
+    except Exception as e:  # noqa: BLE001
+        if str(e) == "stopped":
+            job.status = "cancelled"
+            job.message = "stopped"
+        else:
+            job.status = "error"
+            job.message = str(e)
+
+
+@bp.post("/perform/randomize")
+def randomize():
+    """Compose something over the canvas from shapes, models and presets."""
+    body = request.get_json(force=True, silent=True) or {}
+    require(body, "model_path", "width", "height")
+    seed = resolve_seed(body.get("seed"))
+    size = (int(body["width"]), int(body["height"]))
+    init_image = from_data_url(body["init_image"]).convert("RGB") if body.get("init_image") else None
+    if init_image is not None and init_image.size != size:
+        init_image = init_image.resize(size)
+    plan = _plan_roll(body, seed)
+
+    job = registry.create("randomize")
+    job.message = "rolling..."
+    job.detail["total"] = 0
+    job.detail["regions"] = len(plan["regions"])
+    params = _params_from_body({**body, "seed": seed, "batch_size": 1})
+    _publish_card(job, params, init_image=init_image is not None, mask=True, kind="randomize",
+                  extra={"roll_seed": seed, "canvas_size": list(size)})
+
+    t = threading.Thread(target=_randomize_worker, args=(job, body, plan, init_image), daemon=True)
+    job.thread = t
+    t.start()
+    return ok({"job": job.to_dict()})
+
+
 @bp.post("/perform/postproc")
 def postproc():
     body = request.get_json(force=True, silent=True) or {}

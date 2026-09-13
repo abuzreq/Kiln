@@ -1637,3 +1637,6 @@ a { color: var(--accent); }
 @media (max-width: 900px) {
   .dm-body { grid-template-columns: 1fr; }
 }
+
+/* Randomize's "What it did" note beside the button */
+.roll-note { cursor: help; }

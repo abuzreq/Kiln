@@ -4,7 +4,7 @@ import { BendWorkspace } from "./Craft.jsx";
 import SweepPanel from "./Sweep.jsx";
 import Merge from "./Merge.jsx";
 import { useApp } from "../state.jsx";
-import { api, downloadPost, mediaUrl, thumbUrl } from "../api.js";
+import { api, downloadPost, mediaUrl, pollJob, thumbUrl } from "../api.js";
 import { Progress, Slider, Tooltip, TipLabel } from "../components/ui.jsx";
 import { PlayCtx, usePlay, fileToDataUrl } from "./playContext.jsx";
 import {
@@ -1041,17 +1041,60 @@ const ZOOM_MIN = 0.25;
 const ZOOM_MAX = 8;
 
 function PlayCanvas({ brushable }) {
-  const { toast } = useApp();
+  const { toast, modelPath } = useApp();
   const {
     postFrame, showRaw, setShowRaw, progress, heroRef, canvasImage, syncMaskOverlayRef, tab,
     frameCard, pendingCard, setPendingCard, applyCard, activeSeed,
     clearCanvas, canvasSize, setCanvasSize, newCanvas, loadFile,
     activeMask, maskPixels, hasMask, liveMasks,
+    frame, canvasIsBlank, sampleParams, setLivePreview, setProgress,
+    generateIntoLayer, fillIntoLayer, pushHistory, genRunning,
   } = usePlay();
   const shown = canvasImage;
   const [busy, setBusy] = useState(false);
   const openRef = useRef(null);
   const shownCard = frameCard;
+
+  // Randomize: one press composes something over the canvas out of shapes,
+  // the models in the library and the bend presets. How it decides is hidden;
+  // what it decided rides in the card, and "What it did" says it in a line.
+  const [rolling, setRolling] = useState(null);
+  const [lastRoll, setLastRoll] = useState(null);
+  const randomize = async () => {
+    if (!modelPath) { toast("Pick a model first", "error"); return; }
+    const blank = canvasIsBlank || !frame;
+    const body = {
+      model_path: modelPath,
+      width: canvasSize.w, height: canvasSize.h,
+      init_image: blank ? null : frame,
+      steps: sampleParams.steps, eta: sampleParams.eta, ema: sampleParams.ema,
+      sampler: sampleParams.sampler, seed: null,
+    };
+    setRolling({ message: "rolling…" });
+    try {
+      const { job: j } = await api.post("/perform/randomize", body);
+      const onJob = (job) => {
+        if (job.detail?.frame) setLivePreview(job.detail.frame);
+        const where = job.detail?.region_name ? ` · ${job.detail.region_name}` : "";
+        const msg = job.status === "running" ? `Rolling${where} · ${job.message}` : null;
+        setRolling(msg ? { message: msg } : null);
+        setProgress(job.status === "running" ? { value: job.progress, message: msg } : null);
+      };
+      onJob(j);
+      const done = await pollJob(j.id, onJob, 300);
+      setProgress(null);
+      if (done.status === "error") { toast(done.message, "error"); }
+      if (done.status === "done" && done.detail?.frame) {
+        const { frame: img, frame_raw: raw, card, mask_union: union, summary, ground } = done.detail;
+        if (ground === "sampled" || !union) generateIntoLayer(img, raw, card);
+        else { await fillIntoLayer(img, card, union); pushHistory(img, raw, card); }
+        setLastRoll({ summary, regions: card?.regions || [], ground });
+        toast(`Randomized · ${card?.regions?.length || 0} areas. Undo to go back, Randomize again for another roll.`, "success");
+      }
+    } catch (e) { toast(e.message, "error"); setProgress(null); }
+    setLivePreview(null);
+    setRolling(null);
+  };
 
   // Zoom and pan. A CSS transform on the wrapper around the picture and its
   // mask overlay: the overlay's pointer maths reads client rects, which
@@ -1286,6 +1329,24 @@ function PlayCanvas({ brushable }) {
             className="hidden-file"
             onChange={(e) => { loadFile(e.target.files?.[0]); e.target.value = ""; }}
           />
+          <div className="spacer" />
+          {lastRoll && !rolling && (
+            <Tooltip text={`What it did: ${lastRoll.summary}
+
+Each area is a shape, a model, how much it changed, and any bend preset. The same seed rolls the same thing; the recipe is in the image.`}>
+              <span className="sub has-tip roll-note">What it did</span>
+            </Tooltip>
+          )}
+          <Tooltip text="Compose something over this canvas from your models and a few random shapes. Every press is a different roll; each result keeps its recipe. Undo goes back.">
+            <button
+              type="button"
+              className="btn sm primary"
+              onClick={randomize}
+              disabled={!!rolling || genRunning || !modelPath}
+            >
+              {rolling ? rolling.message : "Randomize"}
+            </button>
+          </Tooltip>
         </div>
         <div className="row wrap mt-2 gap-2">
           {shown && (

@@ -102,16 +102,21 @@ export default function DiscoveriesDrawer() {
     return `/craft/discoveries?${q.toString()}`;
   }, [scope, modelPath]);
 
-  // Full fetch when the filters change; from then on, only what is new.
+  // Full fetch when the filters change; from then on, only what is new. If the
+  // full fetch fails (the page loaded while Kiln was restarting), the poll
+  // retries it rather than asking "what is new since nothing" forever.
+  const loadedRef = useRef(false);
+  const loadAll = useCallback(() => api.get(query({ sort, limit: 200 })).then((d) => {
+    setEntries(orient(d.entries || [], sort));
+    sinceRef.current = d.now || 0;
+    loadedRef.current = true;
+  }), [query, sort]);
   useEffect(() => {
     let alive = true;
-    api.get(query({ sort, limit: 200 })).then((d) => {
-      if (!alive) return;
-      setEntries(orient(d.entries || [], sort));
-      sinceRef.current = d.now || 0;
-    }).catch(() => {});
+    loadedRef.current = false;
+    loadAll().catch(() => { if (alive) loadedRef.current = false; });
     return () => { alive = false; };
-  }, [query, sort]);
+  }, [loadAll]);
 
   useEffect(() => {
     let alive = true;
@@ -119,6 +124,7 @@ export default function DiscoveriesDrawer() {
       try {
         const s = await api.get("/craft/explore/status");
         if (alive) setStatus(s);
+        if (!loadedRef.current) { await loadAll(); return; }
         const d = await api.get(query({ since: sinceRef.current, sort: "newest", limit: 50 }));
         if (!alive) return;
         sinceRef.current = d.now || sinceRef.current;
