@@ -17,6 +17,16 @@ const POLL = 3000;
 const loadOpen = () => {
   try { return localStorage.getItem("kiln.discoveries") === "open"; } catch { return false; }
 };
+const loadMetric = () => {
+  try { return localStorage.getItem("kiln.discoveries.metric") || "clip"; } catch { return "clip"; }
+};
+// What "looks new" is measured with. The two disagree in an interesting way:
+// CLIP groups by what a caption would say, DINOv2 by structure and texture.
+const METRIC_TABS = [
+  { id: "clip", label: "CLIP", tip: "Novelty by CLIP image features: what the picture reads as" },
+  { id: "dinov2", label: "DINOv2", tip: "Novelty by DINOv2 features: structure and texture, no language. Loads a 350 MB model the first time" },
+];
+const METRIC_LABEL = Object.fromEntries(METRIC_TABS.map((t) => [t.id, t.label]));
 const newId = () => `b-${Math.random().toString(36).slice(2, 10)}`;
 
 const SCOPE_TABS = [
@@ -39,6 +49,7 @@ export default function DiscoveriesDrawer() {
   const [entries, setEntries] = useState([]);
   const [scope, setScope] = useState("all");
   const [sort, setSort] = useState("newest");
+  const [metric, setMetric] = useState(loadMetric);
   // null = follow the explorer (move while it runs); true / false = the user said so
   const [manual, setManual] = useState(null);
   const [fresh, setFresh] = useState(() => new Set());
@@ -50,7 +61,8 @@ export default function DiscoveriesDrawer() {
   const movingRef = useRef(false);
 
   const running = !!status?.running;
-  const here = running && status?.model_path === modelPath;
+  const sameModel = running && status?.model_path === modelPath;
+  const here = sameModel && (status?.metric || "clip") === metric;
   const currentName = models?.find((m) => m.path === modelPath)?.name || (modelPath ? modelPath.split(/[\\/]/).pop() : "");
   const moving = manual == null ? running : manual;
   movingRef.current = moving;
@@ -58,6 +70,9 @@ export default function DiscoveriesDrawer() {
   useEffect(() => {
     try { localStorage.setItem("kiln.discoveries", open ? "open" : "closed"); } catch { /* ignore */ }
   }, [open]);
+  useEffect(() => {
+    try { localStorage.setItem("kiln.discoveries.metric", metric); } catch { /* ignore */ }
+  }, [metric]);
 
   const query = useCallback((extra) => {
     const q = new URLSearchParams(extra);
@@ -173,7 +188,7 @@ export default function DiscoveriesDrawer() {
         setStatus(await api.post("/craft/explore", { run: false }));
       } else {
         if (!modelPath) { toast("Pick a model in Play first", "error"); return; }
-        setStatus(await api.post("/craft/explore", { model_path: modelPath, run: true }));
+        setStatus(await api.post("/craft/explore", { model_path: modelPath, metric, run: true }));
         setOpen(true);
       }
     } catch (err) { toast(err.message, "error"); }
@@ -217,18 +232,20 @@ export default function DiscoveriesDrawer() {
     if (!status) return "";
     if (status.error && !running) return status.error;
     if (!running) return entries.length ? "not exploring" : "";
-    const parts = [`exploring ${status.model_name || "…"}`, `tried ${status.tried}`, `threshold ${status.threshold}`];
+    const parts = [`exploring ${status.model_name || "…"} by ${METRIC_LABEL[status.metric] || status.metric}`, `tried ${status.tried}`, `threshold ${status.threshold}`];
     if (status.yielding_to) parts.push("yielding to your run");
     else if (status.error) parts.push(status.error);
     return parts.join(" · ");
   };
 
-  const exploreLabel = here ? "Stop" : running ? "Explore here" : "Start exploring";
+  const exploreLabel = here ? "Stop" : sameModel ? `Switch to ${METRIC_LABEL[metric]}` : running ? "Explore here" : "Start exploring";
   const exploreTip = here
     ? "Stop looking for new bends on this model"
-    : running
-      ? `Exploring ${status?.model_name}; start here to move it to ${currentName || "this model"}`
-      : `Try random bends on ${currentName || "the picked model"} in the background and keep the ones that look new`;
+    : sameModel
+      ? `Restart the explorer on this model measuring novelty by ${METRIC_LABEL[metric]}; each metric keeps its own archive`
+      : running
+        ? `Exploring ${status?.model_name}; start here to move it to ${currentName || "this model"}`
+        : `Try random bends on ${currentName || "the picked model"} in the background and keep the ones that look new by ${METRIC_LABEL[metric]}`;
 
   return (
     <div className={`disc-drawer ${open ? "open" : ""}`.trim()}>
@@ -256,6 +273,9 @@ export default function DiscoveriesDrawer() {
             </Tooltip>
           </span>
         )}
+        <span onClick={(e) => e.stopPropagation()}>
+          <Seg ariaLabel="Novelty metric" tabs={METRIC_TABS} value={metric} onChange={setMetric} size="sm" />
+        </span>
         <Tooltip text={exploreTip}>
           <button
             type="button"
@@ -309,7 +329,7 @@ function DiscoveryCard({ entry, ops, current, fresh, onOpen, onStar, onRemove })
   const modelCls = `disc-model ${entry.model_missing ? "gone" : current ? "" : "other"}`.trim();
   return (
     <div className={`disc-card ${fresh ? "fresh" : ""}`.trim()} tabIndex={0}>
-      <Tooltip text={`${summary}\nnovelty ${entry.novelty} · ${entry.model_name}${entry.model_missing ? " (model gone)" : ""}`}>
+      <Tooltip text={`${summary}\nnovelty ${entry.novelty} by ${METRIC_LABEL[entry.metric] || "CLIP"} · ${entry.model_name}${entry.model_missing ? " (model gone)" : ""}`}>
         <button type="button" className="disc-img" onClick={onOpen} aria-label={`Open in Bend: ${summary}`}>
           <img src={thumbUrl(entry.image)} alt="" loading="lazy" decoding="async" />
         </button>

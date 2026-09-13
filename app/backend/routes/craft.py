@@ -306,7 +306,10 @@ def explore_toggle():
     body = request.get_json(force=True, silent=True) or {}
     if body.get("run", True):
         (model_path,) = require(body, "model_path")
-        return ok(explore.explorer.start(model_path))
+        metric = body.get("metric") or explore.DEFAULT_METRIC
+        if metric not in explore.METRICS:
+            return err(f"unknown novelty metric: {metric}", 400)
+        return ok(explore.explorer.start(model_path, metric))
     return ok(explore.explorer.stop())
 
 

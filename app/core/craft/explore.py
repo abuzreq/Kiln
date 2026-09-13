@@ -53,15 +53,30 @@ STEPS = 16
 SAMPLER = "unipc"
 
 K = 5                      # nearest neighbours the novelty score averages over
-CAP = 200                  # entries per model; the densest non-starred one goes
-THRESHOLD0 = 0.08
-THRESHOLD_MIN, THRESHOLD_MAX = 0.02, 0.4
+CAP = 100                  # entries per archive; past it the oldest non-starred one goes
 WINDOW = 20                # tries per threshold adaptation
 WINDOW_HIGH = 4            # more accepts than this in a window: raise the bar
 INJECT_P = 0.05            # chance to keep a merely-different candidate anyway
-MIN_DISTANCE = 0.03        # below this from the baseline, a bend did nothing worth keeping
-BASELINE_EPS = 0.01        # below this, a bend did nothing at all
 MAX_BENDS = 3
+
+# What "looks different" is measured with. Embeddings from different metrics
+# are not comparable, so each metric keeps its own archive per model. The
+# distance scales differ too: DINOv2 spreads images further apart than CLIP
+# does, so its floors start higher and the adaptive threshold does the rest.
+#   baseline_eps  below this from the unbent render, a bend did nothing at all
+#   min_distance  below this, it did nothing worth keeping
+#   threshold0    where the adaptive threshold starts for a new archive
+#   threshold     the range the adaptive threshold may move in
+# The DINOv2 numbers come from a first run on a real model: mean distances to
+# the five nearest kept entries sat between 0.43 and 0.72 where CLIP's sit
+# between 0.08 and 0.3, so the same ceiling would have let everything in.
+METRICS = {
+    "clip": {"label": "CLIP", "baseline_eps": 0.01, "min_distance": 0.03,
+             "threshold0": 0.08, "threshold": (0.02, 0.4)},
+    "dinov2": {"label": "DINOv2", "baseline_eps": 0.05, "min_distance": 0.15,
+               "threshold0": 0.45, "threshold": (0.1, 0.9)},
+}
+DEFAULT_METRIC = "clip"
 
 YIELD_KINDS = ("sample", "inpaint", "randomize", "bend_sweep", "sweep")
 GROUP_WEIGHTS = {"encoder": 0.25, "mid": 0.25, "decoder": 0.25,
@@ -74,9 +89,13 @@ def archive_root() -> Path:
     return workspace.cache / "discoveries"
 
 
-def archive_dir(model_path: str | Path) -> Path | None:
+def archive_dir(model_path: str | Path, metric: str = DEFAULT_METRIC) -> Path | None:
+    """One folder per model and metric. CLIP keeps the bare key, so archives
+    made before the metric toggle existed are still found."""
     key = previews.cache_key(model_path)
-    return archive_root() / key if key else None
+    if not key:
+        return None
+    return archive_root() / (key if metric == DEFAULT_METRIC else f"{key}-{metric}")
 
 
 def model_exists(model_path: str) -> bool:
@@ -93,21 +112,23 @@ def model_name(model_path: str) -> str:
     return Path(str(model_path)).stem
 
 
-def _empty_index(model_path: str) -> dict:
+def _empty_index(model_path: str, metric: str) -> dict:
     return {
-        "version": 1, "model_path": str(model_path), "model": {},
-        "threshold": THRESHOLD0, "tried": 0, "accepted": 0,
+        "version": 1, "model_path": str(model_path), "model": {}, "metric": metric,
+        "threshold": METRICS[metric]["threshold0"], "tried": 0, "accepted": 0,
         "updated_at": 0.0, "baseline": None, "entries": [],
     }
 
 
 class Archive:
-    """One model's discoveries: ``index.json`` plus one PNG per entry."""
+    """One model's discoveries under one metric: ``index.json`` plus one PNG per entry."""
 
-    def __init__(self, model_path: str, directory: Path | None = None):
+    def __init__(self, model_path: str, directory: Path | None = None,
+                 metric: str = DEFAULT_METRIC):
         self.model_path = str(model_path)
-        self.dir = directory or archive_dir(model_path)
-        self.index = _empty_index(model_path)
+        self.metric = metric if metric in METRICS else DEFAULT_METRIC
+        self.dir = directory or archive_dir(model_path, self.metric)
+        self.index = _empty_index(model_path, self.metric)
         self._matrix = None
         if self.dir and (self.dir / "index.json").exists():
             try:
@@ -115,6 +136,7 @@ class Archive:
                 self.index.update(loaded)
             except Exception as e:  # noqa: BLE001
                 log.warning("could not read %s: %s", self.dir / "index.json", e)
+        self.index["metric"] = self.metric
 
     @classmethod
     def from_dir(cls, directory: Path) -> "Archive | None":
@@ -122,10 +144,10 @@ class Archive:
         if not f.exists():
             return None
         try:
-            model_path = json.loads(f.read_text(encoding="utf-8")).get("model_path", "")
+            head = json.loads(f.read_text(encoding="utf-8"))
         except Exception:  # noqa: BLE001
             return None
-        return cls(model_path, directory)
+        return cls(head.get("model_path", ""), directory, head.get("metric") or DEFAULT_METRIC)
 
     @property
     def entries(self) -> list[dict]:
@@ -135,7 +157,7 @@ class Archive:
         if self._matrix is None:
             rows = [e["embedding"] for e in self.entries]
             self._matrix = (np.asarray(rows, dtype=np.float32)
-                            if rows else np.zeros((0, 512), dtype=np.float32))
+                            if rows else np.zeros((0, 1), dtype=np.float32))
         return self._matrix
 
     def save(self):
@@ -177,16 +199,10 @@ class Archive:
         return True
 
     def prune(self):
-        """Drop the densest non-starred entries until the cap holds."""
+        """Past the cap, the oldest non-starred entry makes room for the new one."""
         while len(self.entries) > CAP:
-            m = self.matrix()
-            d = 1.0 - m @ m.T
-            np.fill_diagonal(d, np.inf)
-            k = min(K, len(m) - 1)
-            density = np.sort(d, axis=1)[:, :k].mean(axis=1)
-            order = np.argsort(density)
-            victim = next((self.entries[i] for i in order
-                           if not self.entries[i].get("starred")), None)
+            victim = next((e for e in sorted(self.entries, key=lambda e: float(e.get("created_at", 0)))
+                           if not e.get("starred")), None)
             if victim is None:
                 return
             self.remove(victim["id"])
@@ -198,6 +214,7 @@ class Archive:
             pub = {k: v for k, v in e.items() if k != "embedding"}
             pub["image"] = str(self.dir / f"{e['id']}.png")
             pub["model_missing"] = missing
+            pub["metric"] = self.metric
             out.append(pub)
         return out
 
@@ -207,23 +224,25 @@ def _archives(model_path: str | None = None) -> list[Archive]:
 
     Routes and the worker must see the same object for the model being
     explored, or a star or delete written to disk is overwritten by the
-    worker's next save of its own copy.
+    worker's next save of its own copy. A model has one archive per metric;
+    all of them are listed.
     """
-    if model_path:
-        live = explorer.live_archive(model_path)
-        if live is not None:
-            return [live]
-        d = archive_dir(model_path)
-        return [Archive(model_path, d)] if d and (d / "index.json").exists() else []
     root = archive_root()
     if not root.is_dir():
         return []
+    key = previews.cache_key(model_path) if model_path else None
+    if model_path and not key:
+        return []
     out = []
     for d in sorted(root.iterdir()):
-        a = Archive.from_dir(d) if d.is_dir() else None
+        if not d.is_dir():
+            continue
+        if key and d.name != key and not d.name.startswith(f"{key}-"):
+            continue
+        a = Archive.from_dir(d)
         if a is None:
             continue
-        out.append(explorer.live_archive(a.model_path) or a)
+        out.append(explorer.live_archive(a.model_path, a.metric) or a)
     return out
 
 
@@ -384,23 +403,66 @@ _CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
 _CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
 
 
-def embed(images: list[Image.Image], device: str) -> np.ndarray:
-    """Unit-length CLIP ViT-B/32 embedding of the *average* of ``images``.
+_IMAGENET_MEAN = (0.485, 0.456, 0.406)
+_IMAGENET_STD = (0.229, 0.224, 0.225)
 
-    ``_Clip.get`` drops CLIP's own preprocess, so the resize and normalisation
-    are done here to match it.
+
+class _Dino:
+    """Lazily-loaded DINOv2 ViT-B/14, through torch.hub.
+
+    The first use downloads the hub repo and the checkpoint (about 350 MB)
+    into torch's hub cache; after that it loads offline. Self-supervised
+    features, no text: they separate images by structure and texture rather
+    than by what CLIP would caption them as, which is a different idea of
+    "looks new" and the reason the metric is a choice.
     """
+
+    _inst = None
+
+    @classmethod
+    def get(cls, device):
+        import torch
+
+        if cls._inst is None:
+            model = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14", verbose=False)
+            cls._inst = model.eval()
+        model = cls._inst
+        if next(model.parameters()).device.type != torch.device(device).type:
+            model = model.to(device)
+            cls._inst = model
+        return model
+
+
+def _batch(images: list[Image.Image], mean, std):
     import torch
 
-    model, _ = _Clip.get(device)
     arrs = [np.asarray(im.convert("RGB").resize((224, 224), Image.BICUBIC),
                        dtype=np.float32) / 255.0 for im in images]
     x = torch.from_numpy(np.stack(arrs)).permute(0, 3, 1, 2)
-    mean = torch.tensor(_CLIP_MEAN).view(1, 3, 1, 1)
-    std = torch.tensor(_CLIP_STD).view(1, 3, 1, 1)
-    x = ((x - mean) / std).to(device=device, dtype=next(model.parameters()).dtype)
-    with torch.no_grad():
-        e = model.encode_image(x).float()
+    return (x - torch.tensor(mean).view(1, 3, 1, 1)) / torch.tensor(std).view(1, 3, 1, 1)
+
+
+def embed(images: list[Image.Image], device: str, metric: str = DEFAULT_METRIC) -> np.ndarray:
+    """Unit-length embedding of the *average* of ``images`` under ``metric``.
+
+    CLIP: ViT-B/32 image features. ``_Clip.get`` drops CLIP's own preprocess,
+    so the resize and normalisation are done here to match it. DINOv2:
+    ViT-B/14 CLS features with ImageNet normalisation.
+    """
+    import torch
+
+    if metric == "dinov2":
+        model = _Dino.get(device)
+        x = _batch(images, _IMAGENET_MEAN, _IMAGENET_STD)
+        x = x.to(device=device, dtype=next(model.parameters()).dtype)
+        with torch.no_grad():
+            e = model(x).float()
+    else:
+        model, _ = _Clip.get(device)
+        x = _batch(images, _CLIP_MEAN, _CLIP_STD)
+        x = x.to(device=device, dtype=next(model.parameters()).dtype)
+        with torch.no_grad():
+            e = model.encode_image(x).float()
     e = e / e.norm(dim=-1, keepdim=True)
     v = e.mean(0)
     v = v / v.norm()
@@ -433,7 +495,8 @@ class Explorer:
     @staticmethod
     def _idle_state() -> dict:
         return {"running": False, "model_path": None, "model_name": None,
-                "tried": 0, "accepted": 0, "archive_size": 0, "threshold": THRESHOLD0,
+                "metric": DEFAULT_METRIC, "tried": 0, "accepted": 0, "archive_size": 0,
+                "threshold": METRICS[DEFAULT_METRIC]["threshold0"],
                 "last_novelty": None, "yielding_to": None, "error": None}
 
     # Archive files are rewritten by the worker and by delete/star from routes.
@@ -441,11 +504,15 @@ class Explorer:
         with self._lock:
             return self._archive_locks.setdefault(str(model_path), threading.Lock())
 
-    def live_archive(self, model_path: str) -> Archive | None:
-        """The worker's in-memory archive for ``model_path``, if it holds one."""
+    def live_archive(self, model_path: str, metric: str | None = None) -> Archive | None:
+        """The worker's in-memory archive for ``model_path`` (and ``metric``), if it holds one."""
         with self._lock:
             a = self._archive
-        return a if a is not None and a.model_path == str(model_path) else None
+        if a is None or a.model_path != str(model_path):
+            return None
+        if metric is not None and a.metric != metric:
+            return None
+        return a
 
     def status(self) -> dict:
         with self._lock:
@@ -455,13 +522,16 @@ class Explorer:
         with self._lock:
             self._state.update(kw)
 
-    def start(self, model_path: str) -> dict:
+    def start(self, model_path: str, metric: str = DEFAULT_METRIC) -> dict:
+        if metric not in METRICS:
+            raise ValueError(f"unknown novelty metric: {metric}")
         self.stop()
         with self._lock:
-            self._state = {**self._idle_state(), "running": True,
-                           "model_path": str(model_path), "model_name": model_name(model_path)}
+            self._state = {**self._idle_state(), "running": True, "metric": metric,
+                           "model_path": str(model_path), "model_name": model_name(model_path),
+                           "threshold": METRICS[metric]["threshold0"]}
             self._stop = threading.Event()
-            self._thread = threading.Thread(target=self._run, args=(str(model_path),),
+            self._thread = threading.Thread(target=self._run, args=(str(model_path), metric),
                                             name="explore", daemon=True)
             self._thread.start()
         return self.status()
@@ -493,17 +563,18 @@ class Explorer:
             return []
         return list(last.get("images_pp") or [last["image_pp"]])
 
-    def _current_archive(self, model_path: str) -> Archive:
+    def _current_archive(self, model_path: str, metric: str = DEFAULT_METRIC) -> Archive:
         with self._lock:
             a = self._archive
-        if a is None or a.model_path != model_path:
-            a = Archive(model_path)
+        if a is None or a.model_path != model_path or a.metric != metric:
+            a = Archive(model_path, metric=metric)
             with self._lock:
                 self._archive = a
         return a
 
-    def _run(self, model_path: str):
+    def _run(self, model_path: str, metric: str = DEFAULT_METRIC):
         stop = self._stop
+        spec = METRICS[metric]
         try:
             device = pick_device("auto")
             bundle = manager.load(model_path, device=device, ema=True)
@@ -511,7 +582,7 @@ class Explorer:
             if not backend.capabilities.bend:
                 self._set(running=False, error="this model cannot be bent")
                 return
-            arch = self._current_archive(model_path)
+            arch = self._current_archive(model_path, metric)
             arch.index["model"] = {
                 "name": model_name(model_path), "path": model_path,
                 "key": previews.cache_key(model_path),
@@ -527,7 +598,8 @@ class Explorer:
                 if not imgs:
                     return
                 with self.archive_lock(model_path):
-                    arch.index["baseline"] = [round(float(x), 4) for x in embed(imgs, device)]
+                    arch.index["baseline"] = [round(float(x), 4)
+                                              for x in embed(imgs, device, metric)]
                     arch.save()
             base = np.asarray(arch.index["baseline"], dtype=np.float32)
             # The threshold adapts once per window of tries, not per try:
@@ -573,17 +645,21 @@ class Explorer:
                     self._set(tried=arch.index["tried"])
                     continue
 
-                vec = embed(imgs, device)
+                vec = embed(imgs, device, metric)
                 dist_base = float(1.0 - base @ vec)
                 nov = arch.novelty(vec)
                 if nov is None:
                     nov = dist_base
                 thr = float(arch.index["threshold"])
                 bootstrap = len(arch.entries) < K
-                accept = dist_base > BASELINE_EPS and (
-                    (bootstrap and dist_base > MIN_DISTANCE)
-                    or nov > thr
-                    or (nov > MIN_DISTANCE and rng.random() < INJECT_P)
+                # Every phase demands the floor distance from what is already
+                # kept (with nothing kept, that is the baseline). Bootstrap
+                # only waives the adaptive threshold; without the floor it
+                # let near-duplicates of the first entries in.
+                accept = (
+                    dist_base > spec["baseline_eps"]
+                    and nov > spec["min_distance"]
+                    and (bootstrap or nov > thr or rng.random() < INJECT_P)
                 )
                 if accept and nov <= thr and len(arch.entries) >= K:
                     source = "inject"
@@ -599,12 +675,12 @@ class Explorer:
                         bends=stack, kind="discovery",
                         extra={"discovery_id": did, "novelty": round(nov, 4),
                                "seeds": [FIRST_SEED + i for i in range(SEEDS)],
-                               "source": source},
+                               "source": source, "metric": metric},
                     )
                     entry = {
                         "id": did, "seed": FIRST_SEED, "bends": stack,
                         "novelty": round(nov, 4), "created_at": time.time(),
-                        "source": source, "starred": False,
+                        "source": source, "starred": False, "metric": metric,
                         "model_path": model_path, "model_name": model_name(model_path),
                     }
                     with self.archive_lock(model_path):
@@ -624,7 +700,7 @@ class Explorer:
                     elif window_accepts == 0:
                         thr *= 0.8
                     window_tries = window_accepts = 0
-                thr = max(THRESHOLD_MIN, min(THRESHOLD_MAX, thr))
+                thr = max(spec["threshold"][0], min(spec["threshold"][1], thr))
                 arch.index["threshold"] = round(thr, 4)
                 since_save += 1
                 if since_save >= 20:
@@ -641,7 +717,7 @@ class Explorer:
         finally:
             try:
                 with self.archive_lock(model_path):
-                    self._current_archive(model_path).save()
+                    self._current_archive(model_path, metric).save()
             except Exception:  # noqa: BLE001
                 pass
             self._set(running=False, yielding_to=None)
