@@ -136,6 +136,10 @@ class Archive:
                 self.index.update(loaded)
             except Exception as e:  # noqa: BLE001
                 log.warning("could not read %s: %s", self.dir / "index.json", e)
+            # An entry without its picture is no use to anyone; drop it here
+            # rather than serve a broken card.
+            self.index["entries"] = [e for e in self.index["entries"]
+                                     if (self.dir / f"{e['id']}.png").exists()]
         self.index["metric"] = self.metric
 
     @classmethod
@@ -276,6 +280,87 @@ def delete_discovery(did: str, model_path: str | None = None) -> bool:
         a.remove(did)
         a.save()
     return True
+
+
+def clear_discoveries(model_path: str | None = None) -> int:
+    """Drop every discovery (of one model, or all), starred ones included.
+
+    Saved presets are untouched: a star also wrote a Library entry, and that
+    is the user's. The live archive keeps its baseline and starts its counts
+    over; archives the worker does not hold are removed from disk entirely.
+    """
+    import shutil
+
+    removed = 0
+    for a in _archives(model_path):
+        with explorer.archive_lock(a.model_path):
+            removed += len(a.entries)
+            if explorer.live_archive(a.model_path, a.metric) is a:
+                for e in list(a.entries):
+                    a.remove(e["id"])
+                a.index.update({"tried": 0, "accepted": 0,
+                                "threshold": METRICS[a.metric]["threshold0"]})
+                a.save()
+            elif a.dir and a.dir.is_dir():
+                shutil.rmtree(a.dir, ignore_errors=True)
+    return removed
+
+
+def similar_discoveries(did: str, model_path: str | None = None, limit: int = 24) -> dict | None:
+    """The archive-mates of one discovery, nearest first, each with its distance."""
+    a = _archive_holding(did, model_path)
+    if a is None:
+        return None
+    with explorer.archive_lock(a.model_path):
+        anchor = a.find(did)
+        vec = np.asarray(anchor["embedding"], dtype=np.float32)
+        m = a.matrix()
+        d = 1.0 - m @ vec
+        pub = a.public_entries()
+    ranked = sorted(zip(d.tolist(), pub), key=lambda t: t[0])
+    out = []
+    for dist, e in ranked:
+        if e["id"] == did:
+            continue
+        out.append({**e, "distance": round(float(dist), 4)})
+        if len(out) >= limit:
+            break
+    anchor_pub = next(e for e in pub if e["id"] == did)
+    return {"anchor": anchor_pub, "entries": out}
+
+
+def discovery_map(metric: str = DEFAULT_METRIC, model_path: str | None = None) -> dict:
+    """A 2-D layout of every discovery under one metric: PCA of the embeddings.
+
+    Embeddings from one metric are comparable across models, so with no
+    ``model_path`` the map shows where different models' discoveries sit
+    relative to each other. Coordinates are scaled to 0..1 with a margin.
+    """
+    entries, rows = [], []
+    for a in _archives(model_path):
+        if a.metric != metric:
+            continue
+        with explorer.archive_lock(a.model_path):
+            pub = a.public_entries()
+            rows.extend(e["embedding"] for e in a.entries)
+        entries.extend(pub)
+    n = len(rows)
+    if n == 0:
+        return {"metric": metric, "entries": []}
+    if n < 3:
+        pts = np.linspace(0.2, 0.8, n).reshape(-1, 1)
+        xy = np.hstack([pts, np.full((n, 1), 0.5)])
+    else:
+        m = np.asarray(rows, dtype=np.float32)
+        m = m - m.mean(axis=0, keepdims=True)
+        _, _, vt = np.linalg.svd(m, full_matrices=False)
+        xy = m @ vt[:2].T
+        lo, hi = xy.min(axis=0), xy.max(axis=0)
+        span = np.where(hi - lo > 1e-6, hi - lo, 1.0)
+        xy = 0.06 + 0.88 * (xy - lo) / span
+    for e, (x, y) in zip(entries, xy.tolist()):
+        e["x"], e["y"] = round(float(x), 4), round(float(y), 4)
+    return {"metric": metric, "entries": entries}
 
 
 def star_discovery(did: str, model_path: str | None = None, starred: bool = True) -> dict | None:

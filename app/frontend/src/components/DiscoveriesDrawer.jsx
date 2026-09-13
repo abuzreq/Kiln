@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { api, thumbUrl } from "../api.js";
 import { useApp } from "../state.jsx";
-import { Seg, Tooltip } from "./ui.jsx";
+import { ConfirmModal, Seg, Tooltip } from "./ui.jsx";
 import { bendPresetSummary } from "../bendSynopsis.js";
+import DiscoveriesModal from "./DiscoveriesModal.jsx";
 
 // A drawer along the bottom of the app for what the novelty explorer found.
 // The strip keeps scrolling while the explorer runs, and new entries join it
@@ -53,6 +54,8 @@ export default function DiscoveriesDrawer() {
   // null = follow the explorer (move while it runs); true / false = the user said so
   const [manual, setManual] = useState(null);
   const [fresh, setFresh] = useState(() => new Set());
+  const [explore, setExplore] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
   const sinceRef = useRef(0);
   const viewRef = useRef(null);
   const trackRef = useRef(null);
@@ -73,6 +76,25 @@ export default function DiscoveriesDrawer() {
   useEffect(() => {
     try { localStorage.setItem("kiln.discoveries.metric", metric); } catch { /* ignore */ }
   }, [metric]);
+
+  const refetch = useCallback(() => {
+    const q = new URLSearchParams({ sort, limit: 200 });
+    if (scope === "current" && modelPath) q.set("model_path", modelPath);
+    return api.get(`/craft/discoveries?${q}`).then((d) => {
+      setEntries(orient(d.entries || [], sort));
+      sinceRef.current = d.now || sinceRef.current;
+    }).catch(() => {});
+  }, [scope, sort, modelPath]);
+
+  const clearAll = async () => {
+    setConfirmClear(false);
+    try {
+      const r = await api.del("/craft/discoveries");
+      setEntries([]);
+      offRef.current = 0;
+      toast(`Cleared ${r.removed} discover${r.removed === 1 ? "y" : "ies"}. Saved presets are still in the Library.`, "success");
+    } catch (err) { toast(err.message, "error"); }
+  };
 
   const query = useCallback((extra) => {
     const q = new URLSearchParams(extra);
@@ -271,6 +293,12 @@ export default function DiscoveriesDrawer() {
                 {moving ? "⏸" : "▶"}
               </button>
             </Tooltip>
+            <Tooltip text="Filter, map by similarity, and walk between neighbours">
+              <button type="button" className="btn sm" onClick={() => setExplore(true)}>Explore…</button>
+            </Tooltip>
+            <Tooltip text="Delete every discovery, starred ones included. Presets you saved stay in the Library">
+              <button type="button" className="btn ghost sm" onClick={() => setConfirmClear(true)} disabled={!entries.length} aria-label="Clear all discoveries">🗑</button>
+            </Tooltip>
           </span>
         )}
         <span onClick={(e) => e.stopPropagation()}>
@@ -319,6 +347,23 @@ export default function DiscoveriesDrawer() {
             </div>
           )}
         </div>
+      )}
+      {explore && (
+        <DiscoveriesModal
+          ops={ops || []}
+          actions={{ openInBend, star, remove }}
+          onClose={() => { setExplore(false); refetch(); }}
+        />
+      )}
+      {confirmClear && (
+        <ConfirmModal
+          title="Clear all discoveries?"
+          body={`This deletes all ${entries.length} discoveries across every model and metric, starred ones included. Presets you saved from them stay in the Library. The explorer keeps running if it is on.`}
+          confirmLabel="Delete everything"
+          danger
+          onCancel={() => setConfirmClear(false)}
+          onConfirm={clearAll}
+        />
       )}
     </div>
   );

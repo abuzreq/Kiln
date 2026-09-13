@@ -358,3 +358,36 @@ def star_discovery(did):
     if entry is None:
         raise NotFoundError(f"discovery {did} not found")
     return ok(entry)
+
+
+@bp.delete("/discoveries")
+def clear_discoveries():
+    """Everything in Discoveries, or one model's, starred entries included."""
+    from app.core.craft import explore
+
+    removed = explore.clear_discoveries(request.args.get("model_path") or None)
+    return ok({"removed": removed})
+
+
+@bp.get("/discoveries/map")
+def discovery_map():
+    from app.core.craft import explore
+
+    metric = request.args.get("metric") or explore.DEFAULT_METRIC
+    if metric not in explore.METRICS:
+        return err(f"unknown novelty metric: {metric}", 400)
+    return ok(explore.discovery_map(metric, request.args.get("model_path") or None))
+
+
+@bp.get("/discoveries/<did>/similar")
+def similar_discoveries(did):
+    from app.core.craft import explore
+
+    try:
+        limit = max(1, min(100, int(request.args.get("limit") or 24)))
+    except ValueError:
+        limit = 24
+    out = explore.similar_discoveries(did, request.args.get("model_path") or None, limit)
+    if out is None:
+        raise NotFoundError(f"discovery {did} not found")
+    return ok(out)
