@@ -2,7 +2,12 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api, pollJob } from "../api.js";
 import { useApp } from "../state.jsx";
 import { usePlay } from "../screens/playContext.jsx";
-import { Slider, Select, Num, Disclose, TipLabel } from "./ui.jsx";
+import { Slider, Select, Num, Disclose, TipLabel, Tooltip } from "./ui.jsx";
+import {
+  BrushIcon, WandIcon, ShapeIcon, ContrastIcon, MoveIcon, PaintIcon, EraseIcon,
+  RectIcon, EllipseIcon, PolygonIcon, GenerateIcon, UndoIcon, InvertIcon, ClearIcon,
+  NewMaskIcon, AddIcon,
+} from "./icons.jsx";
 import {
   buildSamplePayload, buildInpaintPayload, changeToParams, effectiveSteps, skippedSteps,
   fillSizeFor, solverCanResample, LIVE_PARAM_KEYS,
@@ -54,7 +59,7 @@ export default function CreatePanel() {
     sampleParams, openDocument,
     brushSize, setBrushSize, brushHard, setBrushHard, eraser, setEraser,
     maskTool, setMaskTool, wandTolerance, setWandTolerance,
-    shapeKind, setShapeKind, genShape, setGenShape, polygonRef, polyCount, addStroke,
+    shapeKind, setShapeKind, genShape, setGenShape, polygonRef, polyCount, addStroke, addMaskWithStroke,
     getMaskDataUrl, applyContrastMask, frameCard, activeLayer,
     activeMask, maskPixels, hasMask, invertMask, clearMask, setMaskParam, nudgeMask,
     undo, canUndo, redo, canRedo, tab, setLivePreview,
@@ -254,17 +259,21 @@ export default function CreatePanel() {
 
   // The split reads the stack, not the screen: with post-process on the two
   // differ, and the fill this selects for reads the stack.
-  const applySplit = async (side = maskSide) => {
+  const applySplit = async (side = maskSide, target = "active") => {
     if (!frame) { toast("Put an image on the canvas first", "error"); return; }
     if (!splitPreview) { toast("Calculate contrast regions first", "error"); return; }
     setSplitBusy(true);
     try {
-      const ok = await applyContrastMask(frame, { ...splitOpts, region: regionForSide(side) });
+      const def = SPLIT_SIDES.find((x) => x.id === side);
+      const label = splitMethod === "luminance" ? def?.luminance : def?.contrast;
+      const ok = await applyContrastMask(
+        frame, { ...splitOpts, region: regionForSide(side) }, { target, name: label || "Contrast" },
+      );
       if (ok) {
         setMaskSide(side);
-        const def = SPLIT_SIDES.find((x) => x.id === side);
-        const label = splitMethod === "luminance" ? def?.luminance : def?.contrast;
-        toast(`Selected the ${(label || side).toLowerCase()} side`, "success");
+        toast(target === "new"
+          ? `Made a mask of the ${(label || side).toLowerCase()} side`
+          : `Selected the ${(label || side).toLowerCase()} side`, "success");
       } else {
         toast("Could not build the selection", "error");
       }
@@ -689,66 +698,63 @@ export default function CreatePanel() {
             </TipLabel>
           </span>
           <div className="row center gap-2">
-            <button
-              type="button"
-              className="btn ghost sm"
-              onClick={undo}
-              disabled={!canUndo}
-              title="Step back one edit (Ctrl+Z)"
-            >
-              Undo
-            </button>
-            <button
-              type="button"
-              className="btn ghost sm"
-              onClick={() => invertMask(activeMask?.id)}
-              title="Swap masked for unmasked (Ctrl+Shift+I)"
-            >
-              Invert
-            </button>
-            <button
-              type="button"
-              className="btn ghost sm"
-              onClick={() => activeMask && clearMask(activeMask.id)}
-              disabled={!activeMask?.strokes.length}
-              title="Empty the mask, keeping its row and settings (Ctrl+D)"
-            >
-              Clear
-            </button>
+            <Tooltip text="Step back one edit (Ctrl+Z)">
+              <button type="button" className="btn ghost sm icon" onClick={undo} disabled={!canUndo} aria-label="Undo">
+                <UndoIcon />
+              </button>
+            </Tooltip>
+            <Tooltip text="Swap masked for unmasked (Ctrl+Shift+I)">
+              <button type="button" className="btn ghost sm icon" onClick={() => invertMask(activeMask?.id)} aria-label="Invert">
+                <InvertIcon />
+              </button>
+            </Tooltip>
+            <Tooltip text="Empty the mask, keeping its row and settings (Ctrl+D)">
+              <button type="button" className="btn ghost sm icon" onClick={() => activeMask && clearMask(activeMask.id)} disabled={!activeMask?.strokes.length} aria-label="Clear">
+                <ClearIcon />
+              </button>
+            </Tooltip>
           </div>
         </div>
 
-        <div className="section-title">Tool</div>
-        <div className="row gap-2 mb-2 wrap center">
-          <div className="seg" role="group" aria-label="Mask tool">
-            <button type="button" className={maskTool === "brush" ? "on" : ""} onClick={() => setMaskTool("brush")}>Brush</button>
-            <button type="button" className={maskTool === "wand" ? "on" : ""} onClick={() => setMaskTool("wand")}>Wand</button>
-            <button type="button" className={maskTool === "shape" ? "on" : ""} onClick={() => setMaskTool("shape")} title="Rectangles, ellipses, polygons, or generated shapes">Shape</button>
-            <button type="button" className={maskTool === "move" ? "on" : ""} onClick={() => setMaskTool("move")}>Move</button>
-          </div>
-          {maskTool === "shape" && (
-            <div className="seg" role="group" aria-label="Shape kind">
-              <button type="button" className={shapeKind === "rect" ? "on" : ""} onClick={() => setShapeKind("rect")} title="Drag a rectangle; Shift for a square">Rectangle</button>
-              <button type="button" className={shapeKind === "ellipse" ? "on" : ""} onClick={() => setShapeKind("ellipse")} title="Drag an ellipse; Shift for a circle">Ellipse</button>
-              <button type="button" className={shapeKind === "polygon" ? "on" : ""} onClick={() => setShapeKind("polygon")} title="Click corners on the canvas; Enter or double-click closes">Polygon</button>
-              <button type="button" className={shapeKind === "generate" ? "on" : ""} onClick={() => setShapeKind("generate")} title="Blobs, cells, stripes, a split, or scattered shapes, from a seed">Generate</button>
-            </div>
-          )}
-          {maskTool !== "move" && (
+        {/* How the mask gets made: one seg, one tool at a time. What follows
+            it is that tool's own controls, and nothing else. */}
+        <div className="seg seg-tools mb-2" role="group" aria-label="Mask tool">
+          <button type="button" className={maskTool === "brush" ? "on" : ""} onClick={() => setMaskTool("brush")} title="Paint freehand"><BrushIcon /> Brush</button>
+          <button type="button" className={maskTool === "wand" ? "on" : ""} onClick={() => setMaskTool("wand")} title="Click a colour on the canvas to select everything like it nearby"><WandIcon /> Wand</button>
+          <button type="button" className={maskTool === "shape" ? "on" : ""} onClick={() => setMaskTool("shape")} title="Rectangles, ellipses, polygons, or generated shapes"><ShapeIcon /> Shape</button>
+          <button type="button" className={maskTool === "contrast" ? "on" : ""} onClick={() => setMaskTool("contrast")} title="Split the canvas in two by brightness or by local contrast, and take one side"><ContrastIcon /> Contrast</button>
+          <button type="button" className={maskTool === "move" ? "on" : ""} onClick={() => setMaskTool("move")} title="Drag the mask around, or nudge it with the arrow keys"><MoveIcon /> Move</button>
+        </div>
+
+        {(maskTool === "brush" || maskTool === "wand" || maskTool === "shape") && (
+          <div className="row gap-2 mb-2 wrap center">
             <div className="seg" role="group" aria-label="Paint or erase">
-              <button type="button" className={!eraser ? "on" : ""} onClick={() => setEraser(false)}>Paint</button>
-              <button type="button" className={eraser ? "on" : ""} onClick={() => setEraser(true)}>Erase</button>
+              <button type="button" className={!eraser ? "on" : ""} onClick={() => setEraser(false)} title="Add to the mask"><PaintIcon /> Paint</button>
+              <button type="button" className={eraser ? "on" : ""} onClick={() => setEraser(true)} title="Cut out of the mask"><EraseIcon /> Erase</button>
             </div>
-          )}
-          {maskTool === "brush" && (
-            <div className="seg" role="group" aria-label="Brush edge">
-              <button type="button" className={!brushHard ? "on" : ""} onClick={() => setBrushHard(false)}>Soft</button>
-              <button type="button" className={brushHard ? "on" : ""} onClick={() => setBrushHard(true)}>Hard</button>
-            </div>
-          )}
-        </div>
+            {maskTool === "brush" && (
+              <div className="seg" role="group" aria-label="Brush edge">
+                <button type="button" className={!brushHard ? "on" : ""} onClick={() => setBrushHard(false)}>Soft</button>
+                <button type="button" className={brushHard ? "on" : ""} onClick={() => setBrushHard(true)}>Hard</button>
+              </div>
+            )}
+            {maskTool === "shape" && (
+              <div className="seg" role="group" aria-label="Shape kind">
+                <button type="button" className={shapeKind === "rect" ? "on" : ""} onClick={() => setShapeKind("rect")} title="Drag a rectangle; Shift for a square"><RectIcon /> Rectangle</button>
+                <button type="button" className={shapeKind === "ellipse" ? "on" : ""} onClick={() => setShapeKind("ellipse")} title="Drag an ellipse; Shift for a circle"><EllipseIcon /> Ellipse</button>
+                <button type="button" className={shapeKind === "polygon" ? "on" : ""} onClick={() => setShapeKind("polygon")} title="Click corners on the canvas; Enter or double-click closes"><PolygonIcon /> Polygon</button>
+                <button type="button" className={shapeKind === "generate" ? "on" : ""} onClick={() => setShapeKind("generate")} title="Blobs, cells, stripes, a split, or scattered shapes, from a seed"><GenerateIcon /> Generate</button>
+              </div>
+            )}
+          </div>
+        )}
 
-        {maskTool === "wand" ? (
+        {maskTool === "brush" && (
+          <Slider label="Size" value={brushSize} min={8} max={160} step={2} onChange={setBrushSize}
+            tip="Brush diameter in canvas pixels." />
+        )}
+
+        {maskTool === "wand" && (
           <Slider
             label="Tolerance"
             value={wandTolerance}
@@ -758,13 +764,17 @@ export default function CreatePanel() {
             onChange={setWandTolerance}
             tip="How similar a neighboring pixel's color must be to join the mask. Click the canvas to add it."
           />
-        ) : maskTool === "move" ? (
+        )}
+
+        {maskTool === "move" && (
           <p className="hint mb-2">
             <TipLabel tip={`Drag anywhere on the canvas to move ${maskName}, or press the arrow keys: 1 px, or 10 with Shift. With any tool, the label on the mask's box drags it too.`}>
               Drag the mask, or use the arrow keys
             </TipLabel>
           </p>
-        ) : maskTool === "shape" ? (
+        )}
+
+        {maskTool === "shape" && (
           shapeKind === "generate" ? (
             <GenerateShapePanel
               genShape={genShape}
@@ -772,6 +782,7 @@ export default function CreatePanel() {
               canvasSize={canvasSize}
               eraser={eraser}
               addStroke={addStroke}
+              addMaskWithStroke={addMaskWithStroke}
               maskName={maskName}
             />
           ) : (
@@ -786,15 +797,96 @@ export default function CreatePanel() {
               </TipLabel>
             </p>
           )
-        ) : (
-          <Slider label="Size" value={brushSize} min={8} max={160} step={2} onChange={setBrushSize}
-            tip="Brush diameter in canvas pixels." />
         )}
 
-        {/* Change moved up to Generate, where it is one slider instead of two.
-            What is left here is the geometry of the fill, which is a property
-            of the mask and belongs beside the tools that make it. Brush
-            hardness shapes strokes only; it no longer reaches into the run. */}
+        {maskTool === "contrast" && (
+          <div className="contrast-arm">
+            <div className="row gap-2">
+              <div className="grow">
+                <Select label="Split by" value={splitMethod} onChange={setSplitMethod} options={SPLIT_METHODS}
+                  tip="Brightness splits light from dark; local contrast splits busy areas from flat ones." />
+              </div>
+              <div className="grow">
+                {splitMethod === "luminance" ? (
+                  <Slider label="Threshold" value={brightnessThreshold} min={1} max={255} step={1}
+                    onChange={setBrightnessThreshold}
+                    tip="Brightness level (1–255) that separates the two sides." />
+                ) : (
+                  <Slider label="Threshold" value={contrastThreshold} min={-40} max={40} step={1}
+                    onChange={setContrastThreshold}
+                    tip="Nudge the auto-detected local-contrast split." />
+                )}
+              </div>
+            </div>
+            <div className="row gap-2">
+              <div className="grow">
+                <Slider label="Edge soften" value={splitSoften} min={0} max={8} step={1} onChange={setSplitSoften}
+                  tip="Softens the edge of the generated region mask." />
+              </div>
+              <div className="grow">
+                <label className="row center gap-2 mb-2 mt-2">
+                  <input type="checkbox" checked={smoothOn} onChange={(e) => setSmoothOn(e.target.checked)} />
+                  <span className="sub">Blur first (fewer speckles)</span>
+                </label>
+                {smoothOn && (
+                  <Slider label="Blur radius" value={smoothRadius} min={1} max={6} step={1} onChange={setSmoothRadius}
+                    tip="Blur the canvas before calculating the split, to reduce speckles." />
+                )}
+              </div>
+            </div>
+            <div className="row gap-2 mb-2 center">
+              <button
+                type="button"
+                className="btn sm"
+                onClick={calculateSplit}
+                // splitPreview is cleared by the effect above whenever the canvas or
+                // any split setting changes, so "we have a preview" is exactly "and
+                // nothing has moved since". No second piece of state to keep in sync.
+                disabled={!frame || splitBusy || !!splitPreview}
+              >
+                {splitBusy ? "Calculating…" : splitPreview ? "Up to date" : "Calculate"}
+              </button>
+              {splitPreview && (
+                <span className="sub">Split at {splitPreview.cut}{splitMethod === "luminance" ? " brightness" : " contrast"}</span>
+              )}
+              {!frame && <span className="sub">Put an image on the canvas first</span>}
+            </div>
+            <div className="contrast-split-previews">
+              {SPLIT_SIDES.map((side) => (
+                <button
+                  key={side.id}
+                  type="button"
+                  className={`contrast-split-tile ${maskSide === side.id ? "on" : ""}`}
+                  onClick={() => setMaskSide(side.id)}
+                  disabled={!splitPreview}
+                >
+                  {splitPreview?.[side.id]
+                    ? <img src={splitPreview[side.id]} alt={`${side.label} preview`} />
+                    : <span className="sub">{side.label}</span>}
+                  <span className="contrast-split-label">
+                    {splitMethod === "luminance" ? side.luminance : side.contrast}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <AddToMaskButtons
+              thing="side"
+              maskName={maskName}
+              eraser={false}
+              busy={splitBusy && !!splitPreview}
+              disabled={!splitPreview || splitBusy}
+              onAdd={() => applySplit(maskSide, "active")}
+              onNew={() => applySplit(maskSide, "new")}
+              addTip="Replaces any earlier contrast side in this mask; brush and shape strokes stay."
+            />
+          </div>
+        )}
+
+        <div className="section-title mt-2">
+          <TipLabel tip="How the fill meets what is around it. Both settings belong to the mask and are remembered with it.">
+            Fill edge
+          </TipLabel>
+        </div>
         <Slider
           label="Feather"
           value={feather}
@@ -827,87 +919,6 @@ export default function CreatePanel() {
             Switch the sampler to DDIM or DPM-Solver++ in Sample settings to enable this.
           </p>
         )}
-
-        <div className="section-title mt-2">
-          <TipLabel tip="Split the canvas in two by brightness or by local contrast: set the split, press Calculate, then apply one side to the mask. Replaces any earlier split in that mask.">
-            Select by contrast
-          </TipLabel>
-        </div>
-        <div className="row gap-2">
-          <div className="grow">
-            <Select label="Split by" value={splitMethod} onChange={setSplitMethod} options={SPLIT_METHODS}
-              tip="Brightness splits light from dark; local contrast splits busy areas from flat ones." />
-          </div>
-          <div className="grow">
-            {splitMethod === "luminance" ? (
-              <Slider label="Threshold" value={brightnessThreshold} min={1} max={255} step={1}
-                onChange={setBrightnessThreshold}
-                tip="Brightness level (1–255) that separates the two sides." />
-            ) : (
-              <Slider label="Threshold" value={contrastThreshold} min={-40} max={40} step={1}
-                onChange={setContrastThreshold}
-                tip="Nudge the auto-detected local-contrast split." />
-            )}
-          </div>
-        </div>
-        <div className="row gap-2">
-          <div className="grow">
-            <Slider label="Edge soften" value={splitSoften} min={0} max={8} step={1} onChange={setSplitSoften}
-              tip="Softens the edge of the generated region mask." />
-          </div>
-          <div className="grow">
-            <label className="row center gap-2 mb-2 mt-2">
-              <input type="checkbox" checked={smoothOn} onChange={(e) => setSmoothOn(e.target.checked)} />
-              <span className="sub">Blur first (fewer speckles)</span>
-            </label>
-            {smoothOn && (
-              <Slider label="Blur radius" value={smoothRadius} min={1} max={6} step={1} onChange={setSmoothRadius}
-                tip="Blur the canvas before calculating the split, to reduce speckles." />
-            )}
-          </div>
-        </div>
-        <div className="row gap-2 mb-2 center">
-          <button
-            type="button"
-            className="btn sm"
-            onClick={calculateSplit}
-            // splitPreview is cleared by the effect above whenever the canvas or
-            // any split setting changes, so "we have a preview" is exactly "and
-            // nothing has moved since". No second piece of state to keep in sync.
-            disabled={!frame || splitBusy || !!splitPreview}
-          >
-            {splitBusy ? "Calculating…" : splitPreview ? "Up to date" : "Calculate"}
-          </button>
-          {splitPreview && (
-            <span className="sub">Split at {splitPreview.cut}{splitMethod === "luminance" ? " brightness" : " contrast"}</span>
-          )}
-        </div>
-        <div className="contrast-split-previews">
-          {SPLIT_SIDES.map((side) => (
-            <button
-              key={side.id}
-              type="button"
-              className={`contrast-split-tile ${maskSide === side.id ? "on" : ""}`}
-              onClick={() => setMaskSide(side.id)}
-              disabled={!splitPreview}
-            >
-              {splitPreview?.[side.id]
-                ? <img src={splitPreview[side.id]} alt={`${side.label} preview`} />
-                : <span className="sub">{side.label}</span>}
-              <span className="contrast-split-label">
-                {splitMethod === "luminance" ? side.luminance : side.contrast}
-              </span>
-            </button>
-          ))}
-        </div>
-        <button
-          type="button"
-          className="btn sm primary mt-2"
-          onClick={() => applySplit(maskSide)}
-          disabled={!splitPreview || splitBusy}
-        >
-          {splitBusy && splitPreview ? "Applying…" : "Apply to mask"}
-        </button>
 
         {!hasMask && (
           <p className="hint mb-0 mt-2">Paint a mask to fill an area.</p>
@@ -1014,7 +1025,7 @@ const randomSeed31 = () => Math.floor(Math.random() * 2 ** 31);
 
 /** The Generate arm of the Shape tool: a kind, its knobs, a seed, a live
  *  preview, and Add to mask. Every Add is one stroke; Shuffle rerolls. */
-function GenerateShapePanel({ genShape, setGenShape, canvasSize, eraser, addStroke, maskName }) {
+function GenerateShapePanel({ genShape, setGenShape, canvasSize, eraser, addStroke, addMaskWithStroke, maskName }) {
   const { toast } = useApp();
   const [preview, setPreview] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -1046,15 +1057,17 @@ function GenerateShapePanel({ genShape, setGenShape, canvasSize, eraser, addStro
     return () => { live = false; clearTimeout(t); };
   }, [genShape.kind, genShape.seed, genShape.coverage, genShape.soften, JSON.stringify(params), w, h]);
 
-  const add = async () => {
+  const add = async (target = "active") => {
     setBusy(true);
     try {
       const d = await api.post("/tools/mask", body(w, h));
       const { cache } = await maskUrlToCache(d.mask);
-      addStroke({
-        ...cachedStroke("generated", cache, eraser ? "subtract" : "add"),
+      const stroke = {
+        ...cachedStroke("generated", cache, eraser && target === "active" ? "subtract" : "add"),
         gen: { kind: genShape.kind, seed: genShape.seed, coverage: genShape.coverage, soften: genShape.soften, params: backendParams() },
-      });
+      };
+      if (target === "new") addMaskWithStroke(stroke, kind.label);
+      else addStroke(stroke);
     } catch (e) { toast(e.message, "error"); }
     setBusy(false);
   };
@@ -1092,10 +1105,38 @@ function GenerateShapePanel({ genShape, setGenShape, canvasSize, eraser, addStro
           {preview ? <img src={preview} alt="" /> : <span className="sub">…</span>}
         </div>
       </div>
-      <button type="button" className="btn sm primary w-full mt-2" onClick={add} disabled={busy}
-        title={eraser ? `Cut this shape out of ${maskName}` : `Add this shape to ${maskName}`}>
-        {busy ? "Adding…" : eraser ? "Cut from mask" : "Add to mask"}
-      </button>
+      <AddToMaskButtons
+        thing="shape"
+        maskName={maskName}
+        eraser={eraser}
+        busy={busy}
+        onAdd={() => add("active")}
+        onNew={() => add("new")}
+      />
+    </div>
+  );
+}
+
+/** The pair every way of producing an area ends in: into the mask being
+ *  painted, or into a mask of its own. Other masks are left as they are --
+ *  a composition is several masks on at once, and the bar already says so. */
+function AddToMaskButtons({ onAdd, onNew, eraser, busy, disabled, maskName, thing, addTip }) {
+  const addText = eraser ? `Cut this ${thing} out of ${maskName}` : `Add this ${thing} to ${maskName}`;
+  return (
+    <div className="add-pair mt-2">
+      <Tooltip text={addTip ? `${addText}. ${addTip}` : addText}>
+        <button type="button" className="btn sm primary" onClick={onAdd} disabled={busy || disabled}>
+          <AddIcon /> {busy ? "Working…" : eraser ? "Cut from mask" : "Add to mask"}
+        </button>
+      </Tooltip>
+      <Tooltip text={eraser
+        ? "Erase cuts out of a mask; there is nothing to cut from a new one"
+        : `Put this ${thing} in a mask of its own, on and selected. Other masks stay as they are.`}
+      >
+        <button type="button" className="btn sm" onClick={onNew} disabled={busy || disabled || eraser}>
+          <NewMaskIcon /> New mask
+        </button>
+      </Tooltip>
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import React from "react";
+import { ShuffleIcon } from "./components/icons.jsx";
 import { Slider, Select, Text, Num, Disclose } from "./components/ui.jsx";
 
 const STORAGE_KEY = "kiln.sampleParams";
@@ -274,20 +275,6 @@ export function cardLabel(card) {
   if (card.params?.seed != null) bits.push(`seed ${card.params.seed}`);
   if (card.bend_preset) bits.push(card.bend_preset);
   return bits.join(" · ");
-}
-
-/** Two crossing arrows — the shuffle glyph, for drawing a new seed. */
-function ShuffleIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <polyline points="16 3 21 3 21 8" />
-      <line x1="4" y1="20" x2="21" y2="3" />
-      <polyline points="21 16 21 21 16 21" />
-      <line x1="15" y1="15" x2="21" y2="21" />
-      <line x1="4" y1="4" x2="9" y2="9" />
-    </svg>
-  );
 }
 
 /** A fresh seed, in the same range the sampler draws from when one is blank.

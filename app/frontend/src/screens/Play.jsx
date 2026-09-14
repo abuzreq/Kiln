@@ -5,6 +5,7 @@ import SweepPanel from "./Sweep.jsx";
 import Merge from "./Merge.jsx";
 import { useApp } from "../state.jsx";
 import { api, downloadPost, mediaUrl, thumbUrl } from "../api.js";
+import { EyeIcon } from "../components/icons.jsx";
 import { Progress, Slider, Tooltip, TipLabel } from "../components/ui.jsx";
 import { PlayCtx, usePlay, fileToDataUrl } from "./playContext.jsx";
 import {
@@ -513,6 +514,21 @@ export default function Play() {
     });
   }, [edit]);
 
+  /** A mask of its own for one stroke: what "New mask" makes from a generated
+   *  shape or a contrast side. Other masks are left as they are: a composition
+   *  is several masks on at once, and the bar and the union fill already say so.
+   *  (useLayerAsMask turns the others off on purpose; that flow re-selects an
+   *  area a fill just covered, and the old mask would double it.) */
+  const addMaskWithStroke = useCallback((stroke, name) => {
+    edit((doc) => {
+      const m = {
+        ...newInpaintMask({ name: uniqueName(doc.inpaintMasks, name || "Inpaint Mask") }),
+        strokes: [stroke],
+      };
+      return { inpaintMasks: [...doc.inpaintMasks, m], selectedId: m.id };
+    });
+  }, [edit]);
+
   const setSampleParam = useCallback((k, v) => {
     setSampleParamsState((s) => {
       const next = { ...s, [k]: v };
@@ -790,7 +806,7 @@ export default function Play() {
    *  Replacing rather than adding is what the two preview tiles imply: picking
    *  the other side should give you the other side, not both sides at once.
    */
-  const applyContrastMask = useCallback(async (imageSrc, options) => {
+  const applyContrastMask = useCallback(async (imageSrc, options, { target = "active", name = "Contrast" } = {}) => {
     const maskCanvas = maskRef.current;
     const hero = heroRef.current;
     const img = hero?.querySelector("img");
@@ -806,6 +822,10 @@ export default function Play() {
 
     const stroke = cachedStroke("split", overlayToCache(overlay, w, h), "add");
     edit((doc) => {
+      if (target === "new") {
+        const m = { ...newInpaintMask({ name: uniqueName(doc.inpaintMasks, name) }), strokes: [stroke] };
+        return { inpaintMasks: [...doc.inpaintMasks, m], selectedId: m.id };
+      }
       let masks = doc.inpaintMasks;
       let id = paintTargetId(doc);
       if (!id) {
@@ -985,7 +1005,7 @@ export default function Play() {
     setEntityEnabled, setMaskVisible, wakeMask, renameEntity, setLayerOpacity,
     deleteEntity, moveEntity, addLayer, duplicateLayer,
     addMask, clearMask, invertMask, setMaskParam, moveMask, nudgeMask,
-    addRasterLayer, useLayerAsMask,
+    addRasterLayer, useLayerAsMask, addMaskWithStroke,
     undo, canUndo, redo, canRedo, setLivePreview,
     // Assets
     assets, addAssetFiles, deleteAsset, placeAsset, openAsset,
@@ -1935,19 +1955,6 @@ function MaskOverlay({ active }) {
 
 /** An eye, open or crossed. Visibility used to be a filled/hollow dot, which
  *  read as a radio button -- as if only one row could be on at a time. */
-function EyeIcon({ off }) {
-  return (
-    <svg
-      width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
-    >
-      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" />
-      <circle cx="12" cy="12" r="3" />
-      {off && <line x1="4" y1="4" x2="20" y2="20" />}
-    </svg>
-  );
-}
-
 /** One row in the Layers panel: one line, and its controls only when selected.
  *
  *  Three independent states, each with its own cue so none reads as another:
