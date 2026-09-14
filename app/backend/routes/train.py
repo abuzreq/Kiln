@@ -70,6 +70,9 @@ def architectures():
         "attn_kinds": list(attn.KINDS),
         "layouts": attn.NAMED_LAYOUTS,
         "default_attn": attn.DEFAULT_SPEC,
+        # The trainer builds every xurdif net with dim=64; the Train screen's
+        # sketch multiplies it out so channel widths read as real numbers.
+        "base_dim": 64,
     })
 
 

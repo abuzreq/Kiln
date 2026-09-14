@@ -4,8 +4,9 @@ import { useApp } from "../state.jsx";
 import { Text, Num, Select, Progress, Empty, Modal, Disclose, ConfirmModal, DeleteBtn, Loading, Seg, Tooltip } from "../components/ui.jsx";
 import { modelSubtitle } from "../components/modelMeta.jsx";
 import {
-  KINDS as ATTN_KINDS, depthOf, kindAt, layoutIdFor, locationsFor, trimToDepth, withKind,
+  KINDS as ATTN_KINDS, depthOf, kindAt, layoutIdFor, trimToDepth, withKind,
 } from "../attnLayout.js";
+import ArchSketch, { levelInfo } from "../components/ArchSketch.jsx";
 import LossChart from "../components/LossChart.jsx";
 import CheckpointGallery from "../components/CheckpointGallery.jsx";
 
@@ -158,7 +159,7 @@ export default function Train() {
   const [archs, setArchs] = useState([]);
   // Named attention layouts and the default spec come from the server, so the
   // list lives in one place (app/core/backends/xurdif/attn.py).
-  const [archInfo, setArchInfo] = useState({ layouts: [], default_attn: "", conf_mtype: "tinyunet_conf_attention" });
+  const [archInfo, setArchInfo] = useState({ layouts: [], default_attn: "", conf_mtype: "tinyunet_conf_attention", base_dim: 64 });
   // "Custom" stays open once chosen even while the pickers happen to spell a
   // named layout, so the panel does not snap shut mid-edit.
   const [customLayout, setCustomLayout] = useState(false);
@@ -337,7 +338,10 @@ export default function Train() {
     });
     api.get("/architectures").then((d) => {
       setArchs(d.architectures);
-      setArchInfo({ layouts: d.layouts || [], default_attn: d.default_attn || "", conf_mtype: d.conf_mtype || "tinyunet_conf_attention" });
+      setArchInfo({
+        layouts: d.layouts || [], default_attn: d.default_attn || "",
+        conf_mtype: d.conf_mtype || "tinyunet_conf_attention", base_dim: d.base_dim || 64,
+      });
       if (d.default_attn) setForm((f) => ({ ...f, attn: f.attn || d.default_attn }));
     });
     api.get("/train/backends").then((d) => setEngines(d.backends || [])).catch(() => {});
@@ -757,6 +761,13 @@ export default function Train() {
                   <>
                     <Select label="Architecture" value={form.mtype} onChange={(v) => set("mtype", v)} options={archs.length ? archs : [form.mtype]}
                       tip={"Which network shape to build. Fixed for the life of a model: you cannot change it later and resume.\n\ntinyunet_conf_attention is the current default and lets you choose where attention goes. tinyunet_with_attention3 is the earlier shape, with one attention layer at the bottleneck; models made before this option are that kind."} />
+                    {/* Multipliers first: they decide how many levels exist, so the
+                        sketch and the per-level pickers below grow as the text is typed. */}
+                    <Text label="Channel multipliers" value={form.mults}
+                      onChange={(v) => setForm((f) => ({ ...f, mults: v, attn: trimToDepth(f.attn, depthOf(v)) }))}
+                      tip={"Width of the network at each resolution, shallowest first, coarsest last. Separate the numbers with commas.\n\n1,2,2,2 — the default: four levels, the image halved four times\n1,2,2,4 — wider at the deepest level, better for fine detail\n1,2,4,4,8 — five levels, needs image sizes that divide by 32\n\nBigger numbers mean more capacity and a slower model. The count of numbers sets how many times the image is halved. Two models can only be merged if these match."} />
+                    <ArchSketch mults={form.mults} imageSize={form.image_size}
+                      attn={isConf ? form.attn : null} baseDim={archInfo.base_dim} />
                     {isConf && (
                       <>
                         <Select label="Attention layout" value={customLayout ? "custom" : layoutId}
@@ -772,25 +783,30 @@ export default function Train() {
                           ]}
                           tip={"Attention lets each spot in the image look at every other spot, which helps overall composition. Here you choose where in the network it sits and what kind it is.\n\nThe bottleneck is the smallest, deepest level. Level -1 is one step above it, -2 the step above that. Full attention above the bottleneck is expensive (it grows with the square of the pixels); linear and window attention are cheap. Fixed for the life of a model."} />
                         {(customLayout || layoutId === "custom") && (
-                          <div className="row gap-2 wrap">
-                            {["mid", ...locationsFor(depthOf(form.mults))].map((loc) => (
-                              <div className="grow" key={loc}>
-                                <Select label={loc === "mid" ? "Bottleneck" : `Level ${loc}`}
-                                  value={kindAt(form.attn, loc)}
-                                  onChange={(v) => setForm((f) => ({ ...f, attn: withKind(f.attn, loc, v) }))}
-                                  options={ATTN_KINDS}
-                                  tip={loc === "mid"
-                                    ? "The deepest level, where the image is smallest. Full attention is cheap here and is what every earlier model had."
-                                    : `${-parseInt(loc, 10)} step${loc === "-1" ? "" : "s"} above the bottleneck. full sees the whole image at this size (costly); linear approximates that cheaply; window looks only within 8x8 patches; none skips attention at this level.`} />
+                          <div className="attn-levels">
+                            {/* Shallowest first, bottleneck last: the same order as the
+                                multipliers string and the sketch's encoder, left to right. */}
+                            {levelInfo(form.mults, form.image_size, archInfo.base_dim).map((lv) => (
+                              <div className="attn-level" key={lv.loc}>
+                                <Tooltip text={lv.loc === "mid"
+                                  ? "The deepest level, where the image is smallest. Full attention is cheap here and is what every earlier model had."
+                                  : `${-parseInt(lv.loc, 10)} step${lv.loc === "-1" ? "" : "s"} above the bottleneck. full sees the whole image at this size (costly); linear approximates that cheaply; window looks only within 8x8 patches; none skips attention at this level.`}>
+                                  <span className="lbl">
+                                    <b>{lv.label}</b>
+                                    {lv.res != null ? ` · ${Number.isInteger(lv.res) ? lv.res : lv.res.toFixed(1)}px` : ""}
+                                    {` · ${lv.ch} ch`}
+                                  </span>
+                                </Tooltip>
+                                <Select ariaLabel={`Attention at ${lv.label}`}
+                                  value={kindAt(form.attn, lv.loc)}
+                                  onChange={(v) => setForm((f) => ({ ...f, attn: withKind(f.attn, lv.loc, v) }))}
+                                  options={ATTN_KINDS} />
                               </div>
                             ))}
                           </div>
                         )}
                       </>
                     )}
-                    <Text label="Channel multipliers" value={form.mults}
-                      onChange={(v) => setForm((f) => ({ ...f, mults: v, attn: trimToDepth(f.attn, depthOf(v)) }))}
-                      tip={"Width of the network at each resolution, coarsest last. \"1 2 2 2\" is the default.\n\nBigger numbers mean more capacity and a larger, slower model; the count of numbers sets how many times the image is halved, so it also decides the smallest resolution the model works at. Two models can only be merged if these match."} />
                     <div className="row gap-2">
                       <div className="grow"><Select label="Prediction" value={form.pred} onChange={(v) => set("pred", v)} options={["x0", "eps"]}
                         tip={"What the network is asked to output at each step.\n\nx0 predicts the finished image directly and tends to settle faster on small datasets. eps predicts the noise to remove, the classic formulation. Fixed for the life of a model."} /></div>

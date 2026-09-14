@@ -1691,3 +1691,15 @@ a { color: var(--accent); }
 .btn.danger:not(.ghost):hover { background: rgba(248, 113, 113, 0.22); }
 .field:has(> input:disabled), .field:has(> select:disabled) { opacity: 0.45; }
 .field:has(> input:disabled) input, .field:has(> select:disabled) select { opacity: 1; }
+
+/* Train ▸ Advanced: the architecture sketch under the multipliers field, and
+   the per-level attention pickers as a readable stacked list. */
+.arch-sketch { margin: 2px 0 var(--s-2); }
+.arch-sketch svg { display: block; }
+.arch-sketch text { font-size: 10px; }
+.arch-sketch-empty { margin: 0 0 var(--s-2); }
+.attn-levels { display: flex; flex-direction: column; gap: 6px; margin-bottom: var(--s-2); }
+.attn-level { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.attn-level > .lbl { min-width: 190px; font-size: var(--fs-sm); color: var(--text-dim); }
+.attn-level > .lbl b { color: var(--text); font-weight: 600; }
+.attn-level label.field { flex: 1; min-width: 140px; margin: 0; }
