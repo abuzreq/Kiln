@@ -75,6 +75,11 @@ def check_compat(path_a: str, path_b: str) -> dict:
         reasons.append(f"architectures differ ({ma.mtype} vs {mb.mtype})")
     if list(ma.mults) != list(mb.mults):
         reasons.append(f"channel multipliers differ ({ma.mults} vs {mb.mults})")
+    # For the configurable-attention model the layout decides which tensors
+    # exist, so it is part of the shape. Both descriptors carry it canonical.
+    if ma.mtype == mb.mtype and ma.attn != mb.attn:
+        reasons.append(f"attention layouts differ ({ma.attn or 'unrecorded'} vs "
+                       f"{mb.attn or 'unrecorded'})")
     return {
         "compatible": len(reasons) == 0,
         "reasons": reasons,

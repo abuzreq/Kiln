@@ -49,7 +49,38 @@ _t.save(ck, d)
 bad = c.post("/api/craft/merge/check", json={"model_a": a, "model_b": d}).get_json()["data"]
 print("guardrail incompatible:", not bad["compatible"], bad["reasons"])
 
-for n in ("mergeA", "mergeB", "mergeC", "merged_linear", "merged_slerp", "merged_blockwise"):
+# configurable attention: the layout is part of the shape, so two conf models
+# merge only when it matches, and the result carries it
+from app.core.backends.xurdif import attn as attn_spec
+
+
+def make_conf(name, seed, spec):
+    torch.manual_seed(seed)
+    unet = build_unet("tinyunet_conf_attention", [1, 2, 2, 2], attn_config=attn_spec.parse(spec))
+    state = {f"denoise_fn.{k}": v for k, v in unet.state_dict().items()}
+    p = workspace.models / f"{name}.pt"
+    torch.save({"step": 0, "model": state, "ema": state, "mults": [1, 2, 2, 2],
+                "mtype": "tinyunet_conf_attention", "pred": "x0",
+                "attn": spec, "attn_config": attn_spec.parse(spec)}, p)
+    return str(p)
+
+
+ca = make_conf("confA", 4, "-1:linear,mid:full")
+cb = make_conf("confB", 5, "mid:full,-1:linear")     # same layout, spelled differently
+cc = make_conf("confC", 6, "mid:full")
+same = c.post("/api/craft/merge/check", json={"model_a": ca, "model_b": cb}).get_json()["data"]
+assert same["compatible"], same["reasons"]
+diff = c.post("/api/craft/merge/check", json={"model_a": ca, "model_b": cc}).get_json()["data"]
+assert not diff["compatible"] and any("attention layouts differ" in r for r in diff["reasons"]), diff["reasons"]
+r = c.post("/api/craft/merge", json={"model_a": ca, "model_b": cb, "out_name": "merged_conf",
+                                     "method": "linear", "alpha": 0.5}).get_json()
+assert r["ok"], r
+merged = _t.load(r["data"]["path"], map_location="cpu", weights_only=False)
+assert merged["attn"] == "-1:linear,mid:full" and merged["attn_config"] == {-1: "linear", "mid": "full"}, merged.keys()
+print("conf guardrail:", diff["reasons"], "| merged conf carries", merged["attn"])
+
+for n in ("mergeA", "mergeB", "mergeC", "merged_linear", "merged_slerp", "merged_blockwise",
+          "confA", "confB", "confC", "merged_conf"):
     (workspace.models / f"{n}.pt").unlink(missing_ok=True)
 (workspace.recipes / "merged_blockwise.json").unlink(missing_ok=True)
 print("OK")

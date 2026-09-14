@@ -44,8 +44,8 @@ STARTERS: list[dict] = [
         "notes": "Amplifies the middle of the network, where the model decides what the "
                  "picture is about rather than what it looks like. Composition shifts "
                  "more than texture does. Targets the mid block as well as attention on "
-                 "purpose: these compact models carry one small attention module, and "
-                 "scaling it alone barely registers (measured: 1.8 vs 20 for both).",
+                 "purpose: these compact models carry only a few small attention modules, "
+                 "and scaling them alone barely registers (measured: 1.8 vs 20 for both).",
         "bends": [{
             "op": "multiply", "params": {"value": 2.0},
             "targets": ["attention", "mid"], "step_start": 0.0, "step_end": 1.0, "active": True,

@@ -53,6 +53,11 @@ def wait(job, timeout=900):
     t0 = time.time()
     while job.status == "running" and time.time() - t0 < timeout:
         time.sleep(0.5)
+    # The status flips before the worker's last act, patching run.json; join
+    # the thread so the file is settled before anything reads it.
+    thread = getattr(job, "thread", None)
+    if thread is not None:
+        thread.join(timeout=30)
     return job
 
 
@@ -113,30 +118,55 @@ def check_loss_defaults():
     print("  loss defaults: xurdif edge on, diffusers MSE")
 
 
-def check_xurdif():
+def check_xurdif(run_name: str = "xur", **over):
+    """One short xurdif run. With no overrides this is what a fresh Train
+    screen launches: the conf architecture on its default attention layout."""
     if not torch.cuda.is_available():
         print("  skipped: the xurdif trainer is CUDA-only and no GPU is visible")
         return
     backend = backends.get("xurdif")
-    out_dir = WORKSPACE / "runs" / "xur"
+    out_dir = WORKSPACE / "runs" / run_name
     cfg = backend.training_config({
         # xurdif's own validators floor these at 100 / 10.
         "image_size": 64, "batch_size": 2, "train_steps": 100, "save_every": 50,
         "accum": 1, "diffusion_steps": 1000, "nsamples": 1, "sample_seed": 42,
-        "model_name": "xur", "mults": [1, 2, 2, 2],
+        "model_name": run_name, "mults": [1, 2, 2, 2], **over,
     }, DATASET, out_dir)
     assert cfg.image_size == 64 and cfg.save_every == 50 and cfg.mults == [1, 2, 2, 2]
     job = wait(backend.start_training(cfg), timeout=900)
     if job.status != "done":
         print("  log tail:", (job.detail.get("log") or [])[-8:])
-    ckpts = check_run_shape(out_dir, job, "xurdif scratch", expect_dirs=False)
+    ckpts = check_run_shape(out_dir, job, f"xurdif scratch ({cfg.mtype})", expect_dirs=False)
 
     # the produced checkpoint must be a first-class model everywhere else
     b, ref = backends.resolve(ckpts[-1]["path"])
     assert b.name == "xurdif"
     meta = b.describe(ref)
-    assert meta.mtype == "tinyunet_with_attention3", meta.mtype
-    print("  trained checkpoint loads back as:", meta.mtype, meta.mults)
+    assert meta.mtype == cfg.mtype, (meta.mtype, cfg.mtype)
+    assert meta.attn == cfg.attn, (meta.attn, cfg.attn)
+    meta_json = json.loads((out_dir / "run.json").read_text(encoding="utf-8"))
+    assert meta_json.get("attn") == cfg.attn, meta_json.get("attn")
+    if cfg.attn:
+        # the patched Trainer.save wrote both keys, and the network rebuilds
+        # from them with the attention modules where the layout says
+        data = torch.load(ckpts[-1]["path"], map_location="cpu", weights_only=False)
+        assert data.get("attn") == cfg.attn and isinstance(data.get("attn_config"), dict), data.keys()
+        net, _ = b.load(ref, device="cpu")
+        assert type(net.down_attns[-1]).__name__ == "LinearAttention2d", type(net.down_attns[-1])
+        ids = [n["id"] for n in b.layer_graph(net, image_size=64)["nodes"]]
+        assert "down_attns.3" in ids and "mid_attn" in ids, ids
+    print("  trained checkpoint loads back as:", meta.mtype, meta.mults, meta.attn)
+
+    # and resuming the run keeps the same layout without being told it again
+    from app.core.engine.trainer import config_from_run
+    rcfg = config_from_run(out_dir, 200)
+    assert rcfg.mtype == cfg.mtype and rcfg.attn == cfg.attn, (rcfg.mtype, rcfg.attn)
+    rjob = wait(backend.start_training(rcfg), timeout=900)
+    if rjob.status != "done":
+        print("  log tail:", (rjob.detail.get("log") or [])[-8:])
+    assert rjob.status == "done", f"xurdif resume: {rjob.message}"
+    assert len(list_checkpoints(out_dir, 50)) >= 3, "resume added no snapshots"
+    print("  resumed to step 200 on the same layout")
 
 
 def check_diffusers_scratch():
@@ -244,6 +274,8 @@ def main():
         print("training runs:")
         if not diffusers_only:
             check_xurdif()
+            # the class every earlier model was trained with still trains
+            check_xurdif("xur-old", mtype="tinyunet_with_attention3")
         base = check_diffusers_scratch()
         check_tinyunet("mse")
         check_tinyunet("xurdif")

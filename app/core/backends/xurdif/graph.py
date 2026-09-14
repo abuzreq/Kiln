@@ -14,7 +14,9 @@ _DENOISE_PREFIX = "denoise_fn."
 
 
 def _stage_of(name: str) -> str:
-    if name.startswith("downs") or name == "init_conv":
+    # ``down_attns`` does not start with ``downs``: match it on its own or the
+    # conf model's encoder attention silently lands in "other".
+    if name.startswith(("downs", "down_attns")) or name == "init_conv":
         return "encoder"
     if name.startswith("mid"):
         return "mid"
@@ -31,7 +33,7 @@ def stage_of_key(key: str) -> str:
     nothing ever matches and every tensor silently falls through to 'other'.
     """
     name = key[len(_DENOISE_PREFIX):] if key.startswith(_DENOISE_PREFIX) else key
-    if name.startswith("init_conv") or name.startswith("downs"):
+    if name.startswith(("init_conv", "downs", "down_attns")):
         return "encoder"
     if name.startswith("mid"):
         return "mid"
@@ -44,8 +46,16 @@ def _ordered_points(model: nn.Module) -> list[str]:
     """Return module names in forward-pass order (the interesting bend points)."""
     order = ["init_conv"]
     if hasattr(model, "downs"):
+        down_attns = getattr(model, "down_attns", None)
         for i in range(len(model.downs)):
-            order += [f"downs.{i}.0", f"downs.{i}.1"]
+            order.append(f"downs.{i}.0")
+            # The conf model runs attention after the level's block and before
+            # its downsample. An Identity there is a level without attention:
+            # nothing to bend, so it is not a point.
+            if down_attns is not None and i < len(down_attns) \
+                    and not isinstance(down_attns[i], nn.Identity):
+                order.append(f"down_attns.{i}")
+            order.append(f"downs.{i}.1")
     for m in ("mid_block1", "mid_attn", "mid_block2"):
         if hasattr(model, m):
             order.append(m)
@@ -63,6 +73,18 @@ _TYPE_LABEL = {
     "ConvTranspose2d": "upsample",
     "ConvBlock": "block",
     "SelfAttention2d": "attention",
+    "FullAttention2d": "attention",
+    "LinearAttention2d": "attention",
+    "WindowAttention2d": "attention",
+}
+
+# Which flavour of attention a class is, for the tooltip. The old model's
+# single kind is "full" in everything but name.
+_ATTN_KIND = {
+    "SelfAttention2d": "full",
+    "FullAttention2d": "full",
+    "LinearAttention2d": "linear",
+    "WindowAttention2d": "window",
 }
 
 _FIXED_LABEL = {
@@ -74,7 +96,7 @@ _FIXED_LABEL = {
 }
 
 # Module class names behind the group chips Craft offers.
-ATTENTION_TYPES = ("SelfAttention2d",)
+ATTENTION_TYPES = tuple(_ATTN_KIND)
 BLOCK_TYPES = ("ConvBlock",)
 
 
@@ -88,6 +110,8 @@ def _label_of(name: str) -> str:
     if name in _FIXED_LABEL:
         return _FIXED_LABEL[name]
     parts = name.split(".")
+    if len(parts) == 2 and parts[0] == "down_attns":
+        return f"enc {parts[1]} · attention"
     if len(parts) == 3 and parts[0] in ("downs", "ups"):
         stage = "enc" if parts[0] == "downs" else "dec"
         # downs.i = [ConvBlock, downsample conv]; ups.i = [upsample conv, ConvBlock]
@@ -143,6 +167,7 @@ def layer_graph(model: nn.Module, image_size: int = 64) -> dict:
             "w": w,
             "down_factor": round(image_size / h, 2) if h else None,
             "bendable": True,
+            "attn_kind": _ATTN_KIND.get(tname),
         })
 
     return {"nodes": nodes, "order": points, "ref_size": image_size}

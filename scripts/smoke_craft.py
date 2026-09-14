@@ -29,6 +29,33 @@ def main():
     print("first nodes:", [(n['id'], n['type'], n['channels'], f"{n['h']}x{n['w']}") for n in graph['nodes'][:4]])
     print(f"op catalog: {len(ops.catalog())} ops")
 
+    # The configurable-attention model adds encoder attention points; they must
+    # sit in the encoder stage and answer to the "attention" group chip.
+    from app.core.backends.xurdif import attn as attn_spec
+    conf_spec = "-2:window,-1:linear,mid:full"
+    conf = build_unet("tinyunet_conf_attention", mults, attn_config=attn_spec.parse(conf_spec))
+    cstate = {f"denoise_fn.{k}": v for k, v in conf.state_dict().items()}
+    cout = ROOT / "workspace_smoke_craft_conf.pt"
+    torch.save({"step": 0, "model": cstate, "ema": cstate, "mults": mults,
+                "mtype": "tinyunet_conf_attention", "pred": "x0",
+                "attn": conf_spec, "attn_config": attn_spec.parse(conf_spec)}, cout)
+    cbundle = manager.load(str(cout), device="cpu")
+    cgraph = introspect(cbundle["model"])
+    by_id = {n["id"]: n for n in cgraph["nodes"]}
+    assert "down_attns.2" in by_id and "down_attns.3" in by_id and "down_attns.0" not in by_id, list(by_id)
+    assert by_id["down_attns.3"]["stage"] == "encoder" and by_id["down_attns.3"]["type"] == "attention"
+    assert by_id["down_attns.3"]["attn_kind"] == "linear" and by_id["down_attns.2"]["attn_kind"] == "window"
+    assert by_id["down_attns.3"]["label"] == "enc 3 · attention", by_id["down_attns.3"]["label"]
+    order = cgraph["order"]
+    assert order.index("downs.3.0") < order.index("down_attns.3") < order.index("downs.3.1"), order
+    from app.core import backends as _backends
+    xb = _backends.get("xurdif")
+    chip = bending._resolve_targets(["attention"], cbundle["model"], xb)
+    assert chip == {"down_attns.2", "down_attns.3", "mid_attn"}, chip
+    enc = bending._resolve_targets(["encoder"], cbundle["model"], xb)
+    assert {"down_attns.2", "down_attns.3"} <= enc, enc
+    print(f"conf model: {len(cgraph['nodes'])} bend points incl. encoder attention at levels 2 and 3")
+
     # The scheduled window must actually open. Use a DEFAULT-shaped window
     # (spatial ops start at 0.15) rather than forcing 0..1 — the removed preview
     # passed 0..1 explicitly, which is exactly why it never caught that its
@@ -69,6 +96,7 @@ def main():
     print(f"bended sampling produced {len(frames)} frames; last size {frames[-1]['image'].size}")
 
     out.unlink(missing_ok=True)
+    (ROOT / "workspace_smoke_craft_conf.pt").unlink(missing_ok=True)
     print("OK")
 
 
