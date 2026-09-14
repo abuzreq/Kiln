@@ -1661,3 +1661,11 @@ a { color: var(--accent); }
 .add-pair > :first-child { flex: 1; }
 .add-pair .btn { width: 100%; justify-content: center; }
 .contrast-arm { margin-bottom: var(--s-2); }
+
+/* Icon-only segs: square buttons, the glyph centred, five to a sidebar. */
+.seg.seg-icons button { padding: 6px 9px; line-height: 0; }
+.seg.seg-icons .ico { margin-right: 0; width: 15px; height: 15px; }
+.tool-row { min-width: 0; }
+.tool-name { font-size: var(--fs-sm); font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tool-name .sub { font-weight: 500; }
+.mt-3 { margin-top: var(--s-3); }

@@ -1879,7 +1879,7 @@ function MaskOverlay({ active }) {
     <div className="mask-stage" ref={stageRef}>
       <canvas className="mask-display" ref={displayRef} aria-hidden="true" />
       <canvas
-        className={`mask-overlay ${active ? "on" : ""} ${maskTool === "wand" ? "wand" : ""} ${maskTool === "move" ? "move" : ""} ${maskTool === "shape" && shapeKind !== "generate" ? "shape" : ""}`}
+        className={`mask-overlay ${active ? "on" : ""} ${maskTool === "wand" ? "wand" : ""} ${maskTool === "move" ? "move" : ""} ${maskTool === "shape" && shapeKind !== "pattern" ? "shape" : ""}`}
         ref={maskRef}
         role="img"
         aria-label={maskTool === "wand"
@@ -1900,7 +1900,7 @@ function MaskOverlay({ active }) {
           }
           if (maskTool === "shape") {
             if (shapeKind === "polygon") polyAdd(e);
-            else if (shapeKind !== "generate") beginShape(e);
+            else if (shapeKind !== "pattern") beginShape(e);
             return;
           }
           // Throws if the pointer id is not an active pointer, which is the case

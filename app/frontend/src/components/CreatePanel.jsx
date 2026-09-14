@@ -5,7 +5,7 @@ import { usePlay } from "../screens/playContext.jsx";
 import { Slider, Select, Num, Disclose, TipLabel, Tooltip } from "./ui.jsx";
 import {
   BrushIcon, WandIcon, ShapeIcon, ContrastIcon, MoveIcon, PaintIcon, EraseIcon,
-  RectIcon, EllipseIcon, PolygonIcon, GenerateIcon, UndoIcon, InvertIcon, ClearIcon,
+  RectIcon, EllipseIcon, PolygonIcon, PatternIcon, UndoIcon, InvertIcon, ClearIcon,
   NewMaskIcon, AddIcon,
 } from "./icons.jsx";
 import {
@@ -16,6 +16,23 @@ import { contrastPreview, compositePostprocWithMask } from "../contrastMask.js";
 import { cachedStroke } from "../selection.js";
 import { maskUrlToCache } from "../layers.js";
 import { bendPresetSynopsis, bendPresetSummary } from "../bendSynopsis.js";
+
+// The mask tools and the Shape tool's kinds. Icons only in the rows (five
+// tools would not fit a sidebar with their words); the label is the tooltip,
+// the aria-label, and the name shown beside the row for the one that is on.
+const MASK_TOOLS = [
+  { id: "brush", label: "Brush", Icon: BrushIcon, tip: "Brush: paint freehand" },
+  { id: "wand", label: "Wand", Icon: WandIcon, tip: "Wand: click a colour on the canvas to select everything like it nearby" },
+  { id: "shape", label: "Shape", Icon: ShapeIcon, tip: "Shape: rectangles, ellipses, polygons, or a pattern" },
+  { id: "contrast", label: "Contrast", Icon: ContrastIcon, tip: "Contrast: split the canvas in two by brightness or by local contrast, and take one side" },
+  { id: "move", label: "Move", Icon: MoveIcon, tip: "Move: drag the mask around, or nudge it with the arrow keys" },
+];
+const SHAPE_KINDS = [
+  { id: "rect", label: "Rectangle", Icon: RectIcon, tip: "Rectangle: drag on the canvas; Shift for a square" },
+  { id: "ellipse", label: "Ellipse", Icon: EllipseIcon, tip: "Ellipse: drag on the canvas; Shift for a circle" },
+  { id: "polygon", label: "Polygon", Icon: PolygonIcon, tip: "Polygon: click corners on the canvas; Enter or double-click closes" },
+  { id: "pattern", label: "Pattern", Icon: PatternIcon, tip: "Pattern: blobs, cells, stripes, a split, or scattered shapes, from a seed" },
+];
 
 const DEFAULT_PP = { contrast: 1, gamma: 1, saturation: 1, eqhist: 0, unsharp: 0, noise: 0 };
 
@@ -716,34 +733,47 @@ export default function CreatePanel() {
           </div>
         </div>
 
-        {/* How the mask gets made: one seg, one tool at a time. What follows
-            it is that tool's own controls, and nothing else. */}
-        <div className="seg seg-tools mb-2" role="group" aria-label="Mask tool">
-          <button type="button" className={maskTool === "brush" ? "on" : ""} onClick={() => setMaskTool("brush")} title="Paint freehand"><BrushIcon /> Brush</button>
-          <button type="button" className={maskTool === "wand" ? "on" : ""} onClick={() => setMaskTool("wand")} title="Click a colour on the canvas to select everything like it nearby"><WandIcon /> Wand</button>
-          <button type="button" className={maskTool === "shape" ? "on" : ""} onClick={() => setMaskTool("shape")} title="Rectangles, ellipses, polygons, or generated shapes"><ShapeIcon /> Shape</button>
-          <button type="button" className={maskTool === "contrast" ? "on" : ""} onClick={() => setMaskTool("contrast")} title="Split the canvas in two by brightness or by local contrast, and take one side"><ContrastIcon /> Contrast</button>
-          <button type="button" className={maskTool === "move" ? "on" : ""} onClick={() => setMaskTool("move")} title="Drag the mask around, or nudge it with the arrow keys"><MoveIcon /> Move</button>
+        {/* How the mask gets made: one row of tools, one at a time, icons only
+            so five fit a sidebar; the name of the one that is on sits beside
+            the row, and every button says what it is on hover. What follows
+            the row is that tool's own controls, and nothing else. */}
+        <div className="row center gap-2 mb-2 tool-row">
+          <div className="seg seg-icons" role="group" aria-label="Mask tool">
+            {MASK_TOOLS.map((t) => (
+              <Tooltip key={t.id} text={t.tip}>
+                <button type="button" className={maskTool === t.id ? "on" : ""} onClick={() => setMaskTool(t.id)} aria-label={t.label} aria-pressed={maskTool === t.id}>
+                  <t.Icon />
+                </button>
+              </Tooltip>
+            ))}
+          </div>
+          <span className="tool-name">
+            {MASK_TOOLS.find((t) => t.id === maskTool)?.label}
+            {maskTool === "shape" && <span className="sub"> · {SHAPE_KINDS.find((k) => k.id === shapeKind)?.label}</span>}
+          </span>
         </div>
 
         {(maskTool === "brush" || maskTool === "wand" || maskTool === "shape") && (
           <div className="row gap-2 mb-2 wrap center">
-            <div className="seg" role="group" aria-label="Paint or erase">
+            {maskTool === "shape" && (
+              <div className="seg seg-icons" role="group" aria-label="Shape kind">
+                {SHAPE_KINDS.map((k) => (
+                  <Tooltip key={k.id} text={k.tip}>
+                    <button type="button" className={shapeKind === k.id ? "on" : ""} onClick={() => setShapeKind(k.id)} aria-label={k.label} aria-pressed={shapeKind === k.id}>
+                      <k.Icon />
+                    </button>
+                  </Tooltip>
+                ))}
+              </div>
+            )}
+            <div className="seg seg-sm" role="group" aria-label="Paint or erase">
               <button type="button" className={!eraser ? "on" : ""} onClick={() => setEraser(false)} title="Add to the mask"><PaintIcon /> Paint</button>
               <button type="button" className={eraser ? "on" : ""} onClick={() => setEraser(true)} title="Cut out of the mask"><EraseIcon /> Erase</button>
             </div>
             {maskTool === "brush" && (
-              <div className="seg" role="group" aria-label="Brush edge">
+              <div className="seg seg-sm" role="group" aria-label="Brush edge">
                 <button type="button" className={!brushHard ? "on" : ""} onClick={() => setBrushHard(false)}>Soft</button>
                 <button type="button" className={brushHard ? "on" : ""} onClick={() => setBrushHard(true)}>Hard</button>
-              </div>
-            )}
-            {maskTool === "shape" && (
-              <div className="seg" role="group" aria-label="Shape kind">
-                <button type="button" className={shapeKind === "rect" ? "on" : ""} onClick={() => setShapeKind("rect")} title="Drag a rectangle; Shift for a square"><RectIcon /> Rectangle</button>
-                <button type="button" className={shapeKind === "ellipse" ? "on" : ""} onClick={() => setShapeKind("ellipse")} title="Drag an ellipse; Shift for a circle"><EllipseIcon /> Ellipse</button>
-                <button type="button" className={shapeKind === "polygon" ? "on" : ""} onClick={() => setShapeKind("polygon")} title="Click corners on the canvas; Enter or double-click closes"><PolygonIcon /> Polygon</button>
-                <button type="button" className={shapeKind === "generate" ? "on" : ""} onClick={() => setShapeKind("generate")} title="Blobs, cells, stripes, a split, or scattered shapes, from a seed"><GenerateIcon /> Generate</button>
               </div>
             )}
           </div>
@@ -775,8 +805,8 @@ export default function CreatePanel() {
         )}
 
         {maskTool === "shape" && (
-          shapeKind === "generate" ? (
-            <GenerateShapePanel
+          shapeKind === "pattern" ? (
+            <PatternPanel
               genShape={genShape}
               setGenShape={setGenShape}
               canvasSize={canvasSize}
@@ -882,7 +912,7 @@ export default function CreatePanel() {
           </div>
         )}
 
-        <div className="section-title mt-2">
+        <div className="section-title mt-3">
           <TipLabel tip="How the fill meets what is around it. Both settings belong to the mask and are remembered with it.">
             Fill edge
           </TipLabel>
@@ -1023,9 +1053,9 @@ const GEN_KINDS = [
 
 const randomSeed31 = () => Math.floor(Math.random() * 2 ** 31);
 
-/** The Generate arm of the Shape tool: a kind, its knobs, a seed, a live
+/** The Pattern arm of the Shape tool: a kind, its knobs, a seed, a live
  *  preview, and Add to mask. Every Add is one stroke; Shuffle rerolls. */
-function GenerateShapePanel({ genShape, setGenShape, canvasSize, eraser, addStroke, addMaskWithStroke, maskName }) {
+function PatternPanel({ genShape, setGenShape, canvasSize, eraser, addStroke, addMaskWithStroke, maskName }) {
   const { toast } = useApp();
   const [preview, setPreview] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -1074,7 +1104,7 @@ function GenerateShapePanel({ genShape, setGenShape, canvasSize, eraser, addStro
 
   return (
     <div className="gen-panel">
-      <div className="seg seg-sm mb-2" role="group" aria-label="Generated shape">
+      <div className="seg seg-sm mb-2" role="group" aria-label="Pattern">
         {GEN_KINDS.map((k) => (
           <button key={k.id} type="button" className={genShape.kind === k.id ? "on" : ""} title={k.tip}
             onClick={() => set({ kind: k.id, params: {} })}>{k.label}</button>
