@@ -79,8 +79,12 @@ class TrainConfig:
     l1w: float = 1.0
     ssimw: float = 0.0
     pred: str = "x0"
-    mtype: str = "tinyunet_with_attention3"
+    mtype: str = "tinyunet_conf_attention"
     mults: list = field(default_factory=lambda: [1, 2, 2, 2])
+    # Attention layout, canonical spec ("-1:linear,mid:full"). Only the conf
+    # architecture reads it; None for the others. Passed as one token because
+    # the value starts with '-'.
+    attn: str | None = "-1:linear,mid:full"
     fit: str = "resize"
     # Snapshot previews: one image on a fixed seed, so a run's thumbnails differ
     # only by how far training got. -1 leaves them unseeded.
@@ -118,6 +122,8 @@ class TrainConfig:
             "--fit", self.fit,
             "--mults", *[str(m) for m in self.mults],
         ]
+        if self.attn:
+            args.append(f"--attn={self.attn}")
         if self.amp:
             args.append("--amp")
         if not self.edge_loss:
@@ -172,8 +178,11 @@ def config_from_run(run_dir: str | Path, train_steps: int, checkpoint: str | Non
         l1w=float(meta.get("l1w", 1.0)),
         ssimw=float(meta.get("ssimw", 0.0)),
         pred=meta.get("pred", "x0"),
+        # A run.json always names its mtype; the fallback is for one written
+        # before the field existed, which was necessarily the old class.
         mtype=meta.get("mtype", "tinyunet_with_attention3"),
         mults=mults,
+        attn=meta.get("attn"),
         fit=meta.get("fit", "resize"),
         nsamples=int(meta.get("nsamples", 1)),
         sample_seed=int(meta.get("sample_seed", 42)),
@@ -278,6 +287,7 @@ def _write_run_meta(out_dir: Path, cfg: "TrainConfig", *, continued_from: str | 
         "save_every": cfg.save_every,
         "mtype": cfg.mtype,
         "mults": cfg.mults,
+        "attn": cfg.attn,
         "pred": cfg.pred,
         "lr": cfg.lr,
         "loss_type": cfg.loss_type,

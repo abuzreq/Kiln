@@ -59,7 +59,18 @@ def estimate():
 
 @bp.get("/architectures")
 def architectures():
-    return ok({"architectures": available_architectures()})
+    """The xurdif architectures this install can build, plus the attention
+    layouts the configurable one offers by name, so the Train screen does not
+    keep its own copy of either list."""
+    from app.core.backends.xurdif import attn
+
+    return ok({
+        "architectures": available_architectures(),
+        "conf_mtype": attn.MTYPE,
+        "attn_kinds": list(attn.KINDS),
+        "layouts": attn.NAMED_LAYOUTS,
+        "default_attn": attn.DEFAULT_SPEC,
+    })
 
 
 @bp.get("/train/backends")
@@ -343,6 +354,7 @@ def save_checkpoint(run):
         mtype=run_meta.get("mtype"),
         mults=run_meta.get("mults"),
         pred=run_meta.get("pred"),
+        attn=run_meta.get("attn"),
         train_steps=run_meta.get("train_steps"),
         save_every=run_meta.get("save_every"),
         lr=run_meta.get("lr"),

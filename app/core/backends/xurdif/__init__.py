@@ -10,6 +10,7 @@ from pathlib import Path
 
 from app.core.backends.base import Backend, BetaSchedule, Capabilities, ModelRef
 
+from . import attn as attn_spec
 from . import graph, loader
 
 
@@ -168,6 +169,12 @@ class XurdifBackend(Backend):
             **info,
             **slots,
         }
+        # The layout decides which tensors exist, so a merged conf model must
+        # carry it exactly as its parents did (check_compat has already made
+        # sure both parents agree).
+        if meta.attn is not None:
+            out["attn"] = meta.attn
+            out["attn_config"] = attn_spec.parse(meta.attn)
         # Both slots must exist: everything downstream picks one by name, and a
         # checkpoint missing "ema" silently loads the non-averaged weights.
         if "model" not in out and "ema" in out:
@@ -200,6 +207,8 @@ class XurdifBackend(Backend):
 
             raise NotFoundError("starting checkpoint not found")
         image_size = as_int(body.get("image_size", 512), "image_size", 32, 4096)
+        mtype = body.get("mtype") or attn_spec.MTYPE
+        mults = _clean_mults(body.get("mults"), image_size)
         return TrainConfig(
             dataset=str(dataset),
             out_dir=str(out_dir),
@@ -214,8 +223,9 @@ class XurdifBackend(Backend):
             l1w=as_float(body.get("l1w", 1.0), "l1w", 0, 100),
             ssimw=as_float(body.get("ssimw", 0.0), "ssimw", 0, 100),
             pred=body.get("pred", "x0"),
-            mtype=body.get("mtype", "tinyunet_with_attention3"),
-            mults=_clean_mults(body.get("mults"), image_size),
+            mtype=mtype,
+            mults=mults,
+            attn=attn_spec.validate(body.get("attn"), mults) if mtype == attn_spec.MTYPE else None,
             fit=body.get("fit", "resize"),
             nsamples=as_int(body.get("nsamples", 1), "nsamples", 1, 16),
             sample_seed=as_int(body.get("sample_seed", 42), "sample_seed", -1, 2 ** 31 - 1),

@@ -87,14 +87,16 @@ def inspect_source(path: str | Path) -> dict:
     mtype = run_meta.get("mtype") or card.get("mtype")
     mults = run_meta.get("mults") or card.get("mults")
     pred = run_meta.get("pred") or card.get("pred")
+    attn = run_meta.get("attn") or card.get("attn")
     size_mb = round(path.stat().st_size / (1024 * 1024), 2)
 
-    if step is None or not mtype or not mults or not pred:
+    if step is None or not mtype or not mults or not pred or (attn is None and "conf" in str(mtype)):
         meta = read_meta(path)
         step = step if step is not None else meta.step
         mtype = mtype or meta.mtype
         mults = mults or meta.mults
         pred = pred or meta.pred
+        attn = attn if attn is not None else meta.attn
 
     name = card.get("name") or path.stem
     original = card.get("original_name") or path.stem
@@ -102,7 +104,7 @@ def inspect_source(path: str | Path) -> dict:
 
     config = {}
     for k in ("image_size", "batch_size", "train_steps", "save_every", "lr", "accum",
-              "loss_type", "fit", "mtype", "mults", "pred", "edge_loss"):
+              "loss_type", "fit", "mtype", "mults", "pred", "attn", "edge_loss"):
         if run_meta.get(k) is not None:
             config[k] = run_meta[k]
         elif card.get(k) is not None:
@@ -110,6 +112,8 @@ def inspect_source(path: str | Path) -> dict:
     config.setdefault("mtype", mtype)
     config.setdefault("mults", mults)
     config.setdefault("pred", pred)
+    if attn is not None:
+        config.setdefault("attn", attn)
 
     current = int(step or 0)
     origin_target = int(config.get("train_steps") or 0)
@@ -130,6 +134,7 @@ def inspect_source(path: str | Path) -> dict:
         "mtype": mtype,
         "mults": mults,
         "pred": pred,
+        "attn": attn,
         "label": label,
         "origin_project": origin.get("project"),
         "origin_run": origin.get("run"),
@@ -212,6 +217,7 @@ def continue_from_model(
         mtype=info.get("mtype"),
         mults=info.get("mults"),
         pred=info.get("pred"),
+        attn=info.get("attn"),
         image_size=cfg.get("image_size"),
         kind="continue",
     )
@@ -231,6 +237,7 @@ def continue_from_model(
         "mtype": info.get("mtype"),
         "mults": info.get("mults"),
         "pred": info.get("pred"),
+        "attn": info.get("attn"),
     }
     meta = p.load_meta()
     meta["continued_from"] = continued
