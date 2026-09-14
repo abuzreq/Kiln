@@ -97,3 +97,34 @@ xurdifstile2d.py:
 ```
 python xurdifstile2d.py --dir <output_path> --eta 0.5 --steps 200   --lr 0  --load <model_path> --image <init_image_path> --skip 40  --ema --rsort  --model tinyunet_with_attention3   --h 2048 --w 3072 --tilemin 512 --grid --mul 0.9 --icontrast 1.5 --gamma 1.5 --postproc --noise 0.1 --unsharp 0.4
 ```
+
+## Configurable attention
+
+New model architecture has been added to allow placing attention at different, even multiple levels in the model, as well as selecting the type of each attention layer.
+
+Training:
+
+```
+python xurdiftrainer26b.py  --images <path_to_train_images>  --steps 1000 --trainsteps 280000 --accum 10 --dir <output_folder> --imageSize 512 --batchSize 8 --saveEvery 100 --nsamples 2 --model tinyunet_conf_attention --attn=-1:linear,mid:full --lr 4e-4  --losstype l1 --use_edges --use_mask --mults 1 2 2 4 4 --pred x0
+```
+Examples of attn config:
+```
+mid:full              # full attention at bottleneck, original architecture
+-1:linear,mid:full    # full attention at bottleneck, linear attention at one level up
+-1:linear,mid:linear  # linear attention at bottleneck, linear attention at one level up
+```
+Generation:
+
+```
+python xurdiffer26c.py --dir <output_path> --name <base_name>  --eta 0.5 --steps 100     --w 512 --h 512  --load <path_to_checkpoint>  --rounds 100 
+```
+
+This will generate 100 samples named base_name-1.png etc. Attn_config and model architecture will be read from the checkpoint.
+
+Generation with a folder of init images and custom post_processing:
+```
+python xurdiffer26c.py --dir <output_path>  --eta 0.5 --steps 50   --lr 1   --image <init_image_path>  --ema --rsort   --h 512 --w 512 --mul 0.98 --postproc --eqhist 0.4 --noise 0.02 --unsharp 0.4 --text "text_prompt" --textw 100 --lr 1  --load <model_path>  --skip 33 --img_prompt <image_prompt_path> --imgpw 100 
+```
+
+
+

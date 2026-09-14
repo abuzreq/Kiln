@@ -14,9 +14,11 @@ from dataclasses import replace
 from pathlib import Path
 
 from app.core.backends.base import ModelDescriptor
-from app.core.engine.arch import DEFAULT_MTYPE, build_unet
-from utils.exceptions import NotFoundError
+from app.core.engine.arch import CONF_MTYPE, DEFAULT_MTYPE, build_unet
+from utils.exceptions import NotFoundError, ValidationError
 from utils.logger import get_logger
+
+from . import attn as attn_spec
 
 log = get_logger("xurdif.loader")
 
@@ -91,6 +93,24 @@ def ema_status(data: dict) -> str:
     return "same"
 
 
+def _attn_of(data: dict) -> str | None:
+    """The recorded attention layout of a conf checkpoint, canonical, or None.
+
+    Kiln's patched trainer writes both ``attn`` (the spec string) and
+    ``attn_config`` (the dict upstream's generation script reads). A file with
+    neither was trained elsewhere; None here means "unknown", and ``load_net``
+    refuses to guess if the weights then disagree with the constructor default.
+    """
+    spec = data.get("attn")
+    if spec is None and isinstance(data.get("attn_config"), dict):
+        spec = data["attn_config"]
+    try:
+        return attn_spec.canonical(spec)
+    except ValidationError as e:
+        log.warning("unreadable attention layout %r: %s", spec, e)
+        return None
+
+
 def describe(path: str | Path) -> ModelDescriptor:
     torch = _torch()
     path = Path(path)
@@ -119,10 +139,11 @@ def describe(path: str | Path) -> ModelDescriptor:
     if pred is None and data.get("opt") is not None:
         pred = getattr(data["opt"], "pred", None)
     resolved_mults = list(mults) if mults is not None else list(DEFAULT_MULTS)
+    mtype = mtype or DEFAULT_MTYPE
     meta = ModelDescriptor(
         path=str(path),
         name=path.stem,
-        mtype=mtype or DEFAULT_MTYPE,
+        mtype=mtype,
         mults=resolved_mults,
         pred=pred or "eps",
         step=data.get("step"),
@@ -130,6 +151,7 @@ def describe(path: str | Path) -> ModelDescriptor:
         backend="xurdif",
         size_multiple=size_multiple(resolved_mults),
         ema=ema_status(data),
+        attn=_attn_of(data) if mtype == CONF_MTYPE else None,
     )
     meta.thumbnail = sidecar_thumbnail(path)
     with _meta_lock:
@@ -158,8 +180,22 @@ def load_net(path: str, device: str = "cpu", ema: bool = True):
         if k.startswith(DENOISE_PREFIX):
             unet_state[k[len(DENOISE_PREFIX):]] = v
 
-    model = build_unet(meta.mtype, meta.mults)
+    model = build_unet(meta.mtype, meta.mults, attn_config=attn_spec.parse(meta.attn))
     missing, unexpected = model.load_state_dict(unet_state, strict=False)
+    if meta.mtype == CONF_MTYPE:
+        # The attention layout decides which tensors exist. A key under an
+        # attention module that is missing or unexpected means the layout the
+        # network was built with is not the one it was trained with -- for a
+        # file with no recorded layout, the constructor default was a guess.
+        # Loading on regardless would sample garbage without a word.
+        off = [k for k in (*missing, *unexpected) if "attn" in k]
+        if off:
+            why = ("records no attention layout" if meta.attn is None
+                   else f"records attention layout '{meta.attn}'")
+            raise ValidationError(
+                f"{Path(path).name} {why}, but its weights do not match that layout "
+                f"({len(off)} attention tensors differ, e.g. {off[0]}). It was likely "
+                "trained outside Kiln without the layout being saved.")
     if missing:
         log.info("load %s: %d missing keys (ok if buffers)", Path(path).name, len(missing))
     model.eval().to(device)

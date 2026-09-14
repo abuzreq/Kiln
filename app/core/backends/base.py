@@ -110,6 +110,10 @@ class ModelDescriptor:
     # configs carry it; xurdif checkpoints do not, so it stays None there and
     # the UI simply says nothing rather than guessing.
     sample_size: int | None = None
+    # Attention layout, canonical spec string ("-1:linear,mid:full"), for the
+    # one xurdif architecture whose shape is not fixed by (mtype, mults). None
+    # for every other model, and for a conf checkpoint that never recorded it.
+    attn: str | None = None
     extra: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -127,6 +131,7 @@ class ModelDescriptor:
             "size_multiple": self.size_multiple,
             "ema": self.ema,
             "sample_size": self.sample_size,
+            "attn": self.attn,
         }
 
     def copy(self) -> "ModelDescriptor":
