@@ -421,6 +421,7 @@ export default function CreatePanel() {
     try {
       const { job: j } = await api.post("/perform/inpaint", body);
       onJob(j);
+      pausedSnapshot.current = snapshotLive();
       const done = await pollJob(j.id, onJob, 300);
       await finishFill(done, mask);
       return done;
@@ -459,6 +460,7 @@ export default function CreatePanel() {
       });
       const { job: j } = await api.post("/perform/sample", body);
       onJob(j);
+      pausedSnapshot.current = snapshotLive();
       const done = await pollJob(j.id, onJob, 300);
       finishGeneration(done);
     } catch (e) { toast(e.message, "error"); setProgress(null); setLivePreview(null); setJob(null); }
@@ -473,7 +475,7 @@ export default function CreatePanel() {
 
   const pause = async () => {
     if (!job) return;
-    pausedSnapshot.current = snapshotLive();
+    if (!pausedSnapshot.current) pausedSnapshot.current = snapshotLive();
     try {
       await api.post(`/jobs/${job.id}/pause`);
       // Name only the controls actually on screen: Create maps its Change slider
@@ -694,7 +696,7 @@ export default function CreatePanel() {
             </div>
           ) : (
             <button type="button" className="btn primary w-full mt-2" onClick={run} disabled={!modelPath}>
-              {hasMask ? "Fill mask" : reworkCanvas ? "Rework canvas" : "Generate"}
+              {hasMask ? "Fill mask" : "Generate"}
             </button>
           )}
           {/* The fill's edge belongs to the mask, but it is decided at the moment

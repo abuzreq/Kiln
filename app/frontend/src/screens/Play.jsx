@@ -1039,9 +1039,12 @@ export default function Play() {
               // does nothing.
               overriddenBy={tab === "create" ? { noise_level: "The Change slider in Create" } : null}
               sweptBy={tab === "sweep" ? sweptParams : null}
-              disabled={genRunning && !genPaused}
-              editable={genPaused ? LIVE_PARAM_KEYS : null}
-              stepsMin={genPaused ? (job?.detail?.step || 1) : undefined}
+              // While a run is on, only the live keys stay editable; the rest
+              // dim, so what can still change is what stands out. Edits apply
+              // on the next Pause -> Resume.
+              editable={genRunning ? LIVE_PARAM_KEYS : null}
+              running={genRunning && !genPaused}
+              stepsMin={genRunning ? (job?.detail?.step || 1) : undefined}
             />
           </div>
         </div>
@@ -1332,7 +1335,7 @@ function PlayCanvas({ brushable }) {
               </Tooltip>
               <CaptureButton image={shown} card={frameCard} label={<><CaptureIcon /> Capture</>} />
               <Tooltip text="Clear the canvas: back to blank at the current size, dropping every layer and mask. The image itself stays in Results.">
-                <button type="button" className="btn ghost sm danger icon" onClick={clearCanvas} aria-label="Clear canvas"><TrashIcon /></button>
+                <button type="button" className="btn sm danger" onClick={clearCanvas}><TrashIcon /> Clear canvas</button>
               </Tooltip>
             </div>
           )}

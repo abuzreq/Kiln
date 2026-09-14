@@ -1686,3 +1686,8 @@ a { color: var(--accent); }
   background: repeating-conic-gradient(var(--bg-3) 0 25%, var(--bg-2) 0 50%) 0 0 / 8px 8px;
   border: 1px solid var(--line);
 }
+
+.btn.danger:not(.ghost) { background: rgba(248, 113, 113, 0.12); }
+.btn.danger:not(.ghost):hover { background: rgba(248, 113, 113, 0.22); }
+.field:has(> input:disabled), .field:has(> select:disabled) { opacity: 0.45; }
+.field:has(> input:disabled) input, .field:has(> select:disabled) select { opacity: 1; }

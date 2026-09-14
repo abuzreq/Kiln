@@ -460,6 +460,7 @@ export function SampleSettingsPanel({
   hint = "Applies to Create, Bend, Merge, and Sweep.",
   disabled = false,
   editable = null,
+  running = false,
   stepsMin,
   sweptBy = null,
   model = null,
@@ -480,7 +481,7 @@ export function SampleSettingsPanel({
   const sweptNote = (key, tip) => (swept(key)
     ? "The sweep grid sets this per cell — change it on the axis, not here."
     : tip);
-  const frozenTip = "Only applies to the next generation (frozen while sampling).";
+  const frozenTip = "Only applies to the next generation; it cannot change while one is sampling.";
   const tipFor = (key, tip) => {
     const dead = inert(key);
     if (dead) return `${dead}\n\n${tip}`;
@@ -501,7 +502,11 @@ export function SampleSettingsPanel({
         </p>
       )}
       {editable && !disabled && (
-        <p className="sub mb-2">Paused — {liveList("and")} apply on Resume.</p>
+        <p className="sub mb-2">
+          {running
+            ? <>Sampling — {liveList("and")} can still change; Pause, then Resume to apply them. The rest waits for the next run.</>
+            : <>Paused — {liveList("and")} apply on Resume.</>}
+        </p>
       )}
       <div className="row gap-3 wrap sample-steps-seed">
         <div className="grow">
