@@ -697,6 +697,49 @@ export default function CreatePanel() {
               {hasMask ? "Fill mask" : reworkCanvas ? "Rework canvas" : "Generate"}
             </button>
           )}
+          {/* The fill's edge belongs to the mask, but it is decided at the moment
+              of filling, so it sits with the button that fills. */}
+          {hasMask && !genRunning && (
+            <div className="fill-edge mt-2">
+          <div className="section-title">
+            <TipLabel tip="How the fill meets what is around it. Both settings belong to the mask and are remembered with it.">
+              Fill edge
+            </TipLabel>
+          </div>
+          <Slider
+            label="Feather"
+            value={feather}
+            min={0}
+            max={32}
+            step={1}
+            disabled={!activeMask}
+            onChange={(v) => setMaskParam(activeMask?.id, "feather", Math.round(v))}
+            tip={"Soft edge blend where the fill meets the rest of the canvas."
+              + (activeMask ? `\n\nRemembered with ${maskName}.` : "\n\nMask an area first.")}
+          />
+
+          <Slider
+            label={canResample ? "Harmonize" : "Harmonize — needs DDIM or DPM-Solver++"}
+            value={canResample ? resample : 1}
+            min={1}
+            max={8}
+            step={1}
+            onChange={(v) => setMaskParam(activeMask?.id, "harmonize", Math.round(v))}
+            disabled={!canResample || !activeMask}
+            fmt={(v) => (v <= 1 ? "off" : `${v} passes · about ${v}x slower`)}
+            tip={"Lets the fill settle into what is around it, instead of only matching at the "
+              + "edge. On at 2 passes by default; turn it off for the old single-pass behaviour, "
+              + "or when you need the speed."
+              + "\n\nEach pass is another trip over the same ground, so higher is slower."
+              + "\n\nNeeds the DDIM or DPM-Solver++ sampler."}
+          />
+          {!canResample && (
+            <p className="hint mb-0">
+              Switch the sampler to DDIM or DPM-Solver++ in Sample settings to enable this.
+            </p>
+          )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -910,44 +953,6 @@ export default function CreatePanel() {
               addTip="Replaces any earlier contrast side in this mask; brush and shape strokes stay."
             />
           </div>
-        )}
-
-        <div className="section-title mt-3">
-          <TipLabel tip="How the fill meets what is around it. Both settings belong to the mask and are remembered with it.">
-            Fill edge
-          </TipLabel>
-        </div>
-        <Slider
-          label="Feather"
-          value={feather}
-          min={0}
-          max={32}
-          step={1}
-          disabled={!activeMask}
-          onChange={(v) => setMaskParam(activeMask?.id, "feather", Math.round(v))}
-          tip={"Soft edge blend where the fill meets the rest of the canvas."
-            + (activeMask ? `\n\nRemembered with ${maskName}.` : "\n\nMask an area first.")}
-        />
-
-        <Slider
-          label={canResample ? "Harmonize" : "Harmonize — needs DDIM or DPM-Solver++"}
-          value={canResample ? resample : 1}
-          min={1}
-          max={8}
-          step={1}
-          onChange={(v) => setMaskParam(activeMask?.id, "harmonize", Math.round(v))}
-          disabled={!canResample || !activeMask}
-          fmt={(v) => (v <= 1 ? "off" : `${v} passes · about ${v}x slower`)}
-          tip={"Lets the fill settle into what is around it, instead of only matching at the "
-            + "edge. On at 2 passes by default; turn it off for the old single-pass behaviour, "
-            + "or when you need the speed."
-            + "\n\nEach pass is another trip over the same ground, so higher is slower."
-            + "\n\nNeeds the DDIM or DPM-Solver++ sampler."}
-        />
-        {!canResample && (
-          <p className="hint mb-0">
-            Switch the sampler to DDIM or DPM-Solver++ in Sample settings to enable this.
-          </p>
         )}
 
         {!hasMask && (

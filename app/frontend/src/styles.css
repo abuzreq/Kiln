@@ -1669,3 +1669,9 @@ a { color: var(--accent); }
 .tool-name { font-size: var(--fs-sm); font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tool-name .sub { font-weight: 500; }
 .mt-3 { margin-top: var(--s-3); }
+
+/* Layers and Inpaint masks: two cards, one under the other. */
+.layers-stack { display: flex; flex-direction: column; gap: var(--s-3); min-width: 0; }
+.panel-count { font-weight: 500; margin-left: 4px; }
+.masks-panel h3 { color: var(--stage-encoder); }
+.fill-edge { padding-top: var(--s-2); border-top: 1px dashed var(--line); }

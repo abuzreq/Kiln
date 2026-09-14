@@ -2138,9 +2138,10 @@ function LayersPanel() {
   } = usePlay();
 
   return (
-    <aside className="card layers-panel">
+    <div className="layers-stack">
+    <aside className="card layers-panel" aria-label="Layers">
       <div className="row between center mb-2">
-        <h3 className="mb-0">Layers</h3>
+        <h3 className="mb-0">Layers <span className="sub panel-count">{rasterLayers.length}</span></h3>
         <div className="row gap-1">
           <Tooltip text="Step back one edit — a fill, a painted stroke, a delete, a reorder. (Ctrl+Z)">
             <button type="button" className="btn ghost sm" onClick={undo} disabled={!canUndo}>Undo</button>
@@ -2151,10 +2152,6 @@ function LayersPanel() {
         </div>
       </div>
 
-      <div className="layer-group-head">
-        <span>Layers</span>
-        <span className="sub">{rasterLayers.length}</span>
-      </div>
       <Tooltip text="A new empty layer on top. Runs land in the active layer, so make one to keep the next attempt apart from what is here.">
         <button type="button" className="btn sm w-full mb-2" onClick={addLayer}>Add layer</button>
       </Tooltip>
@@ -2203,9 +2200,12 @@ function LayersPanel() {
         />
       ))}
 
-      <div className="layer-group-head mt-2">
-        <span>Inpaint masks</span>
-        <span className="sub">{liveMasks.length ? `${maskPixels.toLocaleString()} px` : "none on"}</span>
+    </aside>
+
+    <aside className="card layers-panel masks-panel" aria-label="Inpaint masks">
+      <div className="row between center mb-2">
+        <h3 className="mb-0">Inpaint masks</h3>
+        <span className="sub">{liveMasks.length ? `${maskPixels.toLocaleString()} px on` : "none on"}</span>
       </div>
       <Tooltip text="A new empty mask, selected so the brush paints into it. Every mask that is on counts for the next run.">
         <button type="button" className="btn sm w-full mb-2" onClick={addMask}>Add mask</button>
@@ -2247,5 +2247,6 @@ function LayersPanel() {
         />
       ))}
     </aside>
+    </div>
   );
 }
