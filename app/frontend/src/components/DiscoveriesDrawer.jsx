@@ -32,7 +32,7 @@ const newId = () => `b-${Math.random().toString(36).slice(2, 10)}`;
 
 const SCOPE_TABS = [
   { id: "all", label: "All models", tip: "Every model's discoveries" },
-  { id: "current", label: "This model", tip: "Only the model picked in Play" },
+  { id: "current", label: "This model", tip: "Only the model picked in Create" },
 ];
 const SORT_TABS = [
   { id: "newest", label: "Newest", tip: "In the order they were found" },
@@ -215,7 +215,7 @@ export default function DiscoveriesDrawer() {
       if (here) {
         setStatus(await api.post("/craft/explore", { run: false }));
       } else {
-        if (!modelPath) { toast("Pick a model in Play first", "error"); return; }
+        if (!modelPath) { toast("Pick a model in Create first", "error"); return; }
         setStatus(await api.post("/craft/explore", { model_path: modelPath, metric, run: true }));
         setOpen(true);
       }
@@ -334,7 +334,7 @@ export default function DiscoveriesDrawer() {
                 ? "Looking… the first discoveries take a minute."
                 : modelPath
                   ? "Nothing found yet. Start exploring and the strip fills in while you work."
-                  : "Pick a model in Play, then start exploring."}
+                  : "Pick a model in Create, then start exploring."}
             </div>
           ) : (
             <div className="disc-track" ref={trackRef}>

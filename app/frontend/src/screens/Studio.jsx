@@ -13,7 +13,7 @@ export default function Studio() {
       <p className="hint mb-0">
         {tab === "data" && "Import media into a dataset draft, pre-process, and create."}
         {tab === "train" && "Start a run or inspect checkpoints and loss."}
-        {tab === "models" && "Library models ready for Play."}
+        {tab === "models" && "Library models ready for Create."}
       </p>
       {tab === "data" && <Prepare />}
       {tab === "train" && <Train />}

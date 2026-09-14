@@ -134,7 +134,7 @@ function Saved({ onClose }) {
   };
 
   if (!items) return <Loading />;
-  if (!items.length) return <Empty>No saved images yet. Capture outputs from Play.</Empty>;
+  if (!items.length) return <Empty>No saved images yet. Capture outputs from Create.</Empty>;
 
   return (
     <div className="col gap-2">
@@ -224,7 +224,7 @@ function Sweeps({ onClose }) {
 
   if (!items) return <Loading />;
   if (!items.length) {
-    return <Empty>No sweeps yet. Run one in Play ▸ Sweep, or sweep a bend parameter in Play ▸ Bend.</Empty>;
+    return <Empty>No sweeps yet. Run one in Create ▸ Sweep, or sweep a bend parameter in Create ▸ Bend.</Empty>;
   }
 
   return (
@@ -328,7 +328,7 @@ export default function LibraryDrawer({ onClose }) {
         </div>
         <div className="drawer-body">
           {tab === "models" && <Models onPick={onClose} />}
-          {tab === "bends" && <NamedList kind="bends" empty="No saved bends. Create some in Play ▸ Bend, then use them in Play ▸ Create." />}
+          {tab === "bends" && <NamedList kind="bends" empty="No saved bends. Create some in Create ▸ Bend, then use them in Create ▸ Canvas." />}
           {tab === "merges" && <NamedList kind="recipes" empty="No saved merges yet." />}
           {tab === "saved" && <Saved onClose={onClose} />}
           {tab === "sweeps" && <Sweeps onClose={onClose} />}

@@ -314,7 +314,7 @@ export default function ModelBrowser() {
           <h3>Library</h3>
           {library.length
             ? <ModelCards models={library} {...cardProps} />
-            : <Empty>None yet. Save a snapshot from Train, merge two models in Play, or download one.</Empty>}
+            : <Empty>None yet. Save a snapshot from Train, merge two models in Create, or download one.</Empty>}
         </div>
       </div>
 

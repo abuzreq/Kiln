@@ -637,8 +637,8 @@ export default function CreatePanel() {
                 tip={bendTip(
                   bendValue,
                   hasMask
-                    ? `Optional UNet tweaks saved in Play ▸ Bend, applied when filling ${maskName}. Remembered with it.`
-                    : "Optional layer tweaks saved in Play ▸ Bend, applied to the whole canvas.",
+                    ? `Optional UNet tweaks saved in Create ▸ Bend, applied when filling ${maskName}. Remembered with it.`
+                    : "Optional layer tweaks saved in Create ▸ Bend, applied to the whole canvas.",
                 )}
               />
             </div>

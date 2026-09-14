@@ -6,10 +6,11 @@
 // prepare-tab fallback drifted from PREPARE_TABS in the first place.
 
 // Ids are the wire values -- they key persisted sub-tab state and every
-// setAppMode call site -- so "prepare" keeps its id while showing as Workshop.
+// setAppMode call site -- so "prepare" shows as Prepare, "play" as Create, and
+// the "create" sub-tab as Canvas, each keeping its id.
 export const MODE_TABS = [
-  { id: "prepare", label: "Workshop", tip: "Datasets, training, and models" },
-  { id: "play", label: "Play", tip: "Create, bend, merge, and sweep" },
+  { id: "prepare", label: "Prepare", tip: "Datasets, training, and models" },
+  { id: "play", label: "Create", tip: "Canvas, bend, merge, and sweep" },
 ];
 
 export const PREPARE_TABS = [
@@ -19,7 +20,7 @@ export const PREPARE_TABS = [
 ];
 
 export const PLAY_TABS = [
-  { id: "create", label: "Create", tip: "Generate, brush regions, post-process, and upscale" },
+  { id: "create", label: "Canvas", tip: "Generate, brush regions, post-process, and upscale" },
   { id: "bend", label: "Bend", tip: "Tweak model layers with bend stacks" },
   { id: "merge", label: "Merge", tip: "Blend two models and compare" },
   { id: "sweep", label: "Sweep", tip: "Grid over sampling settings" },

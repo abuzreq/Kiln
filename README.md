@@ -1,25 +1,25 @@
 # Kiln
 
-A desktop application for small-data training, sampling, and model manipulation with compact diffusion models. Inspired by [Autolume](https://metacreation-lab.github.io/autolume/), Kiln organizes workflows into **Workshop** (data preparation, training, model management) and **Play** (sampling, layer manipulation, merging, parameter sweeps).
+A desktop application for small-data training, sampling, and model manipulation with compact diffusion models. Inspired by [Autolume](https://metacreation-lab.github.io/autolume/), Kiln organizes workflows into **Prepare** (data preparation, training, model management) and **Create** (sampling, layer manipulation, merging, parameter sweeps).
 
 Kiln supports two backends:
 
 1. **xurdif:** The compact diffusion engine by [Hannu Töyrylä](https://github.com/htoyryla/xurdif).
 2. **Diffusers:** Hugging Face's `UNet2DModel` / `TinyUNet2DModel` ecosystem for unconditional pixel-space models (DDPM), including LoRA support.
 
-Typical workflow: **Data → Train → Models → Play**.
+Typical workflow: **Data → Train → Models → Create**.
 
 ---
 
 ## Features
 
-* **Workshop ▸ Data:** Image and video framing (crop, pad, stretch, non-square), data augmentations, and live dataset preview.
-* **Workshop ▸ Train:** Train from scratch or fine-tune existing models. Includes loss curves, live sample generation, and snapshot saves.
-* **Workshop ▸ Models:** Model library, checkpoint pinning, Hugging Face model imports, and format conversion.
-* **Play ▸ Create:** DDIM sampling with step-by-step previews, CLIP text/image guidance, img2img, inpainting (soft/hard brushes), and upscaling.
-* **Play ▸ Bend:** Interactive UNet layer activation targeting, hook-based ops, scheduled hooks, and seed-matched A/B comparison.
-* **Play ▸ Merge:** Two-way model weight merging with live comparison against parent models.
-* **Play ▸ Sweep:** 1D and 2D parameter sweep grids with exportable contact sheets.
+* **Prepare ▸ Data:** Image and video framing (crop, pad, stretch, non-square), data augmentations, and live dataset preview.
+* **Prepare ▸ Train:** Train from scratch or fine-tune existing models. Includes loss curves, live sample generation, and snapshot saves.
+* **Prepare ▸ Models:** Model library, checkpoint pinning, Hugging Face model imports, and format conversion.
+* **Create ▸ Canvas:** DDIM sampling with step-by-step previews, CLIP text/image guidance, img2img, inpainting (soft/hard brushes), and upscaling.
+* **Create ▸ Bend:** Interactive UNet layer activation targeting, hook-based ops, scheduled hooks, and seed-matched A/B comparison.
+* **Create ▸ Merge:** Two-way model weight merging with live comparison against parent models.
+* **Create ▸ Sweep:** 1D and 2D parameter sweep grids with exportable contact sheets.
 
 ---
 
@@ -103,9 +103,9 @@ The installer attempts to download the CUDA-enabled wheel automatically. To inst
 
 Repositories do not include checkpoint weights. Models can be sourced via:
 
-1. **Pretrained xurdif Checkpoints:** Download `.pt` files from the [author's Dropbox repository](https://www.dropbox.com/scl/fo/flh4pczukrrlb3ar1rfuc/AAT22M2b21Tf1yKe3Ji0HS0?rlkey=f1zdhexy36p3hffcun686m77c&dl=0) and load them in **Workshop ▸ Models ▸ Get a model**.
-2. **Hugging Face Hub:** Import unconditional DDPM models under **Workshop ▸ Models ▸ From Hugging Face**. *(Note: Latent text-to-image models like Stable Diffusion are not supported.)*
-3. **Local Training:** Prepare an image folder under **Workshop ▸ Data** and run training via **Workshop ▸ Train**.
+1. **Pretrained xurdif Checkpoints:** Download `.pt` files from the [author's Dropbox repository](https://www.dropbox.com/scl/fo/flh4pczukrrlb3ar1rfuc/AAT22M2b21Tf1yKe3Ji0HS0?rlkey=f1zdhexy36p3hffcun686m77c&dl=0) and load them in **Prepare ▸ Models ▸ Get a model**.
+2. **Hugging Face Hub:** Import unconditional DDPM models under **Prepare ▸ Models ▸ From Hugging Face**. *(Note: Latent text-to-image models like Stable Diffusion are not supported.)*
+3. **Local Training:** Prepare an image folder under **Prepare ▸ Data** and run training via **Prepare ▸ Train**.
 
 ---
 
@@ -173,7 +173,7 @@ models/            # Local scratch checkpoints
 
 `TinyUNet2DModel` is a direct reimplementation of xurdif's architecture inside the Diffusers ecosystem. At 512×512 resolution, it evaluates ~4× faster during sampling and ~7× faster during training than a standard `UNet2DModel` while cutting VRAM usage in half.
 
-To convert a legacy `.pt` model to Diffusers format without precision loss, use **Workshop ▸ Models ▸ Re-home a model**.
+To convert a legacy `.pt` model to Diffusers format without precision loss, use **Prepare ▸ Models ▸ Re-home a model**.
 
 ---
 

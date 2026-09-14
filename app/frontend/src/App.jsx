@@ -80,7 +80,7 @@ function Shell() {
   const onStart = mode === "start";
 
   // Roll each pane's tab flags up to the mode switch, so a job running in Play
-  // is still visible while you are over in the Workshop. On Start the switch is
+  // is still visible while you are over in Prepare. On Start the switch is
   // hidden, and the hub puts the same flags on its own two buttons instead.
   const modeBusy = {
     prepare: anyBusy(busyTabs, PREPARE_TAB_IDS),
@@ -137,7 +137,7 @@ function Shell() {
         <div className="subnav-bar">
           {mode === "prepare" ? (
             <SubNav
-              ariaLabel="Workshop section"
+              ariaLabel="Prepare section"
               tabs={PREPARE_TABS}
               value={PREPARE_TAB_IDS.includes(prepareTab) ? prepareTab : "data"}
               onChange={setPrepareTab}
@@ -145,7 +145,7 @@ function Shell() {
             />
           ) : (
             <SubNav
-              ariaLabel="Play tool"
+              ariaLabel="Create tool"
               tabs={PLAY_TABS}
               value={playTab}
               onChange={setPlayTab}

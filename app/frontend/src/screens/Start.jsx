@@ -154,12 +154,12 @@ export default function Start() {
         </div>
         <div className="start-paths">
           <button type="button" className="start-path" onClick={() => openPrepare({ tab: "data" })}>
-            <span className="start-path-name">Workshop</span>
+            <span className="start-path-name">Prepare</span>
             <span className="start-path-sub">Build datasets, train models</span>
             {prepareBusy && <span className="tab-runbar" aria-hidden="true" />}
           </button>
           <button type="button" className="start-path primary" onClick={() => openPlay({ tab: "create" })}>
-            <span className="start-path-name">Play</span>
+            <span className="start-path-name">Create</span>
             <span className="start-path-sub">Generate, bend, merge, sweep</span>
             {playBusy && <span className="tab-runbar" aria-hidden="true" />}
           </button>
@@ -194,7 +194,7 @@ export default function Start() {
           <Loading>Loading models…</Loading>
         ) : !cards.length ? (
           <Empty>
-            No models yet. Train one in the Workshop, or download a starting point from the Library.
+            No models yet. Train one in Prepare, or download a starting point from the Library.
           </Empty>
         ) : (
           <div className="start-grid">
@@ -216,7 +216,7 @@ export default function Start() {
         {captures === null ? (
           <Loading>Loading captures…</Loading>
         ) : !captures.length ? (
-          <Empty>No saved images yet. Capture an output in Play and it shows up here.</Empty>
+          <Empty>No saved images yet. Capture an output in Create and it shows up here.</Empty>
         ) : (
           <div className="start-strip">
             {captures.map((it) => (

@@ -84,13 +84,13 @@ export function ModelRows({ models, loading, onPick, onRename, onTrain, onDelete
   if (!ordered.length) {
     return (
       <Empty>
-        No library models yet. Save a training snapshot in Workshop ▸ Train, merge in Play, or download one in Workshop ▸ Models.
+        No library models yet. Save a training snapshot in Prepare ▸ Train, merge in Create, or download one in Prepare ▸ Models.
       </Empty>
     );
   }
   return (
     <div className="col gap-2">
-      <p className="hint mb-0">Named models you keep. Pin favorites with ★. Use in Create opens Play with that model selected.</p>
+      <p className="hint mb-0">Named models you keep. Pin favorites with ★. Use in Create opens the canvas with that model selected.</p>
       {ordered.map((m) => (
         <div
           key={m.path}
@@ -126,7 +126,7 @@ export function ModelRows({ models, loading, onPick, onRename, onTrain, onDelete
   );
 }
 
-/** Card grid used in Workshop ▸ Models. */
+/** Card grid used in Prepare ▸ Models. */
 export function ModelCards({
   models, onUse, onStar, onTrain, onRename, onDelete,
   sort: sortProp, onSortChange, thumbLevel: sizeProp, onSizeChange,
