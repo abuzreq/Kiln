@@ -5,7 +5,9 @@ import SweepPanel from "./Sweep.jsx";
 import Merge from "./Merge.jsx";
 import { useApp } from "../state.jsx";
 import { api, downloadPost, mediaUrl, thumbUrl } from "../api.js";
-import { EyeIcon, InvertIcon, ClearIcon, UpIcon, DownIcon, TrashIcon } from "../components/icons.jsx";
+import {
+  EyeIcon, InvertIcon, ClearIcon, UpIcon, DownIcon, TrashIcon, DownloadIcon, CaptureIcon,
+} from "../components/icons.jsx";
 import { Progress, Slider, Tooltip, TipLabel } from "../components/ui.jsx";
 import { PlayCtx, usePlay, fileToDataUrl } from "./playContext.jsx";
 import {
@@ -1244,7 +1246,6 @@ function PlayCanvas({ brushable }) {
                 <strong>{liveMasks.length > 1
                   ? `${liveMasks.length} masks on`
                   : activeMask?.name || "Mask on"}</strong>
-                {" "}· {maskPixels.toLocaleString()} px
               </TipLabel>
             </span>
           </div>
@@ -1285,55 +1286,55 @@ function PlayCanvas({ brushable }) {
             </div>
           )}
         </div>
-        <div className="row wrap center mt-2 gap-2 canvas-size-row">
-          <Tooltip text="Canvas size in pixels. Changing it starts a new blank canvas with New canvas.">
-            <span className="sub has-tip">Canvas</span>
-          </Tooltip>
-          <span className="canvas-size-pair">
-            <input
-              type="number" className="canvas-size-input" aria-label="Canvas width"
-              value={canvasSize.w} min={CANVAS_MIN} max={CANVAS_MAX} step={64}
-              onChange={(e) => setCanvasSize({ w: e.target.value })}
-            />
-            <span className="sub">×</span>
-            <input
-              type="number" className="canvas-size-input" aria-label="Canvas height"
-              value={canvasSize.h} min={CANVAS_MIN} max={CANVAS_MAX} step={64}
-              onChange={(e) => setCanvasSize({ h: e.target.value })}
-            />
-          </span>
-          <Tooltip text="Start again on a blank canvas at this size. Whatever is on the canvas now stays in Results, so this does not lose it.">
-            <button type="button" className="btn sm" onClick={() => newCanvas(canvasSize.w, canvasSize.h)}>
-              New canvas
-            </button>
-          </Tooltip>
-          <Tooltip text="Open an image from disk. Dropping one onto the canvas, or pasting it, does the same thing.">
-            <button type="button" className="btn sm ghost" onClick={() => openRef.current?.click()}>
-              Open image…
-            </button>
-          </Tooltip>
-          <input
-            ref={openRef}
-            type="file"
-            accept="image/*"
-            className="hidden-file"
-            onChange={(e) => { loadFile(e.target.files?.[0]); e.target.value = ""; }}
-          />
-        </div>
-        <div className="row wrap mt-2 gap-2">
-          {shown && (
-            <Tooltip text="Download the canvas as a PNG. The sampling settings that made it are written into the file, so dropping it back into Kiln restores them.">
-              <button type="button" className="btn sm" onClick={download} disabled={busy}>
-                {busy ? "Preparing…" : "Download"}
-              </button>
+        {/* One bar under the picture: the canvas itself on the left (size, new,
+            open), what to do with the picture on the right (download, capture,
+            clear). Words where the action is a verb people scan for; the
+            destructive one is an icon with a tooltip, out at the end. */}
+        <div className="canvas-bar mt-2">
+          <div className="canvas-bar-group">
+            <Tooltip text="Canvas size in pixels. Changing it starts a new blank canvas with New.">
+              <span className="sub has-tip">Canvas</span>
             </Tooltip>
-          )}
-          {shown && <CaptureButton image={shown} card={frameCard} label="Capture" />}
+            <span className="canvas-size-pair">
+              <input
+                type="number" className="canvas-size-input" aria-label="Canvas width"
+                value={canvasSize.w} min={CANVAS_MIN} max={CANVAS_MAX} step={64}
+                onChange={(e) => setCanvasSize({ w: e.target.value })}
+              />
+              <span className="sub">×</span>
+              <input
+                type="number" className="canvas-size-input" aria-label="Canvas height"
+                value={canvasSize.h} min={CANVAS_MIN} max={CANVAS_MAX} step={64}
+                onChange={(e) => setCanvasSize({ h: e.target.value })}
+              />
+            </span>
+            <Tooltip text="Start again on a blank canvas at this size. Whatever is on the canvas now stays in Results, so this does not lose it.">
+              <button type="button" className="btn sm" onClick={() => newCanvas(canvasSize.w, canvasSize.h)}>New</button>
+            </Tooltip>
+            <Tooltip text="Open an image from disk. Dropping one onto the canvas, or pasting it, does the same thing.">
+              <button type="button" className="btn sm ghost" onClick={() => openRef.current?.click()}>Open…</button>
+            </Tooltip>
+            <input
+              ref={openRef}
+              type="file"
+              accept="image/*"
+              className="hidden-file"
+              onChange={(e) => { loadFile(e.target.files?.[0]); e.target.value = ""; }}
+            />
+          </div>
           <div className="spacer" />
           {shown && (
-            <Tooltip text="Back to a blank canvas at the current size — drops every layer and mask. The image itself stays in Results.">
-              <button type="button" className="btn ghost sm" onClick={clearCanvas}>Clear canvas</button>
-            </Tooltip>
+            <div className="canvas-bar-group">
+              <Tooltip text="Download the canvas as a PNG. The sampling settings that made it are written into the file, so dropping it back into Kiln restores them.">
+                <button type="button" className="btn sm" onClick={download} disabled={busy}>
+                  <DownloadIcon /> {busy ? "Preparing…" : "Download"}
+                </button>
+              </Tooltip>
+              <CaptureButton image={shown} card={frameCard} label={<><CaptureIcon /> Capture</>} />
+              <Tooltip text="Clear the canvas: back to blank at the current size, dropping every layer and mask. The image itself stays in Results.">
+                <button type="button" className="btn ghost sm danger icon" onClick={clearCanvas} aria-label="Clear canvas"><TrashIcon /></button>
+              </Tooltip>
+            </div>
           )}
         </div>
       </div>
@@ -1945,7 +1946,7 @@ function MaskOverlay({ active }) {
             onPointerUp={endMove}
             onPointerCancel={endMove}
           >
-            {activeMask?.name} · {activeBox.count.toLocaleString()} px
+            {activeMask?.name}
           </span>
         </div>
       )}
@@ -1969,6 +1970,31 @@ function MaskOverlay({ active }) {
  *  Every row used to show all of its controls all the time, which made three
  *  layers enough to push the rest of the panel below the fold.
  */
+/** A mask's shape at row size: its strokes replayed small, blue on a checker.
+ *  Redraws when the strokes change, which every edit makes them do. */
+function MaskThumb({ mask, w, h, version }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const c = ref.current;
+    if (!c) return;
+    const ar = w && h ? w / h : 1;
+    const rw = ar >= 1 ? 96 : Math.max(8, Math.round(96 * ar));
+    const rh = ar >= 1 ? Math.max(8, Math.round(96 / ar)) : 96;
+    const scratch = document.createElement("canvas");
+    rasterize(mask, scratch, rw, rh);
+    const size = 26;
+    c.width = size;
+    c.height = size;
+    const ctx = c.getContext("2d");
+    ctx.clearRect(0, 0, size, size);
+    const fit = Math.min(size / rw, size / rh);
+    const dw = rw * fit;
+    const dh = rh * fit;
+    ctx.drawImage(scratch, (size - dw) / 2, (size - dh) / 2, dw, dh);
+  }, [mask.strokes, version, w, h]);
+  return <canvas ref={ref} className="layer-thumb mask-thumb" aria-hidden="true" />;
+}
+
 function EntityRow({
   entity, thumb, details, actions, headExtra, active = false, canDelete = true, shown, onShow, eyeTip,
 }) {
@@ -2142,7 +2168,7 @@ function LayersPanel() {
   const {
     rasterLayers, inpaintMasks, setLayerOpacity, useLayerAsMask, activeLayer,
     addLayer, duplicateLayer, setEntityEnabled, setMaskVisible,
-    addMask, clearMask, invertMask, maskPixels, liveMasks, undo, canUndo, redo, canRedo,
+    addMask, clearMask, invertMask, liveMasks, undo, canUndo, redo, canRedo, canvasSize, maskVersion,
   } = usePlay();
 
   return (
@@ -2213,7 +2239,7 @@ function LayersPanel() {
     <aside className="card layers-panel masks-panel" aria-label="Inpaint Masks">
       <div className="row between center mb-2">
         <h3 className="mb-0">Inpaint Masks</h3>
-        <span className="sub">{liveMasks.length ? `${maskPixels.toLocaleString()} px on` : "none on"}</span>
+        <span className="sub">{liveMasks.length ? `${liveMasks.length} on` : "none on"}</span>
       </div>
       <Tooltip text="A new empty mask, selected so the brush paints into it. Every mask that is on counts for the next run.">
         <button type="button" className="btn sm w-full mb-2" onClick={addMask}>Add mask</button>
@@ -2222,6 +2248,7 @@ function LayersPanel() {
         <EntityRow
           key={m.id}
           entity={m}
+          thumb={<MaskThumb mask={m} w={canvasSize.w} h={canvasSize.h} version={maskVersion} />}
           shown={maskShown(m)}
           onShow={(v) => setMaskVisible(m.id, v)}
           eyeTip={maskShown(m)

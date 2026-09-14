@@ -1677,3 +1677,12 @@ a { color: var(--accent); }
 
 .layer-actions .btn.icon { padding: 3px 6px; }
 .layer-actions .btn.icon .ico { width: 13px; height: 13px; }
+
+/* Under the canvas: one bar, two groups. */
+.canvas-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
+.canvas-bar-group { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
+.canvas-bar .tip-wrap { display: inline-flex; }
+.mask-thumb {
+  background: repeating-conic-gradient(var(--bg-3) 0 25%, var(--bg-2) 0 50%) 0 0 / 8px 8px;
+  border: 1px solid var(--line);
+}

@@ -539,7 +539,7 @@ export default function CreatePanel() {
     ? `${runSteps} of ${sampleParams.steps} steps`
     : `${runSteps} steps`;
   const generateHint = hasMask
-    ? `${maskName} · ${maskPixels.toLocaleString()} px · ${stepText}`
+    ? `${maskName} · ${stepText}`
     : reworkCanvas
       ? `Whole canvas · reworked · ${sampleParams.image_size}px · ${stepText}`
       : `Whole canvas · new image · ${sampleParams.image_size}px · ${stepText}`;
@@ -748,7 +748,6 @@ export default function CreatePanel() {
         title="Mask"
         defaultOpen
         className="create-section"
-        extra={hasMask ? <span className="pill on">{maskPixels.toLocaleString()} px</span> : null}
         tip="Paint where a run may change things. Masks are rows in the Layers panel and stay until you hide or delete them."
       >
         <div className="row between center wrap gap-2 mb-2">
