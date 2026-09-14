@@ -1673,5 +1673,7 @@ a { color: var(--accent); }
 /* Layers and Inpaint masks: two cards, one under the other. */
 .layers-stack { display: flex; flex-direction: column; gap: var(--s-3); min-width: 0; }
 .panel-count { font-weight: 500; margin-left: 4px; }
-.masks-panel h3 { color: var(--stage-encoder); }
 .fill-edge { padding-top: var(--s-2); border-top: 1px dashed var(--line); }
+
+.layer-actions .btn.icon { padding: 3px 6px; }
+.layer-actions .btn.icon .ico { width: 13px; height: 13px; }

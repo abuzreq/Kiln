@@ -184,3 +184,28 @@ export function AddIcon(props) {
     </Icon>
   );
 }
+
+export function UpIcon(props) {
+  return (
+    <Icon {...props}>
+      <path d="M12 19V5M5 12l7-7 7 7" />
+    </Icon>
+  );
+}
+
+export function DownIcon(props) {
+  return (
+    <Icon {...props}>
+      <path d="M12 5v14M5 12l7 7 7-7" />
+    </Icon>
+  );
+}
+
+export function TrashIcon(props) {
+  return (
+    <Icon {...props}>
+      <path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14" />
+      <path d="M10 10v6M14 10v6" />
+    </Icon>
+  );
+}

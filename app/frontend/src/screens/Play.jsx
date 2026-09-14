@@ -5,7 +5,7 @@ import SweepPanel from "./Sweep.jsx";
 import Merge from "./Merge.jsx";
 import { useApp } from "../state.jsx";
 import { api, downloadPost, mediaUrl, thumbUrl } from "../api.js";
-import { EyeIcon } from "../components/icons.jsx";
+import { EyeIcon, InvertIcon, ClearIcon, UpIcon, DownIcon, TrashIcon } from "../components/icons.jsx";
 import { Progress, Slider, Tooltip, TipLabel } from "../components/ui.jsx";
 import { PlayCtx, usePlay, fileToDataUrl } from "./playContext.jsx";
 import {
@@ -1970,7 +1970,7 @@ function MaskOverlay({ active }) {
  *  layers enough to push the rest of the panel below the fold.
  */
 function EntityRow({
-  entity, thumb, details, headExtra, active = false, canDelete = true, shown, onShow, eyeTip,
+  entity, thumb, details, actions, headExtra, active = false, canDelete = true, shown, onShow, eyeTip,
 }) {
   const {
     selectedId, selectEntity, setEntityEnabled, renameEntity, deleteEntity, moveEntity,
@@ -2036,16 +2036,24 @@ function EntityRow({
       {on && (
         <div className="layer-details">
           {details}
+          {/* One row of icon buttons: the row's own actions, then order, then
+              delete. Each says what it is on hover and to a reader. */}
           <div className="layer-actions">
-            <button type="button" className="btn xs ghost" title="Move up"
-              onClick={(e) => { e.stopPropagation(); moveEntity(entity.id, 1); }}>↑</button>
-            <button type="button" className="btn xs ghost" title="Move down"
-              onClick={(e) => { e.stopPropagation(); moveEntity(entity.id, -1); }}>↓</button>
+            {actions}
+            <Tooltip text="Move up">
+              <button type="button" className="btn xs ghost icon" aria-label="Move up"
+                onClick={(e) => { e.stopPropagation(); moveEntity(entity.id, 1); }}><UpIcon /></button>
+            </Tooltip>
+            <Tooltip text="Move down">
+              <button type="button" className="btn xs ghost icon" aria-label="Move down"
+                onClick={(e) => { e.stopPropagation(); moveEntity(entity.id, -1); }}><DownIcon /></button>
+            </Tooltip>
             <div className="spacer" />
-            <button type="button" className="btn xs ghost danger"
-              title={canDelete ? "Delete" : "The last layer stays — there is always one to work in"}
-              disabled={!canDelete}
-              onClick={(e) => { e.stopPropagation(); deleteEntity(entity.id); }}>Delete</button>
+            <Tooltip text={canDelete ? "Delete" : "The last layer stays — there is always one to work in"}>
+              <button type="button" className="btn xs ghost danger icon" aria-label="Delete"
+                disabled={!canDelete}
+                onClick={(e) => { e.stopPropagation(); deleteEntity(entity.id); }}><TrashIcon /></button>
+            </Tooltip>
           </div>
         </div>
       )}
@@ -2202,9 +2210,9 @@ function LayersPanel() {
 
     </aside>
 
-    <aside className="card layers-panel masks-panel" aria-label="Inpaint masks">
+    <aside className="card layers-panel masks-panel" aria-label="Inpaint Masks">
       <div className="row between center mb-2">
-        <h3 className="mb-0">Inpaint masks</h3>
+        <h3 className="mb-0">Inpaint Masks</h3>
         <span className="sub">{liveMasks.length ? `${maskPixels.toLocaleString()} px on` : "none on"}</span>
       </div>
       <Tooltip text="A new empty mask, selected so the brush paints into it. Every mask that is on counts for the next run.">
@@ -2235,14 +2243,18 @@ function LayersPanel() {
               </button>
             </Tooltip>
           )}
-          details={(
-            <div className="layer-actions">
-              <button type="button" className="btn xs ghost" title="Swap masked for unmasked"
-                onClick={(e) => { e.stopPropagation(); invertMask(m.id); }}>Invert</button>
-              <button type="button" className="btn xs ghost" title="Empty it, keep the row and its settings"
-                onClick={(e) => { e.stopPropagation(); clearMask(m.id); }}
-                disabled={!m.strokes.length}>Clear</button>
-            </div>
+          actions={(
+            <>
+              <Tooltip text="Invert: swap masked for unmasked">
+                <button type="button" className="btn xs ghost icon" aria-label="Invert"
+                  onClick={(e) => { e.stopPropagation(); invertMask(m.id); }}><InvertIcon /></button>
+              </Tooltip>
+              <Tooltip text="Clear: empty it, keep the row and its settings">
+                <button type="button" className="btn xs ghost icon" aria-label="Clear"
+                  onClick={(e) => { e.stopPropagation(); clearMask(m.id); }}
+                  disabled={!m.strokes.length}><ClearIcon /></button>
+              </Tooltip>
+            </>
           )}
         />
       ))}
