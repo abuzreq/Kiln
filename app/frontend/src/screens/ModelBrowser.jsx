@@ -116,6 +116,7 @@ function GetFromHuggingFace({ onDone }) {
       {verdict?.ok && (
         <>
           <div className="kv"><span>Type</span><b>{verdict.model.mtype}</b></div>
+          {verdict.model.attn && <div className="kv"><span>Attention</span><b>{verdict.model.attn}</b></div>}
           <div className="kv"><span>Pipeline</span><b>{verdict.pipeline || "—"}</b></div>
           <div className="kv"><span>Sizes</span><b>multiples of {verdict.model.size_multiple}</b></div>
           {(verdict.requires || []).map((r) => (

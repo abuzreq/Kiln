@@ -13,6 +13,7 @@ export function modelSubtitle(m) {
   }
   if (m.step != null) bits.push(`step ${m.step}`);
   if (m.mtype) bits.push(m.mtype);
+  if (m.attn) bits.push(`attention ${m.attn}`);
   if (m.size_mb != null) bits.push(`${m.size_mb} MB`);
   return bits.join(" · ");
 }

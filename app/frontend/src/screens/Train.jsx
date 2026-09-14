@@ -3,6 +3,9 @@ import { api, mediaUrl, pollJob } from "../api.js";
 import { useApp } from "../state.jsx";
 import { Text, Num, Select, Progress, Empty, Modal, Disclose, ConfirmModal, DeleteBtn, Loading, Seg, Tooltip } from "../components/ui.jsx";
 import { modelSubtitle } from "../components/modelMeta.jsx";
+import {
+  KINDS as ATTN_KINDS, depthOf, kindAt, layoutIdFor, locationsFor, trimToDepth, withKind,
+} from "../attnLayout.js";
 import LossChart from "../components/LossChart.jsx";
 import CheckpointGallery from "../components/CheckpointGallery.jsx";
 
@@ -48,7 +51,9 @@ const EMPTY_FORM = {
   // One control, both engines. start() translates it: diffusers spells it
   // objective:"xurdif"|"mse", xurdif takes edge_loss straight through.
   edge_loss: edgeLossDefault("xurdif"),
-  mtype: "tinyunet_with_attention3", mults: "1,2,2,2", save_every: 1000,
+  // The attention layout only means something to the configurable architecture.
+  // It is the vendor's spec string; the pickers under "custom" are a view of it.
+  mtype: "tinyunet_conf_attention", attn: "-1:linear,mid:full", mults: "1,2,2,2", save_every: 1000,
   nsamples: 1, sample_seed: 42, fit: "resize", amp: false, resume: "", nostrict: false,
 };
 
@@ -151,6 +156,12 @@ export default function Train() {
   const [info, setInfo] = useState(null);
   const [presets, setPresets] = useState({});
   const [archs, setArchs] = useState([]);
+  // Named attention layouts and the default spec come from the server, so the
+  // list lives in one place (app/core/backends/xurdif/attn.py).
+  const [archInfo, setArchInfo] = useState({ layouts: [], default_attn: "", conf_mtype: "tinyunet_conf_attention" });
+  // "Custom" stays open once chosen even while the pickers happen to spell a
+  // named layout, so the panel does not snap shut mid-edit.
+  const [customLayout, setCustomLayout] = useState(false);
   const [engines, setEngines] = useState([]);
   const [job, setJob] = useState(null);
   const [runView, setRunView] = useState(null);
@@ -171,6 +182,14 @@ export default function Train() {
 
   const [form, setForm] = useState({ ...EMPTY_FORM });
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  // Attention layout, derived from the spec string in the form.
+  const isConf = form.backend === "xurdif" && form.mtype === archInfo.conf_mtype;
+  const layouts = archInfo.layouts || [];
+  const layoutId = layoutIdFor(form.attn, layouts);
+  const layoutLabel = (spec) => {
+    const hit = layouts.find((l) => l.spec === spec);
+    return hit ? `${hit.label} (${spec})` : (spec || "—");
+  };
 
   const train = info?.train || { status: "not_started", label: "Not started" };
   const running = job && job.status === "running";
@@ -239,6 +258,7 @@ export default function Train() {
         lr: FT_DEFAULT_LR,
         mtype: d.mtype || f.mtype,
         mults: Array.isArray(d.mults) ? d.mults.join(",") : f.mults,
+        attn: d.attn ?? f.attn,
         pred: d.pred || f.pred,
         accum: d.config?.accum ?? f.accum,
       }));
@@ -315,7 +335,11 @@ export default function Train() {
         applyPresetFrom(p, rec, { announce: false });
       }
     });
-    api.get("/architectures").then((d) => setArchs(d.architectures));
+    api.get("/architectures").then((d) => {
+      setArchs(d.architectures);
+      setArchInfo({ layouts: d.layouts || [], default_attn: d.default_attn || "", conf_mtype: d.conf_mtype || "tinyunet_conf_attention" });
+      if (d.default_attn) setForm((f) => ({ ...f, attn: f.attn || d.default_attn }));
+    });
     api.get("/train/backends").then((d) => setEngines(d.backends || [])).catch(() => {});
     return () => { cancelled = true; };
   }, []);
@@ -732,8 +756,40 @@ export default function Train() {
                 {form.backend === "xurdif" ? (
                   <>
                     <Select label="Architecture" value={form.mtype} onChange={(v) => set("mtype", v)} options={archs.length ? archs : [form.mtype]}
-                      tip="Which network shape to build. The variants with attention see more of the image at once, which helps with overall composition but costs speed and memory. Fixed for the life of a model: you cannot change it later and resume." />
-                    <Text label="Channel multipliers" value={form.mults} onChange={(v) => set("mults", v)}
+                      tip={"Which network shape to build. Fixed for the life of a model: you cannot change it later and resume.\n\ntinyunet_conf_attention is the current default and lets you choose where attention goes. tinyunet_with_attention3 is the earlier shape, with one attention layer at the bottleneck; models made before this option are that kind."} />
+                    {isConf && (
+                      <>
+                        <Select label="Attention layout" value={customLayout ? "custom" : layoutId}
+                          onChange={(v) => {
+                            if (v === "custom") { setCustomLayout(true); return; }
+                            const hit = layouts.find((l) => l.id === v);
+                            if (hit) setForm((f) => ({ ...f, attn: hit.spec }));
+                            setCustomLayout(false);
+                          }}
+                          options={[
+                            ...layouts.map((l) => ({ value: l.id, label: l.label, title: l.tip })),
+                            { value: "custom", label: "Custom…", title: "Choose the attention kind at every level yourself." },
+                          ]}
+                          tip={"Attention lets each spot in the image look at every other spot, which helps overall composition. Here you choose where in the network it sits and what kind it is.\n\nThe bottleneck is the smallest, deepest level. Level -1 is one step above it, -2 the step above that. Full attention above the bottleneck is expensive (it grows with the square of the pixels); linear and window attention are cheap. Fixed for the life of a model."} />
+                        {(customLayout || layoutId === "custom") && (
+                          <div className="row gap-2 wrap">
+                            {["mid", ...locationsFor(depthOf(form.mults))].map((loc) => (
+                              <div className="grow" key={loc}>
+                                <Select label={loc === "mid" ? "Bottleneck" : `Level ${loc}`}
+                                  value={kindAt(form.attn, loc)}
+                                  onChange={(v) => setForm((f) => ({ ...f, attn: withKind(f.attn, loc, v) }))}
+                                  options={ATTN_KINDS}
+                                  tip={loc === "mid"
+                                    ? "The deepest level, where the image is smallest. Full attention is cheap here and is what every earlier model had."
+                                    : `${-parseInt(loc, 10)} step${loc === "-1" ? "" : "s"} above the bottleneck. full sees the whole image at this size (costly); linear approximates that cheaply; window looks only within 8x8 patches; none skips attention at this level.`} />
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    )}
+                    <Text label="Channel multipliers" value={form.mults}
+                      onChange={(v) => setForm((f) => ({ ...f, mults: v, attn: trimToDepth(f.attn, depthOf(v)) }))}
                       tip={"Width of the network at each resolution, coarsest last. \"1 2 2 2\" is the default.\n\nBigger numbers mean more capacity and a larger, slower model; the count of numbers sets how many times the image is halved, so it also decides the smallest resolution the model works at. Two models can only be merged if these match."} />
                     <div className="row gap-2">
                       <div className="grow"><Select label="Prediction" value={form.pred} onChange={(v) => set("pred", v)} options={["x0", "eps"]}
@@ -791,6 +847,9 @@ export default function Train() {
                 <div className="kv"><span>Grad accum</span><b>{form.accum}</b></div>
                 {form.backend === "xurdif" && (
                   <div className="kv"><span>Channel multipliers</span><b>{form.mults}</b></div>
+                )}
+                {isConf && (
+                  <div className="kv"><span>Attention</span><b>{layoutLabel(form.attn)}</b></div>
                 )}
                 <div className="kv"><span>Edge-aware loss</span><b>{form.edge_loss ? "on" : "off"}</b></div>
               </div>
@@ -885,6 +944,7 @@ export default function Train() {
                   <div className="kv"><span>Save every</span><b>{runMeta.save_every ?? "—"} steps</b></div>
                   <div className="kv"><span>Architecture</span><b>{runMeta.mtype || "—"}</b></div>
                   <div className="kv"><span>Channel multipliers</span><b>{multsLabel}</b></div>
+                  {runMeta.attn && <div className="kv"><span>Attention</span><b>{layoutLabel(runMeta.attn)}</b></div>}
                   <div className="kv"><span>Prediction</span><b>{runMeta.pred || "—"}</b></div>
                   <div className="kv"><span>Learning rate</span><b>{runMeta.lr ?? "—"}</b></div>
                   <div className="kv"><span>Accumulation</span><b>{runMeta.accum ?? "—"}</b></div>

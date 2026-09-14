@@ -195,6 +195,7 @@ export function ModelCards({
               : <div className="model-lightbox-empty sub">No sample image</div>}
             <div className="model-lightbox-meta">
               <div className="kv"><span>Type</span><b>{lightbox.mtype || "—"}</b></div>
+              {lightbox.attn && <div className="kv"><span>Attention</span><b>{lightbox.attn}</b></div>}
               {lightbox.step != null && <div className="kv"><span>Step</span><b>{lightbox.step}</b></div>}
               <div className="kv"><span>Size</span><b>{lightbox.size_mb} MB</b></div>
             </div>

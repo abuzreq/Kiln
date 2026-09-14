@@ -371,7 +371,7 @@ export function BendWorkspace({ stack, setStack }) {
         <div className="row between center wrap gap-2">
           <h3 className="mb-0">Bend</h3>
           {graph?.model && (
-            <span className="pill">{graph.model.mtype} · {graph.model.mults?.join("-")}</span>
+            <span className="pill">{graph.model.mtype} · {graph.model.mults?.join("-")}{graph.model.attn ? ` · ${graph.model.attn}` : ""}</span>
           )}
         </div>
         <p className="hint mb-0 mt-1">

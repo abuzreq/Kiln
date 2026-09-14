@@ -273,6 +273,7 @@ function ModelPanelReadonly({ title, model, shot, hint }) {
         <>
           <b>{model.name}</b>
           <div className="kv"><span>Type</span><b>{model.mtype}</b></div>
+          {model.attn && <div className="kv"><span>Attention</span><b>{model.attn}</b></div>}
         </>
       )}
     </div>
@@ -296,7 +297,7 @@ function ModelPanel({ title, model, value, onChange, options, shot }) {
             : <span className="sub">{model ? "No sample yet — generate a compare" : "Pick a model"}</span>}
       </div>
       {model && (
-        <div className="kv"><span>Type</span><b>{model.mtype}</b></div>
+        <div className="kv"><span>Type</span><b>{model.mtype}{model.attn ? ` · ${model.attn}` : ""}</b></div>
       )}
     </div>
   );
