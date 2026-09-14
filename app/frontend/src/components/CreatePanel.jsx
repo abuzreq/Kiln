@@ -78,7 +78,7 @@ export default function CreatePanel() {
     maskTool, setMaskTool, wandTolerance, setWandTolerance,
     shapeKind, setShapeKind, genShape, setGenShape, polygonRef, polyCount, addStroke, addMaskWithStroke,
     getMaskDataUrl, applyContrastMask, frameCard, activeLayer,
-    activeMask, maskPixels, hasMask, invertMask, clearMask, setMaskParam, nudgeMask,
+    activeMask, maskPixels, hasMask, liveMasks, invertMask, clearMask, setMaskParam, nudgeMask,
     undo, canUndo, redo, canRedo, tab, setLivePreview,
     job, setJob, genRunning, genPaused, canvasIsBlank,
   } = usePlay();
@@ -371,7 +371,7 @@ export default function CreatePanel() {
    *  Undo takes it back. To keep two attempts side by side, duplicate the
    *  layer first, or make a new one: toggling between them is the comparison.
    */
-  const finishFill = async (done, maskSrc) => {
+  const finishFill = async (done, maskSrc, maskIds = []) => {
     setProgress(null);
     if (done.status === "error") toast(done.message, "error");
     if (done.status === "done") setSplitPending(true);
@@ -380,7 +380,7 @@ export default function CreatePanel() {
       for (let i = 0; i < out.length - 1; i += 1) pushHistory(out[i].img, out[i].raw, out[i].card);
       const pick = out[out.length - 1];
       if (pick) {
-        await fillIntoLayer(pick.img, pick.card, maskSrc);
+        await fillIntoLayer(pick.img, pick.card, maskSrc, { maskIds });
         pushHistory(pick.img, pick.raw, pick.card);
       }
       if (out.length > 1) {
@@ -400,6 +400,9 @@ export default function CreatePanel() {
    *  not whatever the overlay holds by the time the job finishes.
    */
   const runFill = async ({ init, mask, batchSize = 1 }) => {
+    // The masks that are on now are the ones this fill uses; they turn off
+    // when it lands, so remember them here rather than reading the list later.
+    const usedMasks = liveMasks.map((m) => m.id);
     if (!modelPath) { toast("Pick a model first", "error"); return null; }
     const bendName = regionBendPreset || genBendPreset || "";
     const genBends = resolveBends(bendPresets, regionBendPreset)
@@ -423,7 +426,7 @@ export default function CreatePanel() {
       onJob(j);
       pausedSnapshot.current = snapshotLive();
       const done = await pollJob(j.id, onJob, 300);
-      await finishFill(done, mask);
+      await finishFill(done, mask, usedMasks);
       return done;
     } catch (e) {
       toast(e.message, "error"); setProgress(null); setLivePreview(null); setJob(null);
@@ -569,7 +572,7 @@ export default function CreatePanel() {
         <h3>
           <TipLabel tip={hasMask
             ? `${maskName} is on, so this reworks only that area and leaves the rest alone. `
-              + "The mask stays until you turn it off, so you can try another model or setting on the same area."
+              + "When the fill lands, the mask turns off, so the next run is the whole canvas again; turn it back on to try another model or setting on the same area."
             : canvasIsBlank
               ? "Makes a new image. Mask an area below to rework only that part of the canvas instead."
               : "Reworks the whole canvas by the amount of Change; at full Change it makes a new image. "

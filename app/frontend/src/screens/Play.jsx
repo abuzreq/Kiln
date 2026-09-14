@@ -896,15 +896,23 @@ export default function Play() {
    *  in that layer. To keep the first, duplicate the layer before filling
    *  again; to drop the second, Undo. Kiln never adds a layer of its own.
    */
-  const fillIntoLayer = useCallback(async (img, card, maskSrc) => {
+  const fillIntoLayer = useCallback(async (img, card, maskSrc, { maskIds = [] } = {}) => {
     const punched = await punchToMask(img, maskSrc);
     const target = pickActiveLayer(docRef.current, activeLayerRef.current);
     if (!target) return;
     const { w, h } = canvasSizeRef.current;
     const merged = await compositeOnto(target.image, punched, w, h);
-    writeLayer(target.id, merged, card);
+    // The layer write and the masks turning off are one edit, so one Undo
+    // takes back both: the fill, and the mask that made it going quiet.
+    // A mask that has done its fill turns off rather than staying armed, so
+    // the next Generate is the whole canvas again unless you turn it back on.
+    const off = new Set(maskIds);
+    edit((doc) => ({
+      rasterLayers: patchEntity(doc.rasterLayers, target.id, { image: merged, card: card ?? null, enabled: true }),
+      inpaintMasks: doc.inpaintMasks.map((m) => (off.has(m.id) ? { ...m, enabled: false } : m)),
+    }), { redraw: off.size > 0 });
     setLivePreview(null);
-  }, [pickActiveLayer, writeLayer]);
+  }, [pickActiveLayer, edit]);
 
   /** A whole-canvas generation replaces the active layer's image. */
   const generateIntoLayer = useCallback((img, raw, card) => {
