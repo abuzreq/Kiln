@@ -164,7 +164,9 @@ trainer = Trainer(
 )
 
 if opt.load != "":
-    data = torch.load(opt.load)
+    # KILN: checkpoints now carry 'opt', an argparse Namespace, which torch 2.6+
+    # refuses under its default weights-only load. These are the run's own files.
+    data = torch.load(opt.load, weights_only=False)
     #trainer.load(data)
     trainer.step = data['step']
     trainer.model.load_state_dict(data['model'], strict=not opt.nostrict)

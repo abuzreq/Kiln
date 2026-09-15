@@ -949,7 +949,9 @@ class Trainer(object):
             'scaler': self.scaler.state_dict(),
             'mults': self.opts.mults,
             'mtype': self.opts.model,
-            'pred' : self.opts.pred
+            'pred' : self.opts.pred,
+            'attn_conf' : self.opts.attn,
+            'opt' : self.opts
         }
         torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
 

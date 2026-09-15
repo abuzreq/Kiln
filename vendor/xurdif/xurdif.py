@@ -874,15 +874,14 @@ class Trainer(object):
             'scaler': self.scaler.state_dict(),
             'mults': self.opts.mults,
             'mtype': self.opts.model,
-            'pred' : self.opts.pred
+            'pred' : self.opts.pred,
+            # KILN: the attention layout, recorded exactly as upstream's
+            # xurdif2.py records it since a566214: the --attn string, and the
+            # whole options namespace, which for the conf model also carries
+            # the parsed attn_config it was built with.
+            'attn_conf' : self.opts.attn,
+            'opt' : self.opts
         }
-        # KILN: record the attention layout of a tinyunet_conf_attention model.
-        # Upstream never writes it, yet xurdiffer26c.py reads 'attn_config' and
-        # silently falls back to the bottleneck-only default when it is absent.
-        # 'attn' is the spec string as typed; 'attn_config' the parsed dict.
-        if getattr(self.opts, "attn", None) is not None:
-            data['attn'] = self.opts.attn
-            data['attn_config'] = getattr(self.opts, "attn_config", None)
         torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
 
     def load(self, milestone):

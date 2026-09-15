@@ -169,12 +169,19 @@ class XurdifBackend(Backend):
             **info,
             **slots,
         }
-        # The layout decides which tensors exist, so a merged conf model must
-        # carry it exactly as its parents did (check_compat has already made
-        # sure both parents agree).
-        if meta.attn is not None:
-            out["attn"] = meta.attn
-            out["attn_config"] = attn_spec.parse(meta.attn)
+        # Recorded the way upstream's trainer records it: ``attn_conf`` plus an
+        # ``opt`` namespace. A merge has no training options of its own, so its
+        # ``opt`` names only the architecture -- enough for upstream's
+        # generation script, which rebuilds the net from ``opt.attn_config``.
+        # For a conf model the layout decides which tensors exist, and
+        # check_compat has already made sure both parents agree on it.
+        import argparse
+
+        out["attn_conf"] = meta.attn
+        out["opt"] = argparse.Namespace(
+            model=meta.mtype, mults=list(meta.mults), pred=meta.pred,
+            attn=meta.attn, attn_config=attn_spec.parse(meta.attn),
+        )
         # Both slots must exist: everything downstream picks one by name, and a
         # checkpoint missing "ema" silently loads the non-averaged weights.
         if "model" not in out and "ema" in out:

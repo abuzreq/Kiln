@@ -93,19 +93,44 @@ def ema_status(data: dict) -> str:
     return "same"
 
 
-def _attn_of(data: dict) -> str | None:
-    """The recorded attention layout of a conf checkpoint, canonical, or None.
+_UNRECORDED = object()
 
-    Kiln's patched trainer writes both ``attn`` (the spec string) and
-    ``attn_config`` (the dict upstream's generation script reads). A file with
-    neither was trained elsewhere; None here means "unknown", and ``load_net``
-    refuses to guess if the weights then disagree with the constructor default.
+
+def _recorded_spec(data: dict):
+    """The attention layout exactly as a checkpoint stores it, or ``_UNRECORDED``.
+
+    Upstream's trainer (``xurdif2.py`` since a566214) and Kiln's patched one
+    both write ``attn_conf`` -- the ``--attn`` string, None when it was not
+    given -- next to ``opt``, the whole argparse namespace, which also carries
+    ``attn`` and, for the conf model, the parsed ``attn_config``. Files Kiln
+    wrote on 2026-09-14, before it matched upstream, carry ``attn`` and
+    ``attn_config`` at the top level instead, and still read.
     """
-    spec = data.get("attn")
-    if spec is None and isinstance(data.get("attn_config"), dict):
-        spec = data["attn_config"]
+    if "attn_conf" in data:
+        return data["attn_conf"]
+    opt = data.get("opt")
+    if opt is not None and hasattr(opt, "attn"):
+        return opt.attn if opt.attn is not None else getattr(opt, "attn_config", None)
+    if data.get("attn") is not None:
+        return data["attn"]
+    if isinstance(data.get("attn_config"), dict):
+        return data["attn_config"]
+    return _UNRECORDED
+
+
+def _attn_of(data: dict) -> str | None:
+    """The attention layout of a conf checkpoint, canonical, or None if unrecorded.
+
+    A recorded but empty layout means the trainer ran without ``--attn``, so the
+    network was built with the constructor default, full attention at the
+    bottleneck. None returned here means "unknown": ``load_net`` then refuses to
+    guess if the weights disagree with that default.
+    """
+    spec = _recorded_spec(data)
+    if spec is _UNRECORDED:
+        return None
     try:
-        return attn_spec.canonical(spec)
+        return attn_spec.canonical(spec) or attn_spec.canonical("mid:full")
     except ValidationError as e:
         log.warning("unreadable attention layout %r: %s", spec, e)
         return None

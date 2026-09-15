@@ -150,7 +150,9 @@ def check_xurdif(run_name: str = "xur", **over):
         # the patched Trainer.save wrote both keys, and the network rebuilds
         # from them with the attention modules where the layout says
         data = torch.load(ckpts[-1]["path"], map_location="cpu", weights_only=False)
-        assert data.get("attn") == cfg.attn and isinstance(data.get("attn_config"), dict), data.keys()
+        # recorded the way upstream records it: the --attn string plus the options
+        assert data.get("attn_conf") == cfg.attn, data.keys()
+        assert isinstance(getattr(data.get("opt"), "attn_config", None), dict), data.get("opt")
         net, _ = b.load(ref, device="cpu")
         assert type(net.down_attns[-1]).__name__ == "LinearAttention2d", type(net.down_attns[-1])
         ids = [n["id"] for n in b.layer_graph(net, image_size=64)["nodes"]]

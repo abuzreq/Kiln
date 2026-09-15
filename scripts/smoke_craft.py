@@ -36,9 +36,12 @@ def main():
     conf = build_unet("tinyunet_conf_attention", mults, attn_config=attn_spec.parse(conf_spec))
     cstate = {f"denoise_fn.{k}": v for k, v in conf.state_dict().items()}
     cout = ROOT / "workspace_smoke_craft_conf.pt"
+    import argparse
     torch.save({"step": 0, "model": cstate, "ema": cstate, "mults": mults,
-                "mtype": "tinyunet_conf_attention", "pred": "x0",
-                "attn": conf_spec, "attn_config": attn_spec.parse(conf_spec)}, cout)
+                "mtype": "tinyunet_conf_attention", "pred": "x0", "attn_conf": conf_spec,
+                "opt": argparse.Namespace(model="tinyunet_conf_attention", mults=mults, pred="x0",
+                                          attn=conf_spec, attn_config=attn_spec.parse(conf_spec))},
+               cout)
     cbundle = manager.load(str(cout), device="cpu")
     cgraph = introspect(cbundle["model"])
     by_id = {n["id"]: n for n in cgraph["nodes"]}

@@ -51,6 +51,8 @@ print("guardrail incompatible:", not bad["compatible"], bad["reasons"])
 
 # configurable attention: the layout is part of the shape, so two conf models
 # merge only when it matches, and the result carries it
+import argparse
+
 from app.core.backends.xurdif import attn as attn_spec
 
 
@@ -59,9 +61,11 @@ def make_conf(name, seed, spec):
     unet = build_unet("tinyunet_conf_attention", [1, 2, 2, 2], attn_config=attn_spec.parse(spec))
     state = {f"denoise_fn.{k}": v for k, v in unet.state_dict().items()}
     p = workspace.models / f"{name}.pt"
+    # recorded the way upstream's trainer records it: attn_conf plus opt
     torch.save({"step": 0, "model": state, "ema": state, "mults": [1, 2, 2, 2],
-                "mtype": "tinyunet_conf_attention", "pred": "x0",
-                "attn": spec, "attn_config": attn_spec.parse(spec)}, p)
+                "mtype": "tinyunet_conf_attention", "pred": "x0", "attn_conf": spec,
+                "opt": argparse.Namespace(model="tinyunet_conf_attention", mults=[1, 2, 2, 2],
+                                          pred="x0", attn=spec, attn_config=attn_spec.parse(spec))}, p)
     return str(p)
 
 
@@ -76,8 +80,10 @@ r = c.post("/api/craft/merge", json={"model_a": ca, "model_b": cb, "out_name": "
                                      "method": "linear", "alpha": 0.5}).get_json()
 assert r["ok"], r
 merged = _t.load(r["data"]["path"], map_location="cpu", weights_only=False)
-assert merged["attn"] == "-1:linear,mid:full" and merged["attn_config"] == {-1: "linear", "mid": "full"}, merged.keys()
-print("conf guardrail:", diff["reasons"], "| merged conf carries", merged["attn"])
+assert merged["attn_conf"] == "-1:linear,mid:full", merged.keys()
+assert merged["opt"].attn_config == {-1: "linear", "mid": "full"}, merged["opt"]
+assert merged["opt"].model == "tinyunet_conf_attention" and merged["opt"].mults == [1, 2, 2, 2]
+print("conf guardrail:", diff["reasons"], "| merged conf carries", merged["attn_conf"])
 
 for n in ("mergeA", "mergeB", "mergeC", "merged_linear", "merged_slerp", "merged_blockwise",
           "confA", "confB", "confC", "merged_conf"):

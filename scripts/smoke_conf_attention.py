@@ -1,17 +1,20 @@
 """Smoke test for the configurable-attention architecture (CPU, no GPU needed).
 
 Holds Kiln's pure-Python spec parser to the vendored one, builds every named
-layout across network depths, round-trips the layout through a checkpoint, and
-checks that a conf checkpoint with an unrecorded or wrong layout is refused
-rather than silently loaded with missing keys.
+layout across network depths, round-trips the layout through a checkpoint in
+each format that records it, and checks that a conf checkpoint with an
+unrecorded or wrong layout is refused rather than silently loaded with missing
+keys.
 
     python scripts/smoke_conf_attention.py
 """
+import argparse
 import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
 import torch  # noqa: E402
 
@@ -94,23 +97,43 @@ def check_builds():
     print("builds: ok")
 
 
-def _ckpt(net, mults, spec, **extra):
+def _ckpt(net, mults, spec, fmt="upstream", mtype=CONF_MTYPE):
+    """A checkpoint recording ``spec`` in one of the formats found in the wild.
+
+    upstream   -- xurdif2.py since a566214, and Kiln's patched trainer: the
+                  --attn string as ``attn_conf`` plus the options namespace
+    kiln-0914  -- what Kiln wrote for one day before it matched upstream
+    None       -- nothing recorded (upstream before a566214)
+    """
     state = {"denoise_fn." + k: v for k, v in net.state_dict().items()}
     data = {"step": 0, "model": state, "ema": state, "mults": mults,
-            "mtype": CONF_MTYPE, "pred": "x0"}
-    if spec is not None:
+            "mtype": mtype, "pred": "x0"}
+    if fmt == "upstream":
+        data["attn_conf"] = spec
+        data["opt"] = argparse.Namespace(model=mtype, mults=mults, pred="x0", attn=spec,
+                                         attn_config=attn.parse(spec))
+    elif fmt == "kiln-0914":
         data["attn"] = spec
         data["attn_config"] = attn.parse(spec)
-    data.update(extra)
     return data
+
+
+def _refuses(path, phrase):
+    try:
+        loader.load_net(str(path))
+    except ValidationError as e:
+        assert phrase in str(e), e
+    else:
+        raise AssertionError(f"{path.name} loaded although its layout is {phrase!r}")
 
 
 def check_roundtrip(tmp: Path):
     mults = [1, 2, 2, 2]
     net = build_unet(CONF_MTYPE, mults, attn_config=attn.parse("mid:full,-1:linear"))
+    default_net = build_unet(CONF_MTYPE, mults)
 
-    # Kiln-written: both keys, spec as typed -> described canonical, loads clean
-    p = tmp / "kiln.pt"
+    # upstream / Kiln format: spec as typed -> described canonical, loads clean
+    p = tmp / "upstream.pt"
     torch.save(_ckpt(net, mults, "mid:full,-1:linear"), p)
     meta = loader.describe(p)
     assert meta.mtype == CONF_MTYPE and meta.attn == "-1:linear,mid:full", meta.attn
@@ -118,48 +141,63 @@ def check_roundtrip(tmp: Path):
     loaded, _ = loader.load_net(str(p))
     assert type(loaded.down_attns[-1]).__name__ == "LinearAttention2d"
 
-    # attn_config only (the dict xurdiffer26c.py reads) is enough
-    p2 = tmp / "dict-only.pt"
-    d = _ckpt(net, mults, None)
-    d["attn_config"] = {"mid": "full", -1: "linear"}
+    # the options namespace alone is enough
+    p2 = tmp / "opt-only.pt"
+    d = _ckpt(net, mults, None, fmt=None)
+    d["opt"] = argparse.Namespace(model=CONF_MTYPE, attn="-1:linear,mid:full",
+                                  attn_config={"mid": "full", -1: "linear"})
     torch.save(d, p2)
     assert loader.describe(p2).attn == "-1:linear,mid:full"
     loader.load_net(str(p2))
 
-    # neither key: upstream-trained with a non-default layout -> refused loudly
-    p3 = tmp / "unrecorded.pt"
-    torch.save(_ckpt(net, mults, None), p3)
-    assert loader.describe(p3).attn is None
-    try:
-        loader.load_net(str(p3))
-    except ValidationError as e:
-        assert "records no attention layout" in str(e), e
-    else:
-        raise AssertionError("an unrecorded non-default layout loaded silently")
+    # what Kiln wrote on 14 Sept still reads
+    p3 = tmp / "kiln-0914.pt"
+    torch.save(_ckpt(net, mults, "-1:linear,mid:full", fmt="kiln-0914"), p3)
+    assert loader.describe(p3).attn == "-1:linear,mid:full"
+    loader.load_net(str(p3))
 
-    # neither key, but the weights really are the constructor default -> fine
-    p4 = tmp / "unrecorded-default.pt"
-    torch.save(_ckpt(build_unet(CONF_MTYPE, mults), mults, None), p4)
+    # trained without --attn: recorded as None, which is the bottleneck-only default
+    p4 = tmp / "no-attn-flag.pt"
+    torch.save(_ckpt(default_net, mults, None), p4)
+    assert loader.describe(p4).attn == "mid:full", loader.describe(p4).attn
     loader.load_net(str(p4))
 
-    # a recorded layout that lies about the weights -> refused
-    p5 = tmp / "wrong.pt"
-    torch.save(_ckpt(net, mults, "mid:full"), p5)
-    try:
-        loader.load_net(str(p5))
-    except ValidationError as e:
-        assert "records attention layout 'mid:full'" in str(e), e
-    else:
-        raise AssertionError("a wrong recorded layout loaded silently")
+    # nothing recorded, non-default weights (upstream before a566214) -> refused
+    p5 = tmp / "unrecorded.pt"
+    torch.save(_ckpt(net, mults, None, fmt=None), p5)
+    assert loader.describe(p5).attn is None
+    _refuses(p5, "records no attention layout")
+
+    # nothing recorded, but the weights really are the default -> fine
+    p6 = tmp / "unrecorded-default.pt"
+    torch.save(_ckpt(default_net, mults, None, fmt=None), p6)
+    loader.load_net(str(p6))
+
+    # a recorded layout that contradicts the weights -> refused
+    p7 = tmp / "wrong.pt"
+    torch.save(_ckpt(net, mults, "mid:full"), p7)
+    _refuses(p7, "records attention layout 'mid:full'")
 
     # an old attn3 checkpoint carries no layout and takes the old path
     old = build_unet("tinyunet_with_attention3", mults)
-    p6 = tmp / "old.pt"
-    torch.save({**_ckpt(old, mults, None), "mtype": "tinyunet_with_attention3"}, p6)
-    m6 = loader.describe(p6)
-    assert m6.attn is None and m6.mtype == "tinyunet_with_attention3"
-    loader.load_net(str(p6))
-    print("checkpoint round trip: ok")
+    p8 = tmp / "old.pt"
+    torch.save(_ckpt(old, mults, None, fmt=None, mtype="tinyunet_with_attention3"), p8)
+    m8 = loader.describe(p8)
+    assert m8.attn is None and m8.mtype == "tinyunet_with_attention3"
+    loader.load_net(str(p8))
+
+    # The options namespace is why resuming must not use torch's default load:
+    # from torch 2.6 that is weights-only, and it refuses a Namespace.
+    try:
+        torch.load(p, weights_only=True)
+    except Exception:  # noqa: BLE001 -- UnpicklingError, spelled per torch version
+        pass
+    else:
+        raise AssertionError("a weights-only load accepted the options namespace")
+    trainer_src = (ROOT / "vendor" / "xurdif" / "xurdiftrainer.py").read_text(encoding="utf-8")
+    assert "torch.load(opt.load, weights_only=False)" in trainer_src, \
+        "the vendored trainer resumes with torch's default load, which refuses 'opt'"
+    print("checkpoint round trip: ok (upstream, opt-only, 14-Sept Kiln, no --attn, unrecorded)")
 
 
 if __name__ == "__main__":
