@@ -41,6 +41,8 @@ Launchers handle virtual environment setup automatically:
 * **macOS:** Run `kiln.command`
 * **Linux:** Run `./kiln.sh`
 
+To reach Kiln from another machine on the same network, use the matching LAN launcher instead — `start_lan.bat`, `start_lan.command`, or `./start_lan.sh`. Each one prints the address to open elsewhere. Kiln has no login, so only do this on a network you trust; see `--lan` under [CLI Options](#cli-options--configuration).
+
 #### Linux notes
 
 The launcher builds its own virtual environment, but three things have to come
