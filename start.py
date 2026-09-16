@@ -51,17 +51,56 @@ def ensure_frontend():
     return False
 
 
-def serve(app, port: int):
-    # threaded WSGI server; fine for a single local user.
-    app.run(host="127.0.0.1", port=port, threaded=True, use_reloader=False)
+# Loopback: reachable only from this machine. Anything else is a network
+# address, and Kiln has no login of any kind -- see the warning in main().
+LOCAL_HOST = "127.0.0.1"
+ALL_INTERFACES = "0.0.0.0"
 
 
-def port_is_free(port: int) -> bool:
+def serve(app, port: int, host: str = LOCAL_HOST):
+    # threaded WSGI server; fine for a single user, on this machine or the LAN.
+    app.run(host=host, port=port, threaded=True, use_reloader=False)
+
+
+def local_url(host: str, port: int) -> str:
+    """The URL to open on *this* machine, whatever the server is bound to.
+
+    ``0.0.0.0`` is a bind address, not somewhere you can browse to, so the
+    window and the health check always talk to a real address.
+    """
+    reachable = LOCAL_HOST if host in (ALL_INTERFACES, "::", "") else host
+    return f"http://{reachable}:{port}"
+
+
+def lan_addresses() -> list[str]:
+    """This machine's addresses on the network, for the "open it on your phone" line."""
+    import socket
+
+    found = []
+    # Opening a UDP socket sends nothing; it just asks the routing table which
+    # local address would be used to reach the internet -- the LAN address.
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            found.append(s.getsockname()[0])
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        for ip in socket.gethostbyname_ex(socket.gethostname())[2]:
+            if not ip.startswith("127.") and ip not in found:
+                found.append(ip)
+    except Exception:  # noqa: BLE001
+        pass
+    return found
+
+
+def port_is_free(port: int, host: str = LOCAL_HOST) -> bool:
     """Can we bind this port right now?
 
     The server runs on a daemon thread, so a bind failure there is invisible:
     the thread dies, wait_for_server times out, and we would go on to open a
-    window pointing at nothing. Check up front instead.
+    window pointing at nothing. Check up front instead -- on the same address
+    the server will use, since a port can be free on one and taken on another.
     """
     import socket
 
@@ -70,16 +109,16 @@ def port_is_free(port: int) -> bool:
     # "free" — the exact opposite of what it is for.
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         try:
-            s.bind(("127.0.0.1", port))
+            s.bind((host, port))
             return True
         except OSError:
             return False
 
 
-def pick_port(preferred: int, tries: int = 20) -> int:
+def pick_port(preferred: int, tries: int = 20, host: str = LOCAL_HOST) -> int:
     """The preferred port, or the next free one above it."""
     for candidate in range(preferred, preferred + tries):
-        if port_is_free(candidate):
+        if port_is_free(candidate, host):
             return candidate
     raise SystemExit(
         f"Could not find a free port in {preferred}-{preferred + tries - 1}.\n"
@@ -89,10 +128,10 @@ def pick_port(preferred: int, tries: int = 20) -> int:
     )
 
 
-def wait_for_server(port: int, timeout: float = 20.0) -> bool:
+def wait_for_server(url: str, timeout: float = 20.0) -> bool:
     import urllib.request
 
-    url = f"http://127.0.0.1:{port}/api/health"
+    url = url.rstrip("/") + "/api/health"
     start = time.time()
     while time.time() - start < timeout:
         try:
@@ -107,29 +146,45 @@ def wait_for_server(port: int, timeout: float = 20.0) -> bool:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=int(os.environ.get("KILN_PORT", DEFAULT_PORT)))
+    ap.add_argument("--host", default=os.environ.get("KILN_HOST", LOCAL_HOST),
+                    help="address to bind (default 127.0.0.1: this machine only)")
+    ap.add_argument("--lan", action="store_true",
+                    help="also serve to the local network, so another device can open Kiln "
+                         "(shorthand for --host 0.0.0.0)")
     ap.add_argument("--no-window", action="store_true", help="run headless (browser only)")
     args = ap.parse_args()
+
+    host = ALL_INTERFACES if args.lan else args.host
 
     ensure_frontend()
 
     from app.backend.app import create_app
 
-    port = pick_port(args.port)
+    port = pick_port(args.port, host=host)
     if port != args.port:
         log.warning("port %s is in use — using %s instead", args.port, port)
 
     app = create_app()
-    url = f"http://127.0.0.1:{port}"
+    url = local_url(host, port)
 
-    server = threading.Thread(target=serve, args=(app, port), daemon=True)
+    server = threading.Thread(target=serve, args=(app, port, host), daemon=True)
     server.start()
 
-    if not wait_for_server(port):
+    if not wait_for_server(url):
         raise SystemExit(
             f"The Kiln server did not come up on port {port} within 20 seconds.\n"
             "Check the messages above for the reason."
         )
     log.info("Kiln is running at %s", url)
+
+    if host != LOCAL_HOST:
+        for ip in (lan_addresses() if host == ALL_INTERFACES else [host]):
+            log.info("On this network: http://%s:%s", ip, port)
+        # Said plainly, every time: there is no login, and the API can read and
+        # write the whole workspace. Fine on a home network, not on a café one.
+        log.warning(
+            "Kiln has no password: anyone who can reach that address can use it, "
+            "including your datasets, models and files. Only do this on a network you trust.")
 
     if args.no_window:
         log.info("Headless mode: open %s in your browser. Ctrl+C to stop.", url)

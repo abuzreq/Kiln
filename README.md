@@ -109,6 +109,8 @@ To install one by hand, pick the row for your driver (`nvidia-smi` prints it):
 
 * `--no-window`: Run in headless mode (prints local URL to terminal).
 * `--port <int>`: Set backend port (defaults to `8777` or `$KILN_PORT`).
+* `--lan`: Serve to the local network as well, so you can open Kiln from a phone or another computer. Kiln has no login — anyone who can reach the address can browse your datasets, models and files, so use it only on a network you trust. The launcher prints the address to open.
+* `--host <addr>`: Bind a specific address instead (defaults to `127.0.0.1`, this machine only, or `$KILN_HOST`). `--lan` is shorthand for `0.0.0.0`.
 * `KILN_WORKSPACE`: Set root storage path for datasets, models, and outputs (defaults to `~/kiln`).
 
 ---
