@@ -126,13 +126,39 @@ def _read_stamp() -> dict:
         return {}
 
 
-def _write_stamp():
+def _write_stamp(torch_build: str | None = None, driver=None):
     STAMP_FILE.parent.mkdir(parents=True, exist_ok=True)
     STAMP_FILE.write_text(json.dumps({
         "fingerprint": _fingerprint(),
         "python": sys.version.split()[0],
+        # Which CUDA the installed torch was built for, and the driver it was
+        # chosen for. Launch compares them without importing torch, so a venv
+        # carried to another machine (or a driver rollback) is caught.
+        "torch_cuda": torch_build,
+        "driver": driver,
         "updated_at": time.time(),
     }, indent=2), encoding="utf-8")
+
+
+def warn_if_torch_mismatch():
+    """One cheap line at launch when the installed build cannot run here.
+
+    Reads the stamp and asks nvidia-smi for the driver: no torch import, so it
+    costs nothing on a healthy install.
+    """
+    stamp = _read_stamp()
+    build = stamp.get("torch_cuda")
+    if not build or not _nvidia_gpu_present():
+        return
+    driver = cuda_pick.driver_version()
+    if cuda_pick.build_is_runnable(build, driver) is not False:
+        return
+    print(
+        f"\nNOTE: the PyTorch installed here is built for CUDA {build}, which this "
+        f"machine's driver ({driver:g}) cannot run.\n"
+        "      Kiln will fall back to CPU, and training needs a GPU. Fix it with:\n"
+        f"      {sys.executable} install.py --fix-torch\n"
+    )
 
 
 def _probe_imports(py: Path) -> bool:
@@ -183,11 +209,14 @@ def deps_satisfied() -> bool:
     return True
 
 
-# PyPI's default torch wheel is CPU-only on Windows (and CUDA-less on some
-# Linux setups), so a plain requirements install silently yields a torch that
-# cannot train. Kiln's engine is CUDA-only, so we install the right wheel up
-# front whenever the machine actually has an NVIDIA GPU.
-CUDA_INDEX_URL = "https://download.pytorch.org/whl/cu121"
+# PyPI's default torch wheel is CPU-only on Windows, and on Linux it is built for
+# the newest CUDA there is -- which an older driver cannot run. Either way a
+# plain requirements install can leave a machine with a torch that cannot train.
+# Kiln's engine is CUDA-only, so pick the build this driver *can* run and get it
+# in first. utils/cuda.py holds the driver -> build table; it is stdlib-only, so
+# importing it here, before any dependency exists, is safe.
+sys.path.insert(0, str(ROOT))
+from utils import cuda as cuda_pick  # noqa: E402
 
 
 def _nvidia_gpu_present() -> bool:
@@ -207,37 +236,100 @@ def _nvidia_gpu_present() -> bool:
         return False
 
 
-def install_cuda_torch(py: Path) -> bool:
-    """Install CUDA torch/torchvision if this machine has a GPU and lacks them.
+def _torch_build(py: Path) -> tuple:
+    """(version, CUDA build, usable) for the torch installed in ``py``."""
+    code = ("import json, torch;"
+            "print(json.dumps([torch.__version__, torch.version.cuda, "
+            "torch.cuda.is_available()]))")
+    try:
+        out = subprocess.check_output(
+            [str(py), "-c", code], stderr=subprocess.DEVNULL, text=True, timeout=300)
+        return tuple(json.loads(out.strip().splitlines()[-1]))
+    except Exception:  # noqa: BLE001
+        return (None, None, False)
 
-    Returns True when a CUDA build is in place afterwards.
+
+def install_cuda_torch(py: Path, force: bool = False) -> bool:
+    """Install the CUDA torch/torchvision build this machine's driver can run.
+
+    Returns True when a usable CUDA build is in place afterwards.
     """
     if not _nvidia_gpu_present():
         print("No NVIDIA GPU detected — installing the default (CPU) PyTorch build.")
         return False
-    if _torch_dist_present(py) and _torch_is_cuda(py):
-        print("CUDA-enabled PyTorch already installed — leaving it alone.")
-        return True
 
+    driver = cuda_pick.driver_version()
+    url, cuda, _name = cuda_pick.build_for(driver)
+    version, build, usable = (_torch_build(py) if _torch_dist_present(py)
+                              else (None, None, False))
+
+    if usable and not force:
+        print(f"CUDA-enabled PyTorch already installed ({version}, CUDA {build}) "
+              "— leaving it alone.")
+        return True
+    if url is None:
+        print(f"NVIDIA driver {driver} is older than any current PyTorch build "
+              "supports (450 and up). Kiln will fall back to CPU.")
+        return False
+
+    drv = f"{driver:g}" if driver is not None else "unknown"
+    if version and build and cuda_pick.build_is_runnable(build, driver) is False:
+        # PyPI's default wheel on a driver that predates it. --upgrade alone
+        # would leave it in place: it is *newer*, just unusable here.
+        print(f"PyTorch {version} here is built for CUDA {build}, which driver {drv} "
+              f"cannot run. Replacing it with the CUDA {cuda} build.")
     print(
-        "\nNVIDIA GPU detected. Installing a CUDA build of PyTorch from\n"
-        f"  {CUDA_INDEX_URL}\n"
+        f"\nNVIDIA driver {drv}: installing the CUDA {cuda} build of PyTorch from\n"
+        f"  {url}\n"
         "This download is large (~2.5 GB) but Kiln's engine cannot train or\n"
         "sample without it.\n"
     )
+    cmd = [str(py), "-m", "pip", "install", "--upgrade",
+           "torch", "torchvision", "--index-url", url]
+    if version:
+        cmd.insert(5, "--force-reinstall")
     try:
-        run([
-            str(py), "-m", "pip", "install", "--upgrade",
-            "torch", "torchvision", "--index-url", CUDA_INDEX_URL,
-        ])
+        run(cmd)
     except Exception as e:  # noqa: BLE001
+        joined = " ".join(cmd)
         print(
-            f"WARNING: CUDA PyTorch install failed ({e}).\n"
+            f"WARNING: that install failed ({e}).\n"
             "Kiln will fall back to CPU. Retry manually with:\n"
-            f"  {py} -m pip install torch torchvision --index-url {CUDA_INDEX_URL}"
+            f"  {joined}\n"
+            "If pip found no matching wheel, this Python is probably newer than that "
+            "CUDA build supports: install Kiln under an older Python, or update the "
+            "driver so a newer build can be used."
         )
         return False
     return _torch_is_cuda(py)
+
+
+def _torch_constraints(py: Path):
+    """Pin the torch just chosen so the requirements pass cannot swap it.
+
+    ``torch>=2.0`` in requirements.txt is satisfied by whatever is installed, but
+    a dependency asking for a newer torch would pull PyPI's default wheel -- the
+    newest CUDA build -- straight over a deliberately chosen older one.
+    """
+    code = ("import json, importlib.metadata as m\n"
+            "out = {}\n"
+            "for n in ('torch', 'torchvision'):\n"
+            "    try:\n"
+            "        out[n] = m.version(n)\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "print(json.dumps(out))")
+    try:
+        out = subprocess.check_output(
+            [str(py), "-c", code], stderr=subprocess.DEVNULL, text=True, timeout=120)
+        versions = json.loads(out.strip().splitlines()[-1])
+    except Exception:  # noqa: BLE001
+        return None
+    if not versions:
+        return None
+    path = VENV_DIR / "kiln-torch-constraints.txt"
+    path.write_text("".join(f"{n}=={v}\n" for n, v in versions.items()), encoding="utf-8")
+    return path
 
 
 def _torch_is_cuda(py) -> bool:
@@ -267,7 +359,7 @@ def install_requirements(force: bool = False):
         and _torch_dist_present(py)
     ):
         print("Existing install looks complete — skipping pip.")
-        _write_stamp()
+        _write_stamp(torch_build=_torch_build(py)[1], driver=cuda_pick.driver_version())
         return
 
     # Only bump pip on a real install; not on every launch.
@@ -276,24 +368,35 @@ def install_requirements(force: bool = False):
     # Get the right torch in first: requirements.txt only asks for `torch>=2.0`,
     # which pip would satisfy with a CPU-only wheel and then leave alone.
     install_cuda_torch(py)
+    # ... and hold it there: -c pins that exact build through both passes.
+    cons = _torch_constraints(py)
+    pin = ["-c", str(cons)] if cons else []
 
-    run([str(py), "-m", "pip", "install", "-r", str(ROOT / "requirements.txt")])
+    run([str(py), "-m", "pip", "install", "-r", str(ROOT / "requirements.txt"), *pin])
 
     if VENDOR_REQ.exists():
         print("Installing vendored xurdif engine requirements ...")
-        run([str(py), "-m", "pip", "install", "-r", str(VENDOR_REQ)])
+        run([str(py), "-m", "pip", "install", "-r", str(VENDOR_REQ), *pin])
 
     _check_native_libs(py)
-    _write_stamp()
+
+    # Belt and braces: if anything above still managed to replace torch, put the
+    # right build back before stamping the install as good.
+    if _nvidia_gpu_present() and not _torch_is_cuda(py):
+        print("PyTorch cannot use the GPU after the dependency install — repairing.")
+        install_cuda_torch(py, force=True)
+
+    _write_stamp(torch_build=_torch_build(py)[1], driver=cuda_pick.driver_version())
 
     if _torch_is_cuda(py):
         print("PyTorch reports CUDA is available — GPU training/sampling is ready.")
     elif _nvidia_gpu_present():
+        version, build, _ = _torch_build(py)
+        report = cuda_pick.diagnose(version, build, cuda_pick.driver_version(), str(py))
         print(
-            "WARNING: an NVIDIA GPU is present but PyTorch in the venv is CPU-only.\n"
-            "Training and sampling will not work. Fix with:\n"
-            f"  {py} -m pip install --upgrade torch torchvision "
-            f"--index-url {CUDA_INDEX_URL}"
+            "WARNING: an NVIDIA GPU is present but PyTorch in the venv cannot use it.\n"
+            "Training and sampling will not work.\n"
+            f"  {report['hint']}"
         )
     else:
         print(
@@ -359,12 +462,27 @@ def main():
     ap.add_argument("--launch", action="store_true", help="start Kiln after install")
     ap.add_argument("--skip-frontend", action="store_true")
     ap.add_argument("--reinstall", action="store_true", help="run pip even if the fingerprint matches")
+    ap.add_argument("--fix-torch", action="store_true",
+                    help="reinstall the PyTorch build this machine's driver can run, then exit")
     args, extra = ap.parse_known_args()
 
     ensure_venv()
+    if args.fix_torch:
+        py = venv_python()
+        ok = install_cuda_torch(py, force=True)
+        version, build, _ = _torch_build(py)
+        state = "available" if ok else "NOT available"
+        print(f"\nPyTorch {version} (CUDA {build}) — GPU is {state} in {py}")
+        if not ok:
+            report = cuda_pick.diagnose(version, build, cuda_pick.driver_version(), str(py))
+            print(f"  {report['hint']}")
+        if not args.launch:
+            return
+
     install_requirements(force=args.reinstall)
     if not args.skip_frontend:
         build_frontend()
+    warn_if_torch_mismatch()
     if args.launch:
         launch(extra)
     else:

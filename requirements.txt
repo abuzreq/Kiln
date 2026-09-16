@@ -5,11 +5,12 @@ flask-cors>=4.0
 pywebview>=5.0
 
 # Deep learning / diffusion engine (xurdif)
-# NOTE: `torch` here resolves to the CPU-only wheel on Windows, which cannot
-# train or sample. install.py detects an NVIDIA GPU and installs the CUDA build
-# from https://download.pytorch.org/whl/cu121 *before* this file is applied, so
-# these pins only ever act as a floor. To do it by hand:
-#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# NOTE: `torch` here resolves to the CPU-only wheel on Windows, and on Linux to
+# a build for the newest CUDA there is -- which an older driver cannot run.
+# install.py picks the build this machine's driver *can* run (see utils/cuda.py)
+# and installs it *before* this file is applied, then passes those exact
+# versions as pip constraints so this floor cannot pull a different one.
+# To repair an install by hand:  python install.py --fix-torch
 torch>=2.0
 torchvision>=0.15
 diffusers>=0.27

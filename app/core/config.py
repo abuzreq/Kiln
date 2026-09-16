@@ -179,24 +179,26 @@ def get_device_info() -> dict:
         info["torch_version"] = torch.__version__
         info["torch_cuda_build"] = torch.version.cuda  # None for a CPU-only wheel
         if not torch.cuda.is_available():
-            if torch.version.cuda is None:
-                info["reason"] = "cpu_build"
-                info["hint"] = (
-                    f"PyTorch {torch.__version__} is a CPU-only build"
-                    + (" — an NVIDIA GPU is present but unusable."
-                       if _nvidia_gpu_present() else ".")
-                    + " Reinstall a CUDA build:  pip install torch torchvision"
-                      " --index-url https://download.pytorch.org/whl/cu121"
-                )
-            elif _nvidia_gpu_present():
-                info["reason"] = "driver"
-                info["hint"] = (
-                    f"PyTorch is built for CUDA {torch.version.cuda} and an NVIDIA GPU is "
-                    "present, but the driver did not initialise. Check the driver version."
-                )
-            else:
+            if not _nvidia_gpu_present():
                 info["reason"] = "no_gpu"
                 info["hint"] = "No NVIDIA GPU detected. Training needs CUDA; the rest of Kiln runs on CPU."
+            else:
+                # Only here is the (slower) driver query worth making. It turns
+                # "some CUDA problem" into which wheel to install, which matters
+                # most when the wheel is *newer* than the driver: that case used
+                # to read as though Kiln itself wanted that CUDA version.
+                import sys  # noqa: PLC0415
+
+                from utils import cuda as cuda_pick  # noqa: PLC0415
+
+                driver = cuda_pick.driver_version()
+                info["driver"] = driver
+                report = cuda_pick.diagnose(
+                    torch.__version__, torch.version.cuda, driver,
+                    python=sys.executable, gpu_present=True,
+                )
+                info["reason"] = report["reason"]
+                info["hint"] = report["hint"]
         if torch.cuda.is_available():
             info["cuda"] = True
             info["device"] = "cuda"

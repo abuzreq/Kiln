@@ -47,21 +47,34 @@ def trainer_python() -> str:
     return str(cand) if cand.exists() else sys.executable
 
 
-def interpreter_has_cuda(py: str) -> bool | None:
-    """Return whether ``py`` can see a CUDA GPU (cached; None if the probe fails)."""
+def interpreter_cuda_report(py: str) -> dict:
+    """What ``py``'s torch is and whether it can use the GPU (cached).
+
+    ``available`` is None when the probe itself failed (no torch, or it would
+    not import). The version and build come back too, so a refusal can say which
+    wheel is installed rather than calling every failure "CPU-only torch".
+    """
     if py in _cuda_cache:
         return _cuda_cache[py]
-    val: bool | None
+    report: dict = {"available": None, "version": None, "cuda": None}
+    code = ("import json, torch;"
+            "print(json.dumps([torch.__version__, torch.version.cuda, "
+            "torch.cuda.is_available()]))")
     try:
         out = subprocess.check_output(
-            [py, "-c", "import torch;print(torch.cuda.is_available())"],
-            text=True, stderr=subprocess.DEVNULL, timeout=120,
+            [py, "-c", code], text=True, stderr=subprocess.DEVNULL, timeout=300,
         ).strip()
-        val = out.splitlines()[-1].strip() == "True" if out else None
+        version, cuda, ok = json.loads(out.splitlines()[-1])
+        report = {"available": bool(ok), "version": version, "cuda": cuda}
     except Exception:  # noqa: BLE001
-        val = None
-    _cuda_cache[py] = val
-    return val
+        pass
+    _cuda_cache[py] = report
+    return report
+
+
+def interpreter_has_cuda(py: str) -> bool | None:
+    """Whether ``py`` can see a CUDA GPU (cached; None if the probe failed)."""
+    return interpreter_cuda_report(py)["available"]
 
 
 @dataclass
@@ -389,11 +402,13 @@ def _run(job: Job, cfg: TrainConfig):
     cuda = interpreter_has_cuda(py)
     job.detail["cuda"] = cuda
     if cuda is False:
+        from utils import cuda as cuda_pick
+
+        report = interpreter_cuda_report(py)
+        why = cuda_pick.diagnose(report["version"], report["cuda"],
+                                 cuda_pick.driver_version(), python=py)
         job.status = "error"
-        job.message = (
-            "selected Python has no CUDA GPU (CPU-only torch). Install a CUDA "
-            f"build into the project .venv and retry. Interpreter: {py}"
-        )
+        job.message = f"training needs a GPU, and this Python cannot use one. {why['hint']}"
         log.error(job.message)
         patch_run_meta(out_dir, status="error", message=job.message, finished_at=time.time())
         return

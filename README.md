@@ -78,18 +78,32 @@ python install.py
 
 ### PyTorch CUDA Manual Install
 
-The installer attempts to download the CUDA-enabled wheel automatically. To install or override manually:
+The installer reads your NVIDIA driver version and downloads the newest PyTorch build that driver can run. If the app reports it is on CPU, repair it with:
+
+```bash
+python install.py --fix-torch
+```
+
+PyTorch ships one build per CUDA generation, and each needs a driver at least this new. Installing a build that is *newer* than the driver is the usual cause of "GPU present, PyTorch on CPU" — no driver update is needed, just the matching build.
+
+| Driver | Build | Index |
+| --- | --- | --- |
+| 580+ | CUDA 13.0 | `cu130` |
+| 575.51+ | CUDA 12.9 | `cu129` |
+| 570+ | CUDA 12.8 | `cu128` (lowest for RTX 50-series) |
+| 525.60+ | CUDA 12.6 | `cu126` |
+| 450.80+ | CUDA 11.8 | `cu118` |
+
+To install one by hand, pick the row for your driver (`nvidia-smi` prints it):
 
 ```bash
 # Windows
-.venv\Scripts\python.exe -m pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu121
+.venv\Scripts\python.exe -m pip install --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu126
 
 # Linux / macOS
-.venv/bin/python -m pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu121
+.venv/bin/python -m pip install --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu126
 
 ```
-
-*(For RTX 50-series cards, replace `cu121` with `cu124` or `cu128`.)*
 
 ### CLI Options & Configuration
 
@@ -136,6 +150,7 @@ python scripts/smoke_diffusers.py
 python scripts/smoke_train.py             # xurdif tests require CUDA
 python scripts/smoke_tinyunet_parity.py   # Verifies TinyUNet Diffusers/xurdif parity
 python scripts/smoke_golden.py --check    # Checkpoint hashing regression test
+python scripts/smoke_cuda_pick.py         # Driver -> PyTorch build choice (no GPU needed)
 
 ```
 
