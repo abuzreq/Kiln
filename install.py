@@ -458,6 +458,16 @@ def launch(extra_args):
 
 
 def main():
+    # pip writes straight to the console, while our own print() goes through a
+    # block buffer as soon as output is redirected to a file -- so the progress
+    # messages between pip runs ("installing the CUDA 12.6 build ...") landed out
+    # of order, or vanished entirely when a run was interrupted. Line buffering
+    # costs nothing here and keeps the narration next to what it describes.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:  # noqa: BLE001
+        pass
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--launch", action="store_true", help="start Kiln after install")
     ap.add_argument("--skip-frontend", action="store_true")
