@@ -150,15 +150,17 @@ diffusion = GaussianDiffusion(
 ).cuda()
 
 
-# KILN: see --manifest above. The snapshot's recipe decides flips; the stock
-# transform's unconditional RandomHorizontalFlip is not applied on top.
+# KILN: see --manifest above. The snapshot's recipe decides the fixed set of
+# variations; the stock transform's unconditional RandomHorizontalFlip is not
+# applied on top.
 manifest_ds = None
 if opt.manifest:
     import sys, os
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")))
     from app.core.engine.train_data import ManifestDataset
     manifest_ds = ManifestDataset.from_snapshot(opt.manifest, opt.imageSize, fit=opt.fit, engine="xurdif")
-    print("dataset:", len(manifest_ds), "images from", opt.manifest)
+    print("dataset:", len(manifest_ds.files), "images x", manifest_ds.variants,
+          "variations (seed", str(manifest_ds.seed) + ") =", len(manifest_ds), "per pass")
 
 trainer = Trainer(
     diffusion,

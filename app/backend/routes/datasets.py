@@ -64,6 +64,9 @@ def _summary(ds_dir: Path) -> dict:
         uploads = ds_dir / manifest.UPLOADS
         out.update(
             recipe=record["recipe"],
+            # What a run will see: every image in its variations.
+            variants=record["recipe"]["augment_variants"],
+            total=len(res["files"]) * record["recipe"]["augment_variants"],
             sources=[s["path"] for s in record["sources"]],
             added=record["added"],
             uploads=sum(1 for f in res["files"]
@@ -228,11 +231,14 @@ def preview():
         recipe_ = manifest.clean_recipe({**record["recipe"], **(body.get("recipe") or {})})
         path = body.get("source_path")
         files = manifest.files(ds_dir)
-        if not path or manifest.norm(path) not in {manifest.norm(f) for f in files}:
+        index = {manifest.norm(f): i for i, f in enumerate(files)}.get(manifest.norm(path or ""))
+        if index is None:
             if not files:
                 return ok({"previews": []})
-            path = files[0]
-        items = dataset_builder.preview_variants(path, recipe_)
+            path, index = files[0], 0
+        # The variations depend on the image's place in the dataset, so the
+        # preview shows what this image will really be trained on.
+        items = dataset_builder.preview_variants(path, recipe_, index)
     except Exception as e:
         return err(str(e), 400)
     return ok({

@@ -178,6 +178,7 @@ export default function Train() {
   // Whether the form has already been seeded (by the recommended preset, or by
   // a model handed over from Library). Guards against the two racing.
   const presetSeeded = useRef(false);
+  const arrivedWithDataset = useRef("");
   const [continueSteps, setContinueSteps] = useState(280000);
   const logRef = useRef(null);
 
@@ -297,7 +298,9 @@ export default function Train() {
         const p = await api.get("/studio");
         if (cancelled) return;
         setInfo(p);
-        if (p.datasets?.length) set("dataset", p.datasets[0].name);
+        const arrived = arrivedWithDataset.current;
+        arrivedWithDataset.current = "";
+        if (!arrived && p.datasets?.length) set("dataset", p.datasets[0].name);
         set("run_name", nextRunName(p.runs));
         const t = p.train || {};
         if (t.job_id) {
@@ -319,7 +322,11 @@ export default function Train() {
             return;
           }
         }
-        if (t.run) await loadRun(t.run);
+        if (arrived) {
+          // Came here to start a run on this dataset: stay on New run.
+          set("dataset", arrived);
+          setMode("new");
+        } else if (t.run) await loadRun(t.run);
         else if (p.runs?.length) await loadRun(p.runs[p.runs.length - 1].name);
         else setMode("new");
       } catch (e) {
@@ -354,9 +361,12 @@ export default function Train() {
     setTrainFromPath("");
   }, [trainFromPath]);
 
-  // arriving from "Train on this dataset" in Workshop ▸ Data
+  // arriving from "Train on this dataset" in Prepare ▸ Data. The /studio load
+  // below is still in flight on a fresh mount and would otherwise pick the
+  // first dataset and reopen the last run on top of this, so it checks the ref.
   useEffect(() => {
     if (!trainDataset) return;
+    arrivedWithDataset.current = trainDataset;
     setMode("new");
     set("dataset", trainDataset);
     setTrainDataset("");
@@ -369,6 +379,10 @@ export default function Train() {
     }, 250);
     return () => clearTimeout(t);
   }, [form.image_size, form.batch_size]);
+
+  const datasetInfo = useMemo(
+    () => (info?.datasets || []).find((d) => d.name === form.dataset) || null,
+    [info, form.dataset]);
 
   /** Which preset (if any) the current form still matches. */
   const activePreset = useMemo(() => {
@@ -617,6 +631,15 @@ export default function Train() {
               <Select label="Dataset" value={form.dataset} onChange={(v) => set("dataset", v)} disabled={running}
                 options={(info?.datasets || []).map((d) => ({ value: d.name, label: `${d.name} (${d.count})` }))}
                 tip="A prepared image folder from Data. The same dataset can feed many runs." />
+              {datasetInfo && (
+                <p className="hint">
+                  {datasetInfo.total > datasetInfo.count
+                    ? `${datasetInfo.total.toLocaleString()} images per pass: `
+                      + `${datasetInfo.count.toLocaleString()} × ${Math.round(datasetInfo.total / datasetInfo.count)} `
+                      + "variations from its recipe."
+                    : `${datasetInfo.count.toLocaleString()} images per pass.`}
+                </p>
+              )}
               <Text label="Run name" value={form.run_name} onChange={(v) => set("run_name", v)} disabled={running}
                 tip="Folder name for this run’s snapshots. Must be unique." />
               <p className={`hint ${!nameAvailable ? "warn-text" : ""}`}>

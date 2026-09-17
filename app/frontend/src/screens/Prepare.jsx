@@ -44,9 +44,13 @@ function editable(recipe) {
       brightness: { ...DEFAULT_AUG_SETTINGS.brightness, ...s.brightness },
       contrast: { ...DEFAULT_AUG_SETTINGS.contrast, ...s.contrast },
     },
+    augment_variants: r.augment_variants ?? 2,
+    augment_seed: r.augment_seed ?? 0,
     video_fps: r.video_fps ?? 2,
   };
 }
+
+const randomSeed31 = () => Math.floor(Math.random() * 2 ** 31);
 
 const plural = (n, word) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
 
@@ -74,6 +78,11 @@ export default function Prepare() {
   const isRecord = ds?.kind === "record";
   const trimmedName = newName.trim();
   const dirty = isRecord && JSON.stringify(editable(ds.recipe)) !== JSON.stringify(recipe);
+  // The preview is the same set the trainer will build, so its length is the
+  // honest count -- the backend clamps it when the augmentations can't make
+  // that many different versions.
+  const variantsBuilt = !recipe.augmentations.length ? 1 : (previews.length || recipe.augment_variants);
+  const trainingTotal = (ds?.count || 0) * variantsBuilt;
 
   const loadList = () => api.get("/datasets")
     .then((list) => { setDatasets(list || []); return list || []; })
@@ -340,9 +349,10 @@ export default function Prepare() {
                   )}
                   <div className="section-title mt-2">Augmentations</div>
                   <p className="hint">
-                    Applied fresh at every training step: each time an image is used, a random
-                    mix of the ones chosen here is drawn. Kiln doesn't save augmented copies,
-                    and your original files are never changed. The preview shows examples.
+                    When training starts, Kiln builds a fixed set of variations of every image
+                    from the ones chosen here, and trains on exactly those. The same seed always
+                    gives the same set. Nothing is written to disk and your files are never
+                    changed: the preview shows the real set for the first image.
                   </p>
                   <div className="row wrap gap-2 mb-2">
                     {AUGS.map((a) => (
@@ -375,6 +385,30 @@ export default function Prepare() {
                       <div className="grow"><Slider label="Contrast max" value={recipe.augment_settings.contrast.max} min={0.4} max={1.5} step={0.05} onChange={(v) => setAug("contrast", { max: v })} /></div>
                     </div>
                   )}
+                  <div className="row center gap-2">
+                    <div className="grow">
+                      <Num label="Variations per image" value={recipe.augment_variants}
+                        onChange={(v) => setR({ augment_variants: Math.max(1, Math.min(64, Math.round(Number(v) || 1))) })}
+                        min={1} max={64} step={1} disabled={!recipe.augmentations.length}
+                        tip={"How many versions of each image the run trains on, counting the image itself.\n\nEach one is a different mix of the augmentations above. More variations make a longer pass and a slower epoch, not a better model on their own."} />
+                    </div>
+                    <div className="grow">
+                      <Num label="Seed" value={recipe.augment_seed}
+                        onChange={(v) => setR({ augment_seed: Math.max(0, Math.round(Number(v) || 0)) })}
+                        min={0} step={1} disabled={!recipe.augmentations.length}
+                        tip="The same seed and recipe always give the same set of variations, here and in training." />
+                    </div>
+                    <button type="button" className="btn sm" disabled={!recipe.augmentations.length}
+                      onClick={() => setR({ augment_seed: randomSeed31() })}
+                      title="A different set of variations from the same augmentations">Shuffle</button>
+                  </div>
+                  <p className="hint">
+                    Training will see <b>{trainingTotal.toLocaleString()}</b> images per pass
+                    {" "}({ds.count.toLocaleString()} × {variantsBuilt}).
+                    {variantsBuilt < recipe.augment_variants && (
+                      ` These augmentations can only make ${variantsBuilt} different versions of an image.`
+                    )}
+                  </p>
                   <Slider label="Video fps" value={recipe.video_fps} min={0.5} max={12} step={0.5} onChange={(v) => setR({ video_fps: v })}
                     tip="Frames taken per second from videos in the dataset. Changing it re-extracts them." />
                   <div className="row gap-2 mt-2">
@@ -423,11 +457,11 @@ export default function Prepare() {
                   <h3 className="mb-0">Preview</h3>
                   {previewBusy && <span className="sub">Updating…</span>}
                 </div>
-                <p className="hint mb-2">The first image, framed, and what each augmentation can do to it.</p>
+                <p className="hint mb-2">Every version of the first image this recipe and seed will train on.</p>
                 {previews.length > 0 ? (
                   <div className="preview-var-grid">
-                    {previews.map((p) => (
-                      <div key={p.label} className="preview-var-cell">
+                    {previews.map((p, i) => (
+                      <div key={`${i}-${p.label}`} className="preview-var-cell">
                         <div className="preview-box preview-scroll"><img src={p.image} alt={p.label} /></div>
                         <span className="sub">{p.label}</span>
                       </div>

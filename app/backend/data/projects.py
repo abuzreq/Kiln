@@ -50,6 +50,7 @@ class Store:
                 info.update(record["recipe"])
                 info["kind"] = "record"
                 info["count"] = len(manifest.files(d))
+                info["total"] = info["count"] * record["recipe"]["augment_variants"]
             else:
                 meta = d / "dataset.json"
                 if meta.exists():
@@ -59,6 +60,7 @@ class Store:
                         pass
                 info["kind"] = "folder"
                 info["count"] = sum(1 for p in d.glob("*") if p.suffix.lower() in IMAGE_EXTS)
+                info["total"] = info["count"]
             info["name"] = d.name
             info["path"] = str(d)
             out.append(info)

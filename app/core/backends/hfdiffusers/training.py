@@ -431,7 +431,8 @@ def _run(job: Job, cfg: DiffusersTrainConfig):
 
             ds = ManifestDataset.from_snapshot(cfg.manifest, cfg.image_size, cfg.fit,
                                                engine="diffusers", seed=cfg.seed)
-            emit(f"dataset: {len(ds)} images from {cfg.manifest}, augmented as they load")
+            emit(f"dataset: {len(ds.files)} images x {ds.variants} variations "
+                 f"(seed {ds.seed}) = {len(ds)} per pass")
         else:
             ds = ImageFolder(cfg.dataset, cfg.image_size, cfg.fit)
             emit(f"dataset: {len(ds)} images from {cfg.dataset}")

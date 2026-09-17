@@ -1,22 +1,24 @@
 """Training data for record-based datasets: frame and augment as images load.
 
 A record-based dataset is a list of image paths plus a recipe (see
-``app.backend.data.manifest``). Nothing is written ahead of time; each time the
-trainer asks for an image this does:
+``app.backend.data.manifest``). When the dataset is built -- once, as training
+starts -- the recipe's seed decides a fixed set of variations of every image
+(``augment.plan``), so the dataset is ``images x augment_variants`` long and two
+runs of the same recipe and seed train on exactly the same thing. Each item is
+then, as it loads:
 
-    load RGB -> frame to the recipe's width x height -> one random augmentation
+    load RGB -> frame to the recipe's width x height -> apply its variation
     -> fit to the training image size -> tensor -> the engine's normalisation
 
 Both engines use it -- xurdif from its subprocess (via ``--manifest``), Diffusers
 in-process -- and each keeps its own fit and value range, so a record dataset
 trains the way a folder of the same framed images would, minus the copies.
 
-Framing is deterministic and can be expensive on large originals, so framed
-images are kept in memory up to a byte budget; the random augmentation is
-cheap and drawn fresh every time.
+Nothing is written to disk: a variation is a few numbers, and applying it costs
+about a millisecond. Framing is the expensive part, so framed images are kept in
+memory up to a byte budget and every variation of an image reuses one framing.
 """
 import json
-import random
 import sys
 from collections import OrderedDict
 from pathlib import Path
@@ -41,6 +43,10 @@ def read_snapshot(path: str | Path) -> dict:
 class ManifestDataset:
     """A torch-style dataset over a snapshot's files and recipe.
 
+    Its length is the number of images times the recipe's variations per image,
+    and each item is one (image, variation) pair, so a pass sees every variation
+    of every image exactly once.
+
     ``fit`` and ``normalize`` are the engine's: xurdif resizes to a square (or
     random-crops) and shifts to [-0.5, 0.5]; Diffusers resizes the short side
     before a random crop and normalises to [-1, 1].
@@ -54,7 +60,18 @@ class ManifestDataset:
         if not self.files:
             raise ValueError("no images in this dataset")
         self.recipe = recipe
-        self.rng = random.Random(seed)
+        # The recipe's seed is the dataset's, so both engines build the same
+        # set; ``seed`` is only a fallback for a recipe written before seeds.
+        self.seed = int(recipe.get("augment_seed", seed if seed is not None else 0))
+        self.variants = max(1, int(recipe.get("augment_variants", 1)))
+        self.plan = [
+            augment.plan(recipe["augmentations"], recipe["augment_settings"],
+                         self.variants, self.seed, i)
+            for i in range(len(self.files))
+        ]
+        # An image whose augmentations cannot make that many distinct
+        # variations gets fewer, so index by the flat list of (image, variation).
+        self.items = [(i, v) for i, ps in enumerate(self.plan) for v in range(len(ps))]
         self._cache: "OrderedDict[int, object]" = OrderedDict()
         self._cache_used = 0
         self._cache_bytes = cache_bytes
@@ -76,7 +93,7 @@ class ManifestDataset:
         return cls(snap["files"], snap["recipe"], image_size, fit, engine, **kw)
 
     def __len__(self):
-        return len(self.files)
+        return len(self.items)
 
     def framed(self, i: int):
         """The i-th image framed to the recipe, from memory when possible."""
@@ -98,10 +115,10 @@ class ManifestDataset:
                 self._cache_used -= old.width * old.height * 3
         return img
 
-    def sample(self, i: int):
-        """One training view of the i-th image, as a PIL image (before fit/tensor)."""
-        r = self.recipe
-        return augment.random_augment(self.framed(i), r["augmentations"], r["augment_settings"], self.rng)
+    def sample(self, j: int):
+        """Training item ``j`` as a PIL image (before fit and tensor)."""
+        i, v = self.items[j]
+        return augment.apply(self.framed(i), self.plan[i][v])
 
-    def __getitem__(self, i):
-        return self.tf(self.sample(i))
+    def __getitem__(self, j):
+        return self.tf(self.sample(j))

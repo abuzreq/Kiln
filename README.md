@@ -13,7 +13,7 @@ Typical workflow: **Data → Train → Models → Create**.
 
 ## Features
 
-* **Prepare ▸ Data:** Datasets that read your image folders where they are (nothing is copied), with framing (crop, pad, stretch, non-square) and augmentations applied at training time, plus a live preview. Remove images from a dataset without touching the files.
+* **Prepare ▸ Data:** Datasets that read your image folders where they are (nothing is copied), with framing (crop, pad, stretch, non-square) and a fixed, seeded set of augmented versions built when training starts, plus a live preview of that set. Remove images from a dataset without touching the files.
 * **Prepare ▸ Train:** Train from scratch or fine-tune existing models. Includes loss curves, live sample generation, and snapshot saves.
 * **Prepare ▸ Models:** Model library, checkpoint pinning, Hugging Face model imports, and format conversion. Models in Kiln's workspace can be deleted; models Kiln only found elsewhere can be hidden, leaving the file alone.
 * **Create ▸ Canvas:** DDIM sampling with step-by-step previews, CLIP text/image guidance, img2img, inpainting (soft/hard brushes), and upscaling.
@@ -155,7 +155,7 @@ python scripts/smoke_train.py             # xurdif tests require CUDA
 python scripts/smoke_tinyunet_parity.py   # Verifies TinyUNet Diffusers/xurdif parity
 python scripts/smoke_golden.py --check    # Checkpoint hashing regression test
 python scripts/smoke_cuda_pick.py         # Driver -> PyTorch build choice (no GPU needed)
-python scripts/smoke_datasets.py          # Linked datasets, safe delete, training-time augmentation
+python scripts/smoke_datasets.py          # Linked datasets, safe delete, seeded augmentation sets
 python scripts/smoke_library.py           # Preview failures, Delete vs Hide for models
 
 ```
