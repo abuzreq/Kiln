@@ -51,6 +51,7 @@ export default function Start() {
   } = useApp();
 
   const [previews, setPreviews] = useState({});
+  const [failed, setFailed] = useState({});
   const [captures, setCaptures] = useState(null);
   const [frameIdx, setFrameIdx] = useState({});
   const [featured, setFeatured] = useState(null);
@@ -79,7 +80,10 @@ export default function Start() {
         const d = await api.post("/library/previews", { paths, generate: true });
         if (stopped) return;
         setPreviews(d.previews || {});
-        const done = paths.every((p) => (d.previews?.[p] || []).length >= d.count);
+        setFailed(d.failed || {});
+        // A model that could not be sampled counts as settled: the server will
+        // not retry it until the file changes, so waiting on it is pointless.
+        const done = paths.every((p) => d.failed?.[p] || (d.previews?.[p] || []).length >= d.count);
         // Stop when everything is cached, and also when nothing is queued or in
         // flight — that means generation has stopped making progress, so polling
         // on would just spin forever.
@@ -203,6 +207,7 @@ export default function Start() {
                 key={m.path}
                 m={m}
                 frames={previews[m.path] || []}
+                failure={failed[m.path]}
                 index={frameIdx[m.path] || 0}
                 onOpen={openModel}
               />
@@ -238,7 +243,7 @@ export default function Start() {
   );
 }
 
-function ModelCard({ m, frames, index, onOpen }) {
+function ModelCard({ m, frames, index, onOpen, failure }) {
   // Every frame is stacked and only opacity changes, so a swap cross-fades
   // instead of flashing through an unloaded image.
   const has = frames.length > 0;
@@ -272,7 +277,10 @@ function ModelCard({ m, frames, index, onOpen }) {
         <span className="start-card-hint">
           {seed != null ? `Open · seed ${seed}` : "Open in Create"}
         </span>
-        {has && frames.length < 6 && (
+        {failure && !has && (
+          <span className="start-card-filling" title={failure}>Can't preview this model</span>
+        )}
+        {has && frames.length < 6 && !failure && (
           <span className="start-card-filling" aria-hidden="true">
             <span className="spinner sm" /> {frames.length}/6
           </span>

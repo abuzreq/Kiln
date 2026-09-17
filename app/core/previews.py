@@ -170,6 +170,11 @@ def generate(model_path: str, count: int = PREVIEW_COUNT) -> list[str]:
 # generating for several models at once would just thrash VRAM.
 _q: "queue.Queue[str]" = queue.Queue()
 _pending: set[str] = set()
+# path -> (cache_key at the time, message). A model that cannot be sampled
+# (unloadable, wrong layout, missing weights) would otherwise be re-queued on
+# every hub poll and fail again forever. Keyed on cache_key so replacing the
+# file -- which changes its mtime/size -- earns it another try.
+_failed: dict[str, tuple[str | None, str]] = {}
 _lock = threading.Lock()
 _worker: threading.Thread | None = None
 
@@ -181,6 +186,8 @@ def _drain():
             generate(path)
         except Exception as e:  # noqa: BLE001
             log.warning("preview generation failed for %s: %s", Path(path).name, e)
+            with _lock:
+                _failed[path] = (cache_key(path), str(e) or type(e).__name__)
         finally:
             with _lock:
                 _pending.discard(path)
@@ -203,6 +210,8 @@ def enqueue(model_path: str) -> bool:
         return False
     if len(list_previews(model_path)) >= PREVIEW_COUNT:
         return False
+    if failure(model_path) is not None:
+        return False
     with _lock:
         if model_path in _pending:
             return False
@@ -210,6 +219,19 @@ def enqueue(model_path: str) -> bool:
     _ensure_worker()
     _q.put(model_path)
     return True
+
+
+def failure(model_path: str) -> str | None:
+    """Why this model's previews last failed, or None if it has not failed as it is now."""
+    with _lock:
+        rec = _failed.get(model_path)
+    if rec is None:
+        return None
+    if rec[0] != cache_key(model_path):
+        with _lock:
+            _failed.pop(model_path, None)
+        return None
+    return rec[1]
 
 
 def pending_count() -> int:

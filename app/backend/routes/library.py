@@ -115,7 +115,7 @@ def toggle_star():
 
 @bp.get("/models")
 def models():
-    return ok(manager.scan_public())
+    return ok(manager.scan_public(include_hidden=request.args.get("hidden") == "1"))
 
 
 @bp.post("/previews")
@@ -141,8 +141,10 @@ def previews():
     queued = 0
     if body.get("generate"):
         queued = sum(1 for p in paths if previews_mod.enqueue(p))
+    failed = {p: why for p in paths if (why := previews_mod.failure(p))}
     return ok({
         "previews": out,
+        "failed": failed,
         "count": previews_mod.PREVIEW_COUNT,
         "queued": queued,
         "pending": previews_mod.pending_count(),
@@ -165,6 +167,15 @@ def delete_model():
     library.delete_model_files(path)
     manager.clear_cache()
     return ok({"deleted": path})
+
+
+@bp.post("/model/hide")
+def hide_model():
+    """Hide (or unhide) a model from Kiln's lists. The file is never touched."""
+    body = request.get_json(force=True, silent=True) or {}
+    (path,) = require(body, "path")
+    paths = library.set_hidden(path, bool(body.get("hidden", True)))
+    return ok({"hidden": paths})
 
 
 @bp.get("/catalog")
