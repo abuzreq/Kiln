@@ -15,16 +15,33 @@ bp = Blueprint("system", __name__, url_prefix="/api")
 
 
 def _within_allowed(path: Path) -> bool:
-    """Only serve files that live inside the workspace or the bundled models dir."""
-    allowed_roots = [workspace.root]
+    """Only serve files Kiln has a reason to show.
+
+    That is the workspace, the install's bundled models and vendor folders, and
+    the folders and files a dataset record links to -- datasets read the user's
+    images in place. The path is checked both as given (so a folder linked into
+    the workspace is served under the workspace path it appears at) and resolved
+    (so ``..`` or a link cannot walk out of those roots).
+    """
+    from app.backend.data import manifest
+
     proj_root = Path(__file__).resolve().parents[3]
-    allowed_roots.append(proj_root / "models")
-    allowed_roots.append(proj_root / "vendor")
+    roots = [workspace.root, proj_root / "models", proj_root / "vendor"]
+
+    def under(p: str, root: str) -> bool:
+        return p == root or p.startswith(root.rstrip(os.sep) + os.sep)
+
     try:
-        rp = path.resolve()
+        given = manifest.norm(path)
+        real = os.path.normcase(str(path.resolve()))
     except Exception:  # noqa: BLE001
         return False
-    return any(str(rp).startswith(str(r.resolve())) for r in allowed_roots)
+    if ".." in Path(str(path)).parts:
+        return False
+    for r in roots:
+        if under(given, manifest.norm(r)) or under(real, os.path.normcase(str(r.resolve()))):
+            return True
+    return manifest.is_member_path(given)
 
 
 @bp.get("/media")
