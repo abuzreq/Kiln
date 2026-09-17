@@ -1,22 +1,22 @@
 """Training data for record-based datasets: frame and augment as images load.
 
 A record-based dataset is a list of image paths plus a recipe (see
-``app.backend.data.manifest``). When the dataset is built -- once, as training
-starts -- the recipe's seed decides a fixed set of variations of every image
-(``augment.plan``), so the dataset is ``images x augment_variants`` long and two
-runs of the same recipe and seed train on exactly the same thing. Each item is
-then, as it loads:
+``app.backend.data.manifest``). The recipe's augmentations are combined into a
+fixed list of versions (``augment.combinations``) when the dataset is built, as
+training starts, so the dataset is ``images x versions`` long and nothing about
+it is random: the same recipe always trains on the same images. Each item is,
+as it loads:
 
-    load RGB -> frame to the recipe's width x height -> apply its variation
+    load RGB -> frame to the recipe's width x height -> apply its version
     -> fit to the training image size -> tensor -> the engine's normalisation
 
 Both engines use it -- xurdif from its subprocess (via ``--manifest``), Diffusers
 in-process -- and each keeps its own fit and value range, so a record dataset
 trains the way a folder of the same framed images would, minus the copies.
 
-Nothing is written to disk: a variation is a few numbers, and applying it costs
+Nothing is written to disk: a version is a few numbers, and applying it costs
 about a millisecond. Framing is the expensive part, so framed images are kept in
-memory up to a byte budget and every variation of an image reuses one framing.
+memory up to a byte budget and every version of an image reuses one framing.
 """
 import json
 import sys
@@ -43,9 +43,9 @@ def read_snapshot(path: str | Path) -> dict:
 class ManifestDataset:
     """A torch-style dataset over a snapshot's files and recipe.
 
-    Its length is the number of images times the recipe's variations per image,
-    and each item is one (image, variation) pair, so a pass sees every variation
-    of every image exactly once.
+    Its length is the number of images times the versions the recipe makes of
+    each, and item ``j`` is version ``j % versions`` of image ``j // versions``,
+    so a pass sees every version of every image exactly once.
 
     ``fit`` and ``normalize`` are the engine's: xurdif resizes to a square (or
     random-crops) and shifts to [-0.5, 0.5]; Diffusers resizes the short side
@@ -53,25 +53,17 @@ class ManifestDataset:
     """
 
     def __init__(self, files, recipe: dict, image_size: int, fit: str = "resize",
-                 engine: str = "xurdif", cache_bytes: int = CACHE_BYTES, seed: int | None = None):
+                 engine: str = "xurdif", cache_bytes: int = CACHE_BYTES):
         from torchvision import transforms
 
         self.files = [str(f) for f in files]
         if not self.files:
             raise ValueError("no images in this dataset")
         self.recipe = recipe
-        # The recipe's seed is the dataset's, so both engines build the same
-        # set; ``seed`` is only a fallback for a recipe written before seeds.
-        self.seed = int(recipe.get("augment_seed", seed if seed is not None else 0))
-        self.variants = max(1, int(recipe.get("augment_variants", 1)))
-        self.plan = [
-            augment.plan(recipe["augmentations"], recipe["augment_settings"],
-                         self.variants, self.seed, i)
-            for i in range(len(self.files))
-        ]
-        # An image whose augmentations cannot make that many distinct
-        # variations gets fewer, so index by the flat list of (image, variation).
-        self.items = [(i, v) for i, ps in enumerate(self.plan) for v in range(len(ps))]
+        # Every combination of the recipe's augmentations, the untouched image
+        # first. The same list for every image, so it is built once.
+        self.combinations = augment.combinations(recipe["augmentations"], recipe["augment_settings"])
+        self.variants = len(self.combinations)
         self._cache: "OrderedDict[int, object]" = OrderedDict()
         self._cache_used = 0
         self._cache_bytes = cache_bytes
@@ -93,7 +85,7 @@ class ManifestDataset:
         return cls(snap["files"], snap["recipe"], image_size, fit, engine, **kw)
 
     def __len__(self):
-        return len(self.items)
+        return len(self.files) * self.variants
 
     def framed(self, i: int):
         """The i-th image framed to the recipe, from memory when possible."""
@@ -117,8 +109,8 @@ class ManifestDataset:
 
     def sample(self, j: int):
         """Training item ``j`` as a PIL image (before fit and tensor)."""
-        i, v = self.items[j]
-        return augment.apply(self.framed(i), self.plan[i][v])
+        i, v = divmod(j, self.variants)
+        return augment.apply(self.framed(i), self.combinations[v])
 
     def __getitem__(self, j):
         return self.tf(self.sample(j))

@@ -242,7 +242,7 @@ def check_diffusers_lora(base: str):
 
 def check_record_dataset(diffusers_only: bool):
     """A record dataset: non-square images in a folder outside the workspace,
-    framed and augmented into a fixed seeded set, through the real /api/train route."""
+    framed and augmented into a fixed set, through the real /api/train route."""
     from app.backend.app import create_app
     from app.backend.data import manifest
 
@@ -257,8 +257,7 @@ def check_record_dataset(diffusers_only: bool):
                 external / f"wide{i:02d}.jpg")
         ds_dir = WORKSPACE / "datasets" / "linked"
         manifest.new(ds_dir, {"width": 64, "height": 64, "resize_mode": "pad",
-                              "augmentations": ["vflip", "rotate", "brightness"],
-                              "augment_variants": 4, "augment_seed": 5})
+                              "augmentations": ["vflip", "rotate", "brightness"]})
         manifest.add_path(ds_dir, str(external))
         before = sorted(p.stat().st_mtime for p in external.iterdir())
 
@@ -274,9 +273,9 @@ def check_record_dataset(diffusers_only: bool):
         check_run_shape(out_dir, job, "diffusers record", expect_dirs=True)
         snap = json.loads((out_dir / "dataset.json").read_text(encoding="utf-8"))
         assert len(snap["files"]) == 10 and snap["recipe"]["augmentations"] == ["vflip", "rotate", "brightness"]
-        assert snap["variants"] == 4 and snap["total"] == 40, snap
+        assert snap["variants"] == 24 and snap["total"] == 240, snap  # 2 flips x 4 turns x 3
         log = " | ".join(job.detail.get("log") or [])
-        assert "10 images x 4 variations (seed 5) = 40 per pass" in log, log[-400:]
+        assert "10 images x 24 versions = 240 per pass" in log, log[-400:]
 
         if not diffusers_only and torch.cuda.is_available():
             backend = backends.get("xurdif")
@@ -352,7 +351,7 @@ def main():
         check_tinyunet("xurdif")
         check_diffusers_finetune(base)
         check_diffusers_lora(base)
-        print("record dataset (linked folder, a seeded set of variations per image):")
+        print("record dataset (linked folder, every combination of its augmentations):")
         check_record_dataset(diffusers_only)
         print("capability gates:")
         check_refusals()

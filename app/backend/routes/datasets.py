@@ -10,7 +10,7 @@ from pathlib import Path
 
 from flask import Blueprint, request
 
-from app.backend.data import dataset_builder, manifest, projects
+from app.backend.data import augment, dataset_builder, manifest, projects
 from utils.api_responses import ok, err
 from utils.fs import is_link, safe_move, safe_rmtree, unlink_link
 from utils.process_control import registry
@@ -64,9 +64,11 @@ def _summary(ds_dir: Path) -> dict:
         uploads = ds_dir / manifest.UPLOADS
         out.update(
             recipe=record["recipe"],
-            # What a run will see: every image in its variations.
-            variants=record["recipe"]["augment_variants"],
-            total=len(res["files"]) * record["recipe"]["augment_variants"],
+            # What a run will see: every image in every version.
+            variants=manifest.versions(record["recipe"]),
+            counts=augment.counts(record["recipe"]["augmentations"],
+                                  record["recipe"]["augment_settings"]),
+            total=len(res["files"]) * manifest.versions(record["recipe"]),
             sources=[s["path"] for s in record["sources"]],
             added=record["added"],
             uploads=sum(1 for f in res["files"]
@@ -231,18 +233,19 @@ def preview():
         recipe_ = manifest.clean_recipe({**record["recipe"], **(body.get("recipe") or {})})
         path = body.get("source_path")
         files = manifest.files(ds_dir)
-        index = {manifest.norm(f): i for i, f in enumerate(files)}.get(manifest.norm(path or ""))
-        if index is None:
+        if not path or manifest.norm(path) not in {manifest.norm(f) for f in files}:
             if not files:
                 return ok({"previews": []})
-            path, index = files[0], 0
-        # The variations depend on the image's place in the dataset, so the
-        # preview shows what this image will really be trained on.
-        items = dataset_builder.preview_variants(path, recipe_, index)
+            path = files[0]
+        items = dataset_builder.preview_variants(path, recipe_)
     except Exception as e:
         return err(str(e), 400)
     return ok({
         "source": path,
+        # The screen shows what this recipe costs before it is saved: what each
+        # augmentation offers, and how many versions of an image they combine to.
+        "counts": augment.counts(recipe_["augmentations"], recipe_["augment_settings"]),
+        "variants": len(items),
         "previews": [{"label": x["label"], "image": data_url(x["image"])} for x in items],
     })
 

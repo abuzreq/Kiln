@@ -9,21 +9,19 @@ from utils.logger import get_logger
 log = get_logger("dataset_builder")
 
 
-def preview_variants(image_path: str | Path, recipe: dict, index: int = 0) -> list[dict]:
+def preview_variants(image_path: str | Path, recipe: dict) -> list[dict]:
     """What training will build for one image of a v2 dataset -- the real set.
 
-    The base is the image framed to the recipe, then its variations exactly as
-    ``ManifestDataset`` will draw them for the image at ``index``, so a run with
-    this recipe and seed trains on the images shown here.
+    The base is the image framed to the recipe, then every combination of its
+    augmentations, exactly as ``ManifestDataset`` builds them, so a run with
+    this recipe trains on the images shown here.
     """
     with Image.open(image_path) as im:
         base = framing.process_image(
             im, recipe["width"], recipe["height"], recipe["resize_mode"], recipe["padding_mode"])
-    plan = augment.plan(recipe["augmentations"], recipe["augment_settings"],
-                        recipe["augment_variants"], recipe["augment_seed"], index)
-    out = [{"label": augment.label(p) if i else "Framed", "image": augment.apply(base, p)}
-           for i, p in enumerate(plan)]
-    return out
+    combos = augment.combinations(recipe["augmentations"], recipe["augment_settings"])
+    return [{"label": augment.label(c) if i else "Framed", "image": augment.apply(base, c)}
+            for i, c in enumerate(combos)]
 
 
 def health(ds_dir: Path) -> dict:

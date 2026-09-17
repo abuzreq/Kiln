@@ -151,7 +151,7 @@ diffusion = GaussianDiffusion(
 
 
 # KILN: see --manifest above. The snapshot's recipe decides the fixed set of
-# variations; the stock transform's unconditional RandomHorizontalFlip is not
+# versions; the stock transform's unconditional RandomHorizontalFlip is not
 # applied on top.
 manifest_ds = None
 if opt.manifest:
@@ -160,7 +160,7 @@ if opt.manifest:
     from app.core.engine.train_data import ManifestDataset
     manifest_ds = ManifestDataset.from_snapshot(opt.manifest, opt.imageSize, fit=opt.fit, engine="xurdif")
     print("dataset:", len(manifest_ds.files), "images x", manifest_ds.variants,
-          "variations (seed", str(manifest_ds.seed) + ") =", len(manifest_ds), "per pass")
+          "versions =", len(manifest_ds), "per pass")
 
 trainer = Trainer(
     diffusion,

@@ -50,7 +50,7 @@ class Store:
                 info.update(record["recipe"])
                 info["kind"] = "record"
                 info["count"] = len(manifest.files(d))
-                info["total"] = info["count"] * record["recipe"]["augment_variants"]
+                info["total"] = info["count"] * manifest.versions(record["recipe"])
             else:
                 meta = d / "dataset.json"
                 if meta.exists():

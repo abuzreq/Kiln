@@ -167,9 +167,10 @@ function Shell() {
         )}
       </div>
 
-      {/* What the explorer found, along the bottom of every working screen.
-          Hidden on the hub, which has its own overview. */}
-      {!onStart && <DiscoveriesDrawer />}
+      {/* What the explorer found, along the bottom of Create -- where the
+          images it turns up can actually be opened, bent or sampled from.
+          Prepare and the hub have nothing to do with it. */}
+      {mode === "play" && <DiscoveriesDrawer />}
 
       {assets && <LibraryDrawer onClose={() => setAssets(false)} />}
       {workspaceOpen && <WorkspaceModal onClose={() => setWorkspaceOpen(false)} />}

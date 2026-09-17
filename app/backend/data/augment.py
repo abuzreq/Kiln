@@ -1,34 +1,34 @@
-"""Augmentations: a fixed, seeded set of variations per image.
+"""Augmentations: every combination of the options chosen, per image.
 
-A recipe names the augmentations to use, how many variations to make of each
-image (``augment_variants``) and a seed (``augment_seed``). ``plan`` turns that
-into a list of small dicts -- what to do to one image -- drawn once, when
-training starts:
+Each augmentation offers a small, known set of options -- H flip is on or off,
+quarter turns are 0/90/180/270, brightness is a few levels between min and max.
+A recipe's augmentations are combined, so one image becomes the product of them:
 
-    plan(["hflip", "rotate"], settings, 4, seed=0, index=12)
-    -> [{}, {"hflip": True}, {"rotate": 90}, {"hflip": True, "rotate": 270}]
+    combinations(["hflip", "rotate"], settings)
+    -> [{}, {"rotate": 90}, {"rotate": 180}, {"rotate": 270},
+        {"hflip": True}, {"hflip": True, "rotate": 90}, ...]      # 2 x 4 = 8
 
-The first variation is always the framed image untouched, and no two are the
-same. Because the draw is seeded with the image's index, the same recipe and
-seed give the same dataset in both engines and on any machine. ``apply`` turns
-one of these dicts into an image, which costs about a millisecond, so nothing is
-written to disk and originals are never touched.
+The first combination is always the framed image untouched. Nothing is random
+and nothing is written to disk: a combination is a few numbers, applied to the
+framed image as it loads (``apply``), which costs about a millisecond. The same
+recipe therefore gives the same training set every time, and ``count`` says how
+big it is before a run starts.
 """
-import random
+from itertools import product
 
 from PIL import Image, ImageEnhance
 
 AUGMENTATIONS = ("hflip", "vflip", "rotate", "brightness", "contrast")
 
-DEFAULT_SETTINGS = {
-    "rotate": {"mode": "random", "angles": [90, 180, 270], "angle": 90},
-    "brightness": {"min": 0.8, "max": 1.2},
-    "contrast": {"min": 0.8, "max": 1.2},
-}
+# How many factors brightness or contrast may take between its min and max.
+MAX_LEVELS = 6
 
-# Brightness and contrast are continuous, so the number of distinct variations
-# is only bounded by taste. More than this per image is a very long pass.
-MAX_VARIANTS = 64
+DEFAULT_SETTINGS = {
+    # "angles": the image itself plus each angle; "fixed": the image and one angle.
+    "rotate": {"mode": "angles", "angles": [90, 180, 270], "angle": 90},
+    "brightness": {"min": 0.8, "max": 1.2, "levels": 2},
+    "contrast": {"min": 0.8, "max": 1.2, "levels": 2},
+}
 
 
 def _merge_settings(settings: dict | None) -> dict:
@@ -39,6 +39,9 @@ def _merge_settings(settings: dict | None) -> dict:
                 out[k].update(v)
             else:
                 out[k] = v
+    # "random" was this mode's name while augmentations were drawn per step.
+    if out["rotate"].get("mode") not in ("angles", "fixed"):
+        out["rotate"]["mode"] = "angles"
     return out
 
 
@@ -46,100 +49,104 @@ def _clean_ops(ops) -> list[str]:
     return [o for o in AUGMENTATIONS if o in (ops or [])]
 
 
+def _int(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _angles(rot: dict) -> list[int]:
-    """The non-zero angles a random-mode rotation can pick, deduped in order."""
+    """The non-zero angles a rotation offers, deduped and in order."""
     seen, out = set(), []
     for a in rot.get("angles") or DEFAULT_SETTINGS["rotate"]["angles"]:
-        try:
-            a = int(a) % 360
-        except (TypeError, ValueError):
-            continue
+        a = _int(a, 0) % 360
         if a and a not in seen:
             seen.add(a)
             out.append(a)
     return out
 
 
-def _draw(ops: list[str], cfg: dict, rng: random.Random) -> dict:
-    """One variation. Settings left at their no-op value are dropped, so the
-    untouched image is always the empty dict and duplicates compare equal."""
-    p = {}
-    if "hflip" in ops and rng.random() < 0.5:
-        p["hflip"] = True
-    if "vflip" in ops and rng.random() < 0.5:
-        p["vflip"] = True
-    if "rotate" in ops:
-        rot = cfg.get("rotate", DEFAULT_SETTINGS["rotate"])
-        if rot.get("mode") == "fixed":
-            try:
-                angle = int(rot.get("angle", 90)) % 360
-            except (TypeError, ValueError):
-                angle = 90
-            angle = angle if rng.random() < 0.5 else 0
-        else:
-            angle = rng.choice([0] + _angles(rot))
-        if angle:
-            p["rotate"] = angle
+def _factors(cfg: dict) -> list[float]:
+    """The factors one enhancement offers: ``levels`` steps from min to max."""
+    try:
+        lo, hi = sorted((float(cfg.get("min", 0.8)), float(cfg.get("max", 1.2))))
+    except (TypeError, ValueError):
+        lo, hi = 0.8, 1.2
+    n = max(1, min(MAX_LEVELS, _int(cfg.get("levels", 2), 2)))
+    if n == 1 or hi == lo:
+        vals = [round((lo + hi) / 2, 3)]
+    else:
+        vals = [round(lo + (hi - lo) * i / (n - 1), 3) for i in range(n)]
+    # 1.0 changes nothing, and the untouched image is already in the set.
+    return [v for v in dict.fromkeys(vals) if v != 1.0]
+
+
+def clean_settings(settings: dict | None) -> dict:
+    """Augmentation settings with every value in range, ready to store."""
+    cfg = _merge_settings(settings)
+    rot = cfg["rotate"]
+    rot["angles"] = _angles(rot) or list(DEFAULT_SETTINGS["rotate"]["angles"])
+    rot["angle"] = _int(rot.get("angle", 90), 90) % 360
+    if rot["mode"] == "fixed" and not rot["angle"]:
+        rot["angle"] = 90
     for op in ("brightness", "contrast"):
-        if op in ops:
-            c = cfg.get(op, DEFAULT_SETTINGS[op])
+        c = cfg[op]
+        try:
             lo, hi = sorted((float(c.get("min", 0.8)), float(c.get("max", 1.2))))
-            f = round(rng.uniform(lo, hi), 3)
-            if f != 1.0:
-                p[op] = f
-    return p
+        except (TypeError, ValueError):
+            lo, hi = 0.8, 1.2
+        c["min"], c["max"] = round(max(0.1, lo), 3), round(min(3.0, hi), 3)
+        c["levels"] = max(1, min(MAX_LEVELS, _int(c.get("levels", 2), 2)))
+    return cfg
 
 
-def _key(params: dict):
-    return tuple(sorted(params.items()))
-
-
-def max_variants(ops, settings: dict | None = None) -> int:
-    """How many distinct variations of one image these augmentations can make."""
-    ops = _clean_ops(ops)
-    if "brightness" in ops or "contrast" in ops:
-        return MAX_VARIANTS
+def options(ops, settings: dict | None = None) -> dict[str, list[dict]]:
+    """What each chosen augmentation offers, including leaving the image alone."""
     cfg = _merge_settings(settings)
+    out: dict[str, list[dict]] = {}
+    for op in _clean_ops(ops):
+        if op in ("hflip", "vflip"):
+            out[op] = [{}, {op: True}]
+        elif op == "rotate":
+            rot = cfg["rotate"]
+            angles = ([_int(rot.get("angle", 90), 90) % 360] if rot["mode"] == "fixed"
+                      else _angles(rot))
+            out[op] = [{}] + [{"rotate": a} for a in angles if a]
+        else:
+            out[op] = [{}] + [{op: f} for f in _factors(cfg[op])]
+    return {op: opts for op, opts in out.items() if len(opts) > 1}
+
+
+def counts(ops, settings: dict | None = None) -> dict[str, int]:
+    """How many versions each augmentation offers, for the Data screen."""
+    return {op: len(opts) for op, opts in options(ops, settings).items()}
+
+
+def count(ops, settings: dict | None = None) -> int:
+    """How many versions of one image this recipe makes, the original included."""
     n = 1
-    if "hflip" in ops:
-        n *= 2
-    if "vflip" in ops:
-        n *= 2
-    if "rotate" in ops:
-        rot = cfg.get("rotate", DEFAULT_SETTINGS["rotate"])
-        n *= 2 if rot.get("mode") == "fixed" else 1 + len(_angles(rot))
-    return max(1, min(n, MAX_VARIANTS))
+    for k in counts(ops, settings).values():
+        n *= k
+    return n
 
 
-def plan(ops, settings: dict | None, count: int, seed: int = 0, index: int = 0) -> list[dict]:
-    """``count`` distinct variations for the image at ``index``.
-
-    The first is the image itself. If the augmentations cannot make that many
-    distinct variations the list is shorter; ``max_variants`` says in advance
-    how many there are, and recipes are clamped to it.
-    """
-    ops = _clean_ops(ops)
-    count = max(1, int(count))
-    out: list[dict] = [{}]
-    if not ops or count == 1:
-        return out
-    cfg = _merge_settings(settings)
-    rng = random.Random(f"{seed}:{index}")
-    seen = {()}
-    tries = 50 * count + 100
-    while len(out) < count and tries > 0:
-        tries -= 1
-        p = _draw(ops, cfg, rng)
-        k = _key(p)
-        if k in seen:
-            continue
-        seen.add(k)
-        out.append(p)
+def combinations(ops, settings: dict | None = None) -> list[dict]:
+    """Every combination of the chosen augmentations; the first changes nothing."""
+    picks = list(options(ops, settings).values())
+    if not picks:
+        return [{}]
+    out = []
+    for combo in product(*picks):
+        merged = {}
+        for part in combo:
+            merged.update(part)
+        out.append(merged)
     return out
 
 
 def apply(img: Image.Image, params: dict | None) -> Image.Image:
-    """The image with one variation applied. An empty variation returns it as is."""
+    """The image with one combination applied. An empty one returns it as is."""
     out = img
     if not params:
         return out
@@ -147,7 +154,7 @@ def apply(img: Image.Image, params: dict | None) -> Image.Image:
         out = out.transpose(Image.FLIP_LEFT_RIGHT)
     if params.get("vflip"):
         out = out.transpose(Image.FLIP_TOP_BOTTOM)
-    angle = int(params.get("rotate") or 0) % 360
+    angle = _int(params.get("rotate"), 0) % 360
     if angle:
         out = out.rotate(angle, expand=False)
     for op, enhancer in (("brightness", ImageEnhance.Brightness), ("contrast", ImageEnhance.Contrast)):
@@ -158,7 +165,7 @@ def apply(img: Image.Image, params: dict | None) -> Image.Image:
 
 
 def label(params: dict | None) -> str:
-    """A short name for one variation, for the Data screen's preview."""
+    """A short name for one combination, for the Data screen's preview."""
     if not params:
         return "Original"
     parts = []
@@ -167,7 +174,7 @@ def label(params: dict | None) -> str:
     if params.get("vflip"):
         parts.append("V flip")
     if params.get("rotate"):
-        parts.append(f"{int(params['rotate'])}°")
+        parts.append(f"{_int(params['rotate'], 0)}°")
     if params.get("brightness"):
         parts.append(f"bright {float(params['brightness']):.2f}")
     if params.get("contrast"):

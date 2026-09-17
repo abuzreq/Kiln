@@ -322,13 +322,11 @@ export default function Train() {
             return;
           }
         }
-        if (arrived) {
-          // Came here to start a run on this dataset: stay on New run.
-          set("dataset", arrived);
-          setMode("new");
-        } else if (t.run) await loadRun(t.run);
-        else if (p.runs?.length) await loadRun(p.runs[p.runs.length - 1].name);
-        else setMode("new");
+        // Opening Train means starting a run far more often than revisiting an
+        // old one, so it always lands on New run; previous runs are one click
+        // away. A run that is actually training is the exception, above.
+        if (arrived) set("dataset", arrived);
+        setMode("new");
       } catch (e) {
         if (!cancelled) toast(e.message, "error");
       }
@@ -362,8 +360,8 @@ export default function Train() {
   }, [trainFromPath]);
 
   // arriving from "Train on this dataset" in Prepare ▸ Data. The /studio load
-  // below is still in flight on a fresh mount and would otherwise pick the
-  // first dataset and reopen the last run on top of this, so it checks the ref.
+  // below is still in flight on a fresh mount and would otherwise replace this
+  // dataset with the first one in the list, so it checks the ref.
   useEffect(() => {
     if (!trainDataset) return;
     arrivedWithDataset.current = trainDataset;
@@ -575,7 +573,9 @@ export default function Train() {
                   return;
                 }
                 if (m === "new") startNew();
-                else setMode("run");
+                // Previous runs open on the newest one rather than on nothing,
+                // or on whichever run was last looked at in this session.
+                else loadRun(orderedRuns[0]?.name);
               }}
             />
             <span className={`pill ${statusPillClass(running ? "training" : train.status)}`}>
@@ -636,7 +636,7 @@ export default function Train() {
                   {datasetInfo.total > datasetInfo.count
                     ? `${datasetInfo.total.toLocaleString()} images per pass: `
                       + `${datasetInfo.count.toLocaleString()} × ${Math.round(datasetInfo.total / datasetInfo.count)} `
-                      + "variations from its recipe."
+                      + "versions from its recipe."
                     : `${datasetInfo.count.toLocaleString()} images per pass.`}
                 </p>
               )}

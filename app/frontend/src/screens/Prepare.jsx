@@ -24,9 +24,9 @@ const MODE_TABS = [
   { id: "create", label: "New dataset", tip: "Start a dataset from folders on this computer" },
 ];
 const DEFAULT_AUG_SETTINGS = {
-  rotate: { mode: "random", angle: 90, angles: [90, 180, 270] },
-  brightness: { min: 0.8, max: 1.2 },
-  contrast: { min: 0.8, max: 1.2 },
+  rotate: { mode: "angles", angle: 90, angles: [90, 180, 270] },
+  brightness: { min: 0.8, max: 1.2, levels: 2 },
+  contrast: { min: 0.8, max: 1.2, levels: 2 },
 };
 
 /** The recipe as the controls edit it, with every setting filled in. */
@@ -44,13 +44,9 @@ function editable(recipe) {
       brightness: { ...DEFAULT_AUG_SETTINGS.brightness, ...s.brightness },
       contrast: { ...DEFAULT_AUG_SETTINGS.contrast, ...s.contrast },
     },
-    augment_variants: r.augment_variants ?? 2,
-    augment_seed: r.augment_seed ?? 0,
     video_fps: r.video_fps ?? 2,
   };
 }
-
-const randomSeed31 = () => Math.floor(Math.random() * 2 ** 31);
 
 const plural = (n, word) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
 
@@ -65,6 +61,7 @@ export default function Prepare() {
   const [nameAvailable, setNameAvailable] = useState(true);
   const [linkPath, setLinkPath] = useState("");
   const [previews, setPreviews] = useState([]);
+  const [previewCounts, setPreviewCounts] = useState({});
   const [previewBusy, setPreviewBusy] = useState(false);
   const [job, setJob] = useState(null);
   const [pendingDelete, setPendingDelete] = useState(false);
@@ -78,11 +75,14 @@ export default function Prepare() {
   const isRecord = ds?.kind === "record";
   const trimmedName = newName.trim();
   const dirty = isRecord && JSON.stringify(editable(ds.recipe)) !== JSON.stringify(recipe);
-  // The preview is the same set the trainer will build, so its length is the
-  // honest count -- the backend clamps it when the augmentations can't make
-  // that many different versions.
-  const variantsBuilt = !recipe.augmentations.length ? 1 : (previews.length || recipe.augment_variants);
+  // The preview is the set the trainer will build, so its own count -- and what
+  // each augmentation contributes to it -- comes back with it.
+  const variantsBuilt = Math.max(1, previewCounts.variants || previews.length || 1);
   const trainingTotal = (ds?.count || 0) * variantsBuilt;
+  const breakdown = AUGS
+    .filter((a) => previewCounts.counts?.[a.id])
+    .map((a) => `${a.label} x${previewCounts.counts[a.id]}`)
+    .join(" · ") || "";
 
   const loadList = () => api.get("/datasets")
     .then((list) => { setDatasets(list || []); return list || []; })
@@ -123,15 +123,18 @@ export default function Prepare() {
 
   // Live preview of the recipe being edited, on the dataset's first image.
   useEffect(() => {
-    if (creating || !isRecord || !ds.count) { setPreviews([]); return undefined; }
+    if (creating || !isRecord || !ds.count) { setPreviews([]); setPreviewCounts({}); return undefined; }
     let cancelled = false;
     const t = setTimeout(async () => {
       setPreviewBusy(true);
       try {
         const r = await api.post("/datasets/preview", { dataset: ds.name, recipe });
-        if (!cancelled) setPreviews(r.previews || []);
+        if (!cancelled) {
+          setPreviews(r.previews || []);
+          setPreviewCounts({ counts: r.counts || {}, variants: r.variants || 0 });
+        }
       } catch (e) {
-        if (!cancelled) { setPreviews([]); toast(e.message, "error"); }
+        if (!cancelled) { setPreviews([]); setPreviewCounts({}); toast(e.message, "error"); }
       } finally {
         if (!cancelled) setPreviewBusy(false);
       }
@@ -349,10 +352,10 @@ export default function Prepare() {
                   )}
                   <div className="section-title mt-2">Augmentations</div>
                   <p className="hint">
-                    When training starts, Kiln builds a fixed set of variations of every image
-                    from the ones chosen here, and trains on exactly those. The same seed always
-                    gives the same set. Nothing is written to disk and your files are never
-                    changed: the preview shows the real set for the first image.
+                    Every augmentation chosen here multiplies the dataset: training sees each
+                    image in every combination of them. Nothing is random, and nothing is
+                    written to disk — your files are never changed, and the preview below is
+                    the real set.
                   </p>
                   <div className="row wrap gap-2 mb-2">
                     {AUGS.map((a) => (
@@ -367,7 +370,8 @@ export default function Prepare() {
                   {recipe.augmentations.includes("rotate") && (
                     <>
                       <Select label="Rotate" value={recipe.augment_settings.rotate.mode} onChange={(v) => setAug("rotate", { mode: v })}
-                        options={[{ value: "random", label: "Random: 0°, 90°, 180° or 270°" }, { value: "fixed", label: "Fixed angle, half the time" }]} />
+                        options={[{ value: "angles", label: "Quarter turns: 0°, 90°, 180°, 270° (x4)" },
+                          { value: "fixed", label: "One angle: as it is, or turned (x2)" }]} />
                       {recipe.augment_settings.rotate.mode === "fixed" && (
                         <Num label="Angle (°)" value={recipe.augment_settings.rotate.angle} onChange={(v) => setAug("rotate", { angle: v })} min={0} max={359} step={1} />
                       )}
@@ -377,37 +381,27 @@ export default function Prepare() {
                     <div className="row gap-2">
                       <div className="grow"><Slider label="Brightness min" value={recipe.augment_settings.brightness.min} min={0.4} max={1.5} step={0.05} onChange={(v) => setAug("brightness", { min: v })} /></div>
                       <div className="grow"><Slider label="Brightness max" value={recipe.augment_settings.brightness.max} min={0.4} max={1.5} step={0.05} onChange={(v) => setAug("brightness", { max: v })} /></div>
+                      <Num label="Levels" value={recipe.augment_settings.brightness.levels}
+                        onChange={(v) => setAug("brightness", { levels: Math.max(1, Math.min(6, Math.round(Number(v) || 1))) })}
+                        min={1} max={6} step={1}
+                        tip="How many brightness factors to use between min and max. Each one is another version of every image." />
                     </div>
                   )}
                   {recipe.augmentations.includes("contrast") && (
                     <div className="row gap-2">
                       <div className="grow"><Slider label="Contrast min" value={recipe.augment_settings.contrast.min} min={0.4} max={1.5} step={0.05} onChange={(v) => setAug("contrast", { min: v })} /></div>
                       <div className="grow"><Slider label="Contrast max" value={recipe.augment_settings.contrast.max} min={0.4} max={1.5} step={0.05} onChange={(v) => setAug("contrast", { max: v })} /></div>
+                      <Num label="Levels" value={recipe.augment_settings.contrast.levels}
+                        onChange={(v) => setAug("contrast", { levels: Math.max(1, Math.min(6, Math.round(Number(v) || 1))) })}
+                        min={1} max={6} step={1}
+                        tip="How many contrast factors to use between min and max. Each one is another version of every image." />
                     </div>
                   )}
-                  <div className="row center gap-2">
-                    <div className="grow">
-                      <Num label="Variations per image" value={recipe.augment_variants}
-                        onChange={(v) => setR({ augment_variants: Math.max(1, Math.min(64, Math.round(Number(v) || 1))) })}
-                        min={1} max={64} step={1} disabled={!recipe.augmentations.length}
-                        tip={"How many versions of each image the run trains on, counting the image itself.\n\nEach one is a different mix of the augmentations above. More variations make a longer pass and a slower epoch, not a better model on their own."} />
-                    </div>
-                    <div className="grow">
-                      <Num label="Seed" value={recipe.augment_seed}
-                        onChange={(v) => setR({ augment_seed: Math.max(0, Math.round(Number(v) || 0)) })}
-                        min={0} step={1} disabled={!recipe.augmentations.length}
-                        tip="The same seed and recipe always give the same set of variations, here and in training." />
-                    </div>
-                    <button type="button" className="btn sm" disabled={!recipe.augmentations.length}
-                      onClick={() => setR({ augment_seed: randomSeed31() })}
-                      title="A different set of variations from the same augmentations">Shuffle</button>
-                  </div>
                   <p className="hint">
-                    Training will see <b>{trainingTotal.toLocaleString()}</b> images per pass
+                    {breakdown && <>{breakdown} = </>}
+                    <b>{variantsBuilt}</b> {variantsBuilt === 1 ? "version" : "versions"} of each image.
+                    {" "}Training will see <b>{trainingTotal.toLocaleString()}</b> images per pass
                     {" "}({ds.count.toLocaleString()} × {variantsBuilt}).
-                    {variantsBuilt < recipe.augment_variants && (
-                      ` These augmentations can only make ${variantsBuilt} different versions of an image.`
-                    )}
                   </p>
                   <Slider label="Video fps" value={recipe.video_fps} min={0.5} max={12} step={0.5} onChange={(v) => setR({ video_fps: v })}
                     tip="Frames taken per second from videos in the dataset. Changing it re-extracts them." />
@@ -457,7 +451,7 @@ export default function Prepare() {
                   <h3 className="mb-0">Preview</h3>
                   {previewBusy && <span className="sub">Updating…</span>}
                 </div>
-                <p className="hint mb-2">Every version of the first image this recipe and seed will train on.</p>
+                <p className="hint mb-2">Every version of the first image this recipe will train on.</p>
                 {previews.length > 0 ? (
                   <div className="preview-var-grid">
                     {previews.map((p, i) => (

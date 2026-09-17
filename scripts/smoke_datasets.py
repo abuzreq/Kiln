@@ -178,30 +178,34 @@ def check_video_frames():
 def check_augment():
     img = Image.new("RGB", (64, 48), (100, 150, 200))
     ops = ["hflip", "vflip", "rotate", "brightness", "contrast"]
-    settings = {"brightness": {"min": 0.5, "max": 0.6}}
+    settings = {"brightness": {"min": 0.5, "max": 0.6, "levels": 2},
+                "contrast": {"min": 0.9, "max": 1.1, "levels": 3}}
 
-    p1 = augment.plan(ops, settings, 6, seed=3, index=2)
-    assert p1 == augment.plan(ops, settings, 6, seed=3, index=2), "same seed, different set"
-    assert p1 != augment.plan(ops, settings, 6, seed=4, index=2), "seed did not change the set"
-    assert p1 != augment.plan(ops, settings, 6, seed=3, index=5), "every image got the same set"
-    assert p1[0] == {} and len(p1) == 6
-    assert len({tuple(sorted(v.items())) for v in p1}) == 6, "a variation was repeated"
-    for v in p1:
-        assert augment.apply(img, v).size == img.size
+    # Each augmentation offers its own options; the recipe is their product.
+    # Contrast asks for three levels between 0.9 and 1.1, but the middle one is
+    # 1.0 -- no change -- and the untouched image is already in the set.
+    assert augment.counts(ops, settings) == {"hflip": 2, "vflip": 2, "rotate": 4,
+                                             "brightness": 3, "contrast": 3}, augment.counts(ops, settings)
+    assert augment.count(ops, settings) == 2 * 2 * 4 * 3 * 3
+    assert augment.count(["hflip"]) == 2
+    assert augment.count(["rotate"], {"rotate": {"mode": "fixed", "angle": 45}}) == 2
+    assert augment.count([]) == 1
 
-    # Only so many distinct versions exist without brightness or contrast.
-    assert augment.max_variants(["hflip"]) == 2
-    assert augment.max_variants(["hflip", "rotate"]) == 8
-    assert len(augment.plan(["hflip"], None, 8, 0, 0)) == 2
-    assert augment.max_variants(["brightness"]) == augment.MAX_VARIANTS
+    combos = augment.combinations(ops, settings)
+    assert len(combos) == augment.count(ops, settings)
+    assert combos[0] == {}, "the untouched image should come first"
+    assert len({tuple(sorted(c.items())) for c in combos}) == len(combos), "a version was repeated"
+    assert combos == augment.combinations(ops, settings), "the same recipe gave a different set"
+    for c in combos:
+        assert augment.apply(img, c).size == img.size
 
     flat = Image.new("RGB", (8, 8), (200, 200, 200))
-    for v in augment.plan(["brightness"], settings, 20, 1, 0)[1:]:
-        px = augment.apply(flat, v).getpixel((0, 0))[0]
+    for c in augment.combinations(["brightness"], settings)[1:]:
+        px = augment.apply(flat, c).getpixel((0, 0))[0]
         assert 200 * 0.5 - 1 <= px <= 200 * 0.6 + 1, px
-    assert augment.plan([], None, 8, 0, 0) == [{}]
+    assert augment.combinations([], None) == [{}]
     assert augment.apply(img, {}).tobytes() == img.tobytes()
-    print("augment: a fixed set per image, distinct, same for the same seed")
+    print("augment: each option multiplies the set, and the set never changes")
 
 
 def check_snapshot_and_dataset():
@@ -213,31 +217,29 @@ def check_snapshot_and_dataset():
     for i in range(5):
         make_image(src / f"t{i}.png", size=(90, 60), color=(i * 50, 100, 30))
     api("post", "/datasets", json={"name": "trainme",
-                                   "recipe": {"width": 48, "height": 32, "augmentations": ["vflip", "rotate"],
-                                              "augment_variants": 3, "augment_seed": 11}})
+                                   "recipe": {"width": 48, "height": 32,
+                                              "augmentations": ["vflip", "rotate"]}})
     api("post", "/datasets/trainme/link", json={"path": str(src)})
     api("post", "/datasets/trainme/exclude", json={"path": str(src / "t4.png")})
     run = WORKSPACE / "runs" / "r1"
     snap = manifest.snapshot(WORKSPACE / "datasets" / "trainme", run)
     data = json.loads(snap.read_text(encoding="utf-8"))
     assert len(data["files"]) == 4 and data["recipe"]["width"] == 48
-    assert data["variants"] == 3 and data["total"] == 12, data
+    assert data["variants"] == 8 and data["total"] == 32, data  # 4 files x (2 flips x 4 turns)
 
-    x = ManifestDataset.from_snapshot(snap, 32, "resize", engine="xurdif", seed=0)
+    x = ManifestDataset.from_snapshot(snap, 32, "resize", engine="xurdif")
     t = x[0]
     assert t.shape == (3, 32, 32) and -0.5 <= float(t.min()) and float(t.max()) <= 0.5
-    dfs = ManifestDataset.from_snapshot(snap, 32, "crop", engine="diffusers", seed=0)
+    dfs = ManifestDataset.from_snapshot(snap, 32, "crop", engine="diffusers")
     t = dfs[1]
     assert t.shape == (3, 32, 32) and -1.0 <= float(t.min()) and float(t.max()) <= 1.0
     assert x.framed(0).size == (48, 32) and 0 in x._cache
 
-    # Four images, three versions of each, and both engines build the same set.
-    assert len(x) == 12 and x.plan == dfs.plan and x.seed == 11
-    again = ManifestDataset.from_snapshot(snap, 32, "resize", engine="xurdif")
-    assert again.plan == x.plan, "the same snapshot gave a different dataset"
+    # Four images, eight versions of each, and both engines build the same set.
+    assert len(x) == 32 and x.variants == 8 and x.combinations == dfs.combinations
     assert x.sample(0).tobytes() == x.framed(0).tobytes(), "the first version is the framed image"
     batch = torch.stack([x[i] for i in range(len(x))])
-    assert batch.shape == (12, 3, 32, 32)
+    assert batch.shape == (32, 3, 32, 32)
 
     empty = WORKSPACE / "datasets" / "empty"
     manifest.new(empty)

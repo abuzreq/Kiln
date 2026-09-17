@@ -38,13 +38,10 @@ DEFAULT_RECIPE = {
     "padding_mode": "edge",
     # H flip on by default: both trainers always flipped at random before
     # recipes existed, so a new dataset trains the way an old one did.
+    # Each augmentation's options are combined, so H flip alone makes two
+    # versions of every image -- what both trainers did before recipes existed.
     "augmentations": ["hflip"],
     "augment_settings": {},
-    # Variations of each image, drawn once when training starts (the first is
-    # the image itself). Two with H flip is what both trainers did before
-    # recipes existed.
-    "augment_variants": 2,
-    "augment_seed": 0,
     "video_fps": 2.0,
 }
 
@@ -108,16 +105,15 @@ def clean_recipe(recipe: dict | None) -> dict:
     r["augmentations"] = [a for a in (r.get("augmentations") or []) if a in augment.AUGMENTATIONS]
     if not isinstance(r.get("augment_settings"), dict):
         r["augment_settings"] = {}
-    try:
-        r["augment_variants"] = max(1, min(augment.MAX_VARIANTS, int(r["augment_variants"])))
-        r["augment_seed"] = abs(int(r["augment_seed"])) % (2 ** 31)
-    except (TypeError, ValueError) as e:
-        raise ValidationError(f"invalid augmentation count or seed: {e}") from e
-    # Asking for more variations than the chosen augmentations can make would
-    # make the count the Data screen shows a lie, so it is clamped here.
-    r["augment_variants"] = min(
-        r["augment_variants"], augment.max_variants(r["augmentations"], r["augment_settings"]))
+    r["augment_settings"] = augment.clean_settings(r["augment_settings"])
     return {k: r[k] for k in DEFAULT_RECIPE}
+
+
+def versions(recipe: dict) -> int:
+    """How many versions of each image this recipe trains on."""
+    from app.backend.data import augment
+
+    return augment.count(recipe["augmentations"], recipe["augment_settings"])
 
 
 # --- resolving ------------------------------------------------------------
@@ -464,9 +460,9 @@ def snapshot(ds_dir: str | Path, out_dir: str | Path) -> Path | None:
         "dataset_dir": str(ds_dir),
         "recipe": record["recipe"],
         "files": res["files"],
-        # What the run will actually see: every image in its variations.
-        "variants": record["recipe"]["augment_variants"],
-        "total": len(res["files"]) * record["recipe"]["augment_variants"],
+        # What the run will actually see: every image in every version.
+        "variants": versions(record["recipe"]),
+        "total": len(res["files"]) * versions(record["recipe"]),
         "created_at": time.time(),
     }, indent=2), encoding="utf-8")
     return out
