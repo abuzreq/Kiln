@@ -1,53 +1,179 @@
 # Kiln
 
-A desktop application for small-data training, sampling, and model manipulation with compact diffusion models. Inspired by [Autolume](https://metacreation-lab.github.io/autolume/), Kiln organizes workflows into **Prepare** (data preparation, training, model management) and **Create** (sampling, layer manipulation, merging, parameter sweeps).
+Kiln is a desktop app for training and playing with small diffusion models on your own images.
+Train a compact model on a few hundred pictures, then sample, paint, bend, merge and sweep what
+it learned. Everything runs locally: your datasets, models and images stay on your machine.
 
-Kiln supports two backends:
+Inspired by [Autolume](https://metacreation-lab.github.io/autolume/), Kiln is organised into two
+spaces:
 
-1. **xurdif:** The compact diffusion engine by [Hannu Töyrylä](https://github.com/htoyryla/xurdif).
-2. **Diffusers:** Hugging Face's `UNet2DModel` / `TinyUNet2DModel` ecosystem for unconditional pixel-space models (DDPM), including LoRA support.
+* **Prepare** — datasets, training runs, and your model library.
+* **Create** — a layered canvas, model bending, merging, and parameter sweeps.
 
-Typical workflow: **Data → Train → Models → Create**.
+The usual path is **Data → Train → Models → Create**, though a downloaded model lets you start in
+Create on day one.
 
 ---
 
-## Features
+## The app
 
-* **Prepare ▸ Data:** Datasets that read your image folders where they are (nothing is copied), with framing (crop, pad, stretch, non-square) and augmentations that combine into a fixed set of versions of every image, built when training starts, plus a live preview of that set. Remove images from a dataset without touching the files.
-* **Prepare ▸ Train:** Train from scratch or fine-tune existing models. Includes loss curves, live sample generation, and snapshot saves.
-* **Prepare ▸ Models:** Model library, checkpoint pinning, Hugging Face model imports, and format conversion. Models in Kiln's workspace can be deleted; models Kiln only found elsewhere can be hidden, leaving the file alone.
-* **Create ▸ Canvas:** DDIM sampling with step-by-step previews, CLIP text/image guidance, img2img, inpainting (soft/hard brushes), and upscaling.
-* **Create ▸ Bend:** Interactive UNet layer activation targeting, hook-based ops, scheduled hooks, and seed-matched A/B comparison.
-* **Create ▸ Merge:** Two-way model weight merging with live comparison against parent models.
-* **Create ▸ Sweep:** 1D and 2D parameter sweep grids with exportable contact sheets.
+### Start
+
+The hub you land on. Two buttons lead into **Prepare** and **Create**, and a bar shows any job
+running in either. Below them, every model in your library appears as a card that cross-fades
+through sample images Kiln generated for it in the background; clicking one opens it in Create at
+that image's seed. Saved captures sit along the bottom, and clicking one restores the settings and
+model that made it.
+
+### Prepare ▸ Data
+
+A dataset is Kiln's record of images you already have, not a copy of them.
+
+* **Add a folder or file** by path and it is read where it lives, subfolders included. New files
+  dropped into that folder join the dataset on their own. **Upload…** is the one exception: files
+  sent from the browser are copied in, since they have nowhere else to live.
+* **Videos** are turned into frames on request, at a rate you choose.
+* **Remove** an image and it leaves the dataset but stays on disk; "Show removed" and **Restore
+  all** undo it. Removing a source folder never touches the folder.
+* **Framing and augmentation** decide what training sees: a size, how images are fitted to it
+  (center crop, stretch, or pad), and which augmentations to use — H flip, V flip, Rotate,
+  Brightness, Contrast. Each augmentation offers its own options, and they combine, so the recipe
+  says exactly how big the training set is: *H flip ×2 · Rotate ×4 = 8 versions of each image.
+  Training will see 2,560 images per pass (320 × 8).* Nothing is random, and no augmented copies
+  are written to disk.
+* The **Preview** panel shows that whole set for the first image, updating as you edit.
+* **Train on this dataset** carries it straight to a new run.
+
+### Prepare ▸ Train
+
+**Train new model** sets up a run: a dataset, a name, and whether to start from scratch or from a
+model in your library. Presets suit the run to your GPU, and Kiln estimates peak VRAM before you
+start. Everything else — image size, batch, learning rate, architecture, attention layout,
+snapshot frequency — sits under Advanced.
+
+While a run goes, you get live samples, a loss curve, the exact command in use, and the log.
+Training can be stopped and later continued from its latest checkpoint. Snapshots are training
+checkpoints, not library models, until you **Save** one into the library under a name.
+
+**View previous runs** lists what you have already trained, with its samples, loss and snapshots.
+
+### Prepare ▸ Models
+
+Your library, plus three ways to add to it:
+
+* **Get a model** — download a checkpoint from a URL.
+* **Re-home a model** — convert a xurdif `.pt` into the Diffusers format, leaving the original
+  alone.
+* **From Hugging Face** — check a repo for compatibility and import it. Unconditional
+  pixel-space models only; latent text-to-image models such as Stable Diffusion are not supported.
+
+Model cards show a sample, the architecture, attention layout and training step, and offer **Use
+in Create**, **Train**, rename and pin. Models inside Kiln's workspace can be deleted; models Kiln
+merely found elsewhere are hidden instead, leaving the file where it is. A checkbox lists hidden
+models again.
+
+### Create ▸ Canvas
+
+Sampling on a layered canvas. Pick a model, set steps and seed, and generate — the image builds
+step by step in front of you, and can be paused or stopped and kept as it is.
+
+* **Change** controls how far a generation moves away from what is already on the canvas, which is
+  how img2img and repainting work.
+* **Masks** are painted, drawn as shapes, grown from a wand, split from the image itself, or
+  generated as patterns; a masked generation fills only that region, with feathering and a
+  harmonize pass to settle the seam.
+* **CLIP guidance** steers sampling towards a prompt or a reference image.
+* **Finish** applies contrast, gamma and sharpening, and upscales.
+* Layers, saved assets, and a Results history sit alongside; any result can become a layer or be
+  saved.
+* Downloaded PNGs carry their settings inside them, so opening one later can restore the run.
+
+Shortcuts: `Ctrl+Z` / `Ctrl+Shift+Z` undo and redo, `Ctrl+D` clears the mask, `Ctrl+Shift+I`
+inverts it, and space-drag pans the canvas.
+
+### Create ▸ Bend
+
+Bending rewrites the network's activations while an image forms. It changes the output, not the
+model file. Pick layers on a map of the U-Net, stack operations with their own amount and a
+window of the run to apply over, and compare the bent result against the plain one on the same
+seed. Setups can be saved as presets, exported and imported, and a single bend parameter can be
+swept into an animation.
+
+### Create ▸ Merge
+
+Blend two compatible models, with per-block weights for encoder, middle and decoder. Kiln samples
+both parents and the merge on the same seed so you can see what the blend did, and the result can
+be saved as a new library model.
+
+### Create ▸ Sweep
+
+Lay a parameter out across a grid — one axis or two — sample every cell, and download the contact
+sheet.
+
+### Discoveries
+
+Along the bottom of Create sits a background explorer. Given a model, it tries random bends and
+keeps the samples that look new to it, judged by CLIP or DINOv2 similarity. It yields to your own
+generations, so it fills the strip while you work. Any discovery can be loaded into Bend, saved as
+a bend preset, or opened in a map that lets you walk between similar results.
+
+---
+
+## Engines
+
+Kiln runs two backends, and the screens work the same way for both.
+
+| | xurdif | Diffusers |
+| --- | --- | --- |
+| **Model format** | `.pt` checkpoints | `UNet2DModel`, `TinyUNet2DModel` |
+| **Sampling, painting, bending** | Yes | Yes |
+| **Merging** | Yes (matching layer sizes) | Yes (matching configs) |
+| **Training from scratch** | Yes (needs CUDA) | Yes |
+| **Fine-tuning** | Continue a run | Full fine-tune |
+| **LoRA** | No | Yes (via PEFT) |
+| **Loss** | Edge-weighted L1 (optional) + SSIM | MSE or edge-weighted L1 |
+| **Noise schedule** | Fixed cosine | `scheduler_config.json` |
+
+**xurdif** is the compact diffusion engine by [Hannu Töyrylä](https://github.com/htoyryla/xurdif),
+vendored in `vendor/xurdif/`. **Diffusers** is Hugging Face's ecosystem for unconditional
+pixel-space models.
+
+`TinyUNet2DModel` is a reimplementation of xurdif's architecture inside Diffusers. At 512×512 it
+samples about 4× faster and trains about 7× faster than a standard `UNet2DModel`, at half the
+VRAM. **Prepare ▸ Models ▸ Re-home a model** converts a `.pt` into it without precision loss.
 
 ---
 
 ## Requirements
 
 * **Python 3.10+**
-* **Git** (required on system `PATH` to fetch dependencies like OpenAI CLIP)
-* **NVIDIA GPU with CUDA** for sampling and training (xurdif requires CUDA; Diffusers can run on CPU, but training will be slow).
-* **Node.js 18+** (only needed to build frontend changes; prebuilt UI assets are included in `app/frontend/build`).
-* **Disk Space:** ~6 GB (including CUDA PyTorch wheels and dependencies).
+* **Git** on your `PATH` (some dependencies, such as OpenAI CLIP, are fetched from source)
+* **An NVIDIA GPU with CUDA.** xurdif requires it; Diffusers will run on CPU, but training will
+  be slow.
+* **~6 GB of disk** for the CUDA PyTorch wheels and the rest of the dependencies.
+* **Node.js 18+** only if you want to change the interface. The built UI ships in
+  `app/frontend/build`.
 
----
+## Install and run
 
-## Installation & Quick Start
+The launchers build the virtual environment on first run and start the app:
 
-Launchers handle virtual environment setup automatically:
+* **Windows:** `kiln.bat`
+* **macOS:** `kiln.command`
+* **Linux:** `./kiln.sh`
 
-* **Windows:** Run `kiln.bat`
-* **macOS:** Run `kiln.command`
-* **Linux:** Run `./kiln.sh`
+To reach Kiln from another machine on the same network, use `start_lan.bat`, `start_lan.command`
+or `./start_lan.sh` instead; each prints the address to open. Kiln has no login, so anyone who can
+reach that address can browse your datasets, models and files — only do this on a network you
+trust.
 
-To reach Kiln from another machine on the same network, use the matching LAN launcher instead — `start_lan.bat`, `start_lan.command`, or `./start_lan.sh`. Each one prints the address to open elsewhere. Kiln has no login, so only do this on a network you trust; see `--lan` under [CLI Options](#cli-options--configuration).
+Kiln keeps everything it makes in one workspace folder, `~/kiln` by default. The **Workspace**
+button in the top bar shows what is in it and can move it somewhere else.
 
-#### Linux notes
+### Linux notes
 
-The launcher builds its own virtual environment, but three things have to come
-from the distribution first. Kiln tells you which one is missing when it hits
-them; installing them up front saves the round trip.
+Three things have to come from your distribution first. Kiln says which one is missing when it
+hits it, but installing them up front saves the round trip:
 
 ```bash
 # Debian / Ubuntu
@@ -56,37 +182,30 @@ sudo apt install libgl1 libglib2.0-0            # OpenCV links these
 sudo apt install python3-gi gir1.2-webkit2-4.1  # optional: the desktop window
 ```
 
-Without the WebKit packages everything still works — Kiln prints its URL and you
-open it in a browser, which is also what `./kiln.sh --no-window` does. If the
-launcher lost its executable bit (downloading a zip rather than cloning does
-this), `chmod +x kiln.sh` restores it.
+Without the WebKit packages everything still works — Kiln prints its URL and you open it in a
+browser, which is what `./kiln.sh --no-window` does anyway. If the launcher lost its executable
+bit (downloading a zip rather than cloning does that), `chmod +x kiln.sh` restores it.
 
-### Manual Setup
-
-If you prefer setting up environments manually:
+### Setting up by hand
 
 ```bash
-# 1. Run the setup script with system Python
-python install.py
+python install.py                 # system Python; builds .venv and installs everything
 
-# 2. Launch the backend using the virtual environment
-# Windows
-.venv\Scripts\python.exe start.py
-
-# macOS / Linux
-.venv/bin/python start.py
-
+.venv\Scripts\python.exe start.py   # Windows
+.venv/bin/python start.py           # macOS / Linux
 ```
 
-### PyTorch CUDA Manual Install
+### If it says CPU but you have a GPU
 
-The installer reads your NVIDIA driver version and downloads the newest PyTorch build that driver can run. If the app reports it is on CPU, repair it with:
+The installer reads your NVIDIA driver version and picks the newest PyTorch build that driver can
+run. Installing a build *newer* than the driver is the usual cause of a GPU that PyTorch cannot
+see. To repair it:
 
 ```bash
 python install.py --fix-torch
 ```
 
-PyTorch ships one build per CUDA generation, and each needs a driver at least this new. Installing a build that is *newer* than the driver is the usual cause of "GPU present, PyTorch on CPU" — no driver update is needed, just the matching build.
+To pick one by hand, find your driver with `nvidia-smi` and use the matching index:
 
 | Driver | Build | Index |
 | --- | --- | --- |
@@ -96,110 +215,85 @@ PyTorch ships one build per CUDA generation, and each needs a driver at least th
 | 525.60+ | CUDA 12.6 | `cu126` |
 | 450.80+ | CUDA 11.8 | `cu118` |
 
-To install one by hand, pick the row for your driver (`nvidia-smi` prints it):
-
 ```bash
 # Windows
 .venv\Scripts\python.exe -m pip install --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu126
 
 # Linux / macOS
 .venv/bin/python -m pip install --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu126
-
 ```
 
-### CLI Options & Configuration
+### Command line options
 
-* `--no-window`: Run in headless mode (prints local URL to terminal).
-* `--port <int>`: Set backend port (defaults to `8777` or `$KILN_PORT`).
-* `--lan`: Serve to the local network as well, so you can open Kiln from a phone or another computer. Kiln has no login — anyone who can reach the address can browse your datasets, models and files, so use it only on a network you trust. The launcher prints the address to open.
-* `--host <addr>`: Bind a specific address instead (defaults to `127.0.0.1`, this machine only, or `$KILN_HOST`). `--lan` is shorthand for `0.0.0.0`.
-* `KILN_WORKSPACE`: Set root storage path for datasets, models, and outputs (defaults to `~/kiln`).
+* `--no-window` — run headless and print the URL.
+* `--port <int>` — backend port (default `8777`, or `$KILN_PORT`).
+* `--lan` — serve to the local network as well; shorthand for `--host 0.0.0.0`.
+* `--host <addr>` — bind a specific address (default `127.0.0.1`, this machine only, or
+  `$KILN_HOST`).
+* `KILN_WORKSPACE` — workspace folder (default `~/kiln`).
 
----
+## Getting models
 
-## Acquiring Models
+The repository ships no weights. Three ways to get some:
 
-Repositories do not include checkpoint weights. Models can be sourced via:
-
-1. **Pretrained xurdif Checkpoints:** Download `.pt` files from the [author's Dropbox repository](https://www.dropbox.com/scl/fo/flh4pczukrrlb3ar1rfuc/AAT22M2b21Tf1yKe3Ji0HS0?rlkey=f1zdhexy36p3hffcun686m77c&dl=0) and load them in **Prepare ▸ Models ▸ Get a model**.
-2. **Hugging Face Hub:** Import unconditional DDPM models under **Prepare ▸ Models ▸ From Hugging Face**. *(Note: Latent text-to-image models like Stable Diffusion are not supported.)*
-3. **Local Training:** Point a dataset at an image folder under **Prepare ▸ Data** and run training via **Prepare ▸ Train**.
+1. **Pretrained xurdif checkpoints** from the [author's Dropbox folder](https://www.dropbox.com/scl/fo/flh4pczukrrlb3ar1rfuc/AAT22M2b21Tf1yKe3Ji0HS0?rlkey=f1zdhexy36p3hffcun686m77c&dl=0),
+   loaded under **Prepare ▸ Models ▸ Get a model**.
+2. **Hugging Face**, under **Prepare ▸ Models ▸ From Hugging Face**.
+3. **Train your own**, which is what the rest of Prepare is for.
 
 ---
 
 ## Development
 
-Run the API backend and the Vite development server concurrently:
-
 ```bash
-# Terminal 1: Backend API
+# backend
 .venv/bin/python start.py --no-window
 
-# Terminal 2: Frontend (Vite dev server at localhost:5199, proxies API to :8777)
+# frontend: Vite on :5199, proxying the API to :8777
 cd app/frontend
 npm install
 npm run dev
-
 ```
 
-### Smoke Tests
+`npm run build` writes the bundle in `app/frontend/build`, which is what the launchers serve.
 
-Test scripts live in `scripts/`:
+### Smoke tests
+
+`scripts/` holds runnable checks rather than a unit-test suite. Each one builds a throwaway
+workspace and prints what it verified:
 
 ```bash
-python scripts/smoke_engine.py
-python scripts/smoke_craft.py
-python scripts/smoke_merge.py
-python scripts/smoke_diffusers.py
-python scripts/smoke_train.py             # xurdif tests require CUDA
-python scripts/smoke_tinyunet_parity.py   # Verifies TinyUNet Diffusers/xurdif parity
-python scripts/smoke_golden.py --check    # Checkpoint hashing regression test
-python scripts/smoke_cuda_pick.py         # Driver -> PyTorch build choice (no GPU needed)
-python scripts/smoke_datasets.py          # Linked datasets, safe delete, augmentation sets
-python scripts/smoke_library.py           # Preview failures, Delete vs Hide for models
-
+python scripts/smoke_engine.py            # the engine layer, on CPU
+python scripts/smoke_craft.py             # layer introspection, bend ops, hooks
+python scripts/smoke_merge.py             # two-way merge through the API
+python scripts/smoke_diffusers.py         # the Diffusers backend, on CPU
+python scripts/smoke_train.py             # training on both engines (xurdif needs CUDA)
+python scripts/smoke_datasets.py          # linked datasets, safe delete, augmentation sets
+python scripts/smoke_library.py           # preview failures, delete vs hide for models
+python scripts/smoke_tinyunet_parity.py   # TinyUNet matches xurdif layer for layer
+python scripts/smoke_golden.py --check    # sampling regression, by checkpoint hash
+python scripts/smoke_cuda_pick.py         # driver to PyTorch build choice (no GPU needed)
 ```
 
----
-
-## Project Structure
+### Layout
 
 ```
 app/
-├── backend/       # Flask REST API and file helpers
-├── core/          # Training pipelines, sampling, hooks, and model logic
-│   └── backends/  # Engine implementations (xurdif / hfdiffusers)
+├── backend/       # Flask API: routes and the data layer
+├── core/          # sampling, training, bending, the model library
+│   └── backends/  # xurdif and hfdiffusers engine implementations
 └── frontend/      # React client (Vite)
-vendor/xurdif/     # Vendored xurdif engine
-models/            # Local scratch checkpoints
-
+utils/             # shared helpers
+scripts/           # smoke tests
+vendor/xurdif/     # vendored xurdif engine
+models/            # checkpoints that ship or are downloaded locally
 ```
-
----
-
-## Backend Engine Comparison
-
-| Capability | xurdif | Diffusers |
-| --- | --- | --- |
-| **Model Format** | `.pt` checkpoints | `UNet2DModel`, `TinyUNet2DModel` |
-| **Sampling / Painting / Bending** | Yes | Yes |
-| **Weight Merging** | Yes (matching layer dimensions) | Yes (matching network configs) |
-| **Training From Scratch** | Yes (CUDA required) | Yes |
-| **Fine-tuning** | Resume run | Full fine-tune |
-| **LoRA Support** | No | Yes (via PEFT) |
-| **Loss Function** | Edge-weighted L1 (optional) + SSIM | MSE or edge-weighted L1 |
-| **Noise Schedule** | Fixed cosine | Set via `scheduler_config.json` |
-
-### `TinyUNet2DModel` Port
-
-`TinyUNet2DModel` is a direct reimplementation of xurdif's architecture inside the Diffusers ecosystem. At 512×512 resolution, it evaluates ~4× faster during sampling and ~7× faster during training than a standard `UNet2DModel` while cutting VRAM usage in half.
-
-To convert a legacy `.pt` model to Diffusers format without precision loss, use **Prepare ▸ Models ▸ Re-home a model**.
 
 ---
 
 ## License
 
-MIT. See [LICENSE](https://www.google.com/search?q=LICENSE).
+MIT — see [LICENSE](LICENSE).
 
-Kiln vendors the `xurdif` library by Hannu Töyrylä (MIT License). Upstream tracking and modifications are documented in [vendor/xurdif/UPSTREAM.md](https://www.google.com/search?q=vendor/xurdif/UPSTREAM.md).
+Kiln vendors the `xurdif` library by Hannu Töyrylä (MIT). What was changed and why is recorded in
+[vendor/xurdif/UPSTREAM.md](vendor/xurdif/UPSTREAM.md).
