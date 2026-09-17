@@ -1,8 +1,8 @@
 import React, { useMemo, useState } from "react";
 import { thumbUrl } from "../api.js";
 import { useApp } from "../state.jsx";
-import { modelSubtitle } from "../components/modelMeta.jsx";
-import { DeleteBtn, Empty, Loading, Modal } from "../components/ui.jsx";
+import { modelSubtitle, RemoveModelBtn } from "../components/modelMeta.jsx";
+import { Empty, Loading, Modal } from "../components/ui.jsx";
 import { ThumbGalleryToolbar } from "../components/ThumbGalleryToolbar.jsx";
 
 export function pickDefaultModel(models, current) {
@@ -117,7 +117,7 @@ export function ModelRows({ models, loading, onPick, onRename, onTrain, onDelete
               {m.renamable && (
                 <button type="button" className="btn ghost sm" onClick={() => onRename?.(m)}>Rename</button>
               )}
-              <DeleteBtn onClick={() => onDelete?.(m)} label={`Delete ${m.name}`} />
+              <RemoveModelBtn m={m} onRemove={onDelete} />
             </div>
           </div>
         </div>
@@ -180,7 +180,7 @@ export function ModelCards({
                     <button type="button" className="btn ghost sm" onClick={() => onRename?.(m)}>Rename</button>
                   )}
                   {onStar && <StarBtn m={m} onStar={() => onStar(m.path)} />}
-                  <DeleteBtn onClick={() => onDelete?.(m)} label={`Delete ${m.name}`} />
+                  <RemoveModelBtn m={m} onRemove={onDelete} />
                 </div>
               </div>
             </div>

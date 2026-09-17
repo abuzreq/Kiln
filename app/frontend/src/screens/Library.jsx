@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api, mediaUrl, thumbUrl } from "../api.js";
 import { useApp } from "../state.jsx";
 import { ConfirmModal, DeleteBtn, Empty, Loading } from "../components/ui.jsx";
-import { RenameModal } from "../components/modelMeta.jsx";
+import { RemoveModelModal, RenameModal } from "../components/modelMeta.jsx";
 import { ModelRows } from "./ModelList.jsx";
 import { cardLabel, mergeStoredSampleParams, paramsFromCard, paramLabel } from "../sampleSettings.jsx";
 
@@ -19,18 +19,6 @@ function Models({ onPick }) {
     [allModels],
   );
   const load = () => refreshModels({ force: true });
-
-  const confirmDel = async () => {
-    const m = pendingDel;
-    setPendingDel(null);
-    if (!m) return;
-    try {
-      await api.del("/library/model", { path: m.path });
-      toast(`Deleted ${m.name}`, "success");
-      if (modelPath === m.path) setModelPath("");
-      load();
-    } catch (err) { toast(err.message, "error"); }
-  };
 
   const trainFrom = (m) => {
     openPrepare({ tab: "train", trainFrom: m.path });
@@ -52,14 +40,7 @@ function Models({ onPick }) {
         <RenameModal model={renameModel} onClose={() => setRenameModel(null)} onRenamed={() => load()} />
       )}
       {pendingDel && (
-        <ConfirmModal
-          title="Delete model"
-          body={`Delete “${pendingDel.name}”? This removes the .pt file from the library.`}
-          confirmLabel="Delete"
-          danger
-          onCancel={() => setPendingDel(null)}
-          onConfirm={confirmDel}
-        />
+        <RemoveModelModal model={pendingDel} onClose={() => setPendingDel(null)} onDone={load} />
       )}
     </>
   );

@@ -4,6 +4,7 @@ Stores bend presets, merge recipes, and sampling presets as JSON files under the
 workspace ``library/`` tree so they can be reapplied across models and projects.
 """
 import json
+import os
 import time
 from pathlib import Path
 
@@ -149,6 +150,42 @@ def remove_stars_under(root: str | Path) -> list[str]:
     return _write_stars(kept)
 
 
+# --- hidden models ---------------------------------------------------
+# Models Kiln finds but does not own (the install's models/ folders, anything
+# linked in) cannot be deleted from Kiln. Hiding records the path here and the
+# model list leaves it out; the file itself is never touched.
+
+def _hidden_file() -> Path:
+    return workspace.root / "library" / "hidden.json"
+
+
+def list_hidden() -> list[str]:
+    f = _hidden_file()
+    if not f.exists():
+        return []
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return []
+    paths = data.get("paths") if isinstance(data, dict) else data
+    if not isinstance(paths, list):
+        return []
+    return [_norm_star_path(p) for p in paths if isinstance(p, str) and p]
+
+
+def set_hidden(path: str, hidden: bool) -> list[str]:
+    if not path:
+        raise ValidationError("path required")
+    path = _norm_star_path(path)
+    paths = [p for p in list_hidden() if p != path]
+    if hidden:
+        paths.append(path)
+    f = _hidden_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps({"paths": paths, "updated_at": time.time()}, indent=2), encoding="utf-8")
+    return paths
+
+
 # --- model cards (display name vs training identity) -------------------
 
 def inside_workspace(path: str | Path) -> bool:
@@ -157,6 +194,30 @@ def inside_workspace(path: str | Path) -> bool:
         return True
     except (ValueError, OSError):
         return False
+
+
+def owned_by_kiln(path: str | Path) -> bool:
+    """Is this a file Kiln itself put in the workspace, and so Kiln's to delete?
+
+    Inside the workspace *as written* is not enough: a link (symlink, or a
+    junction on Windows) anywhere below the workspace root makes the real file
+    live somewhere else -- the user's own copy -- and deleting through it would
+    destroy that. So the path must be inside the workspace and resolving it must
+    not leave the workspace's own real location. The install's ``models/`` and
+    ``vendor/`` folders are outside the workspace and never owned.
+    """
+    try:
+        root = Path(os.path.abspath(workspace.root))
+        p = Path(os.path.abspath(path))
+        rel = p.relative_to(root)
+    except (ValueError, OSError):
+        return False
+    try:
+        real = os.path.normcase(os.path.realpath(p))
+        expected = os.path.normcase(os.path.join(os.path.realpath(root), rel))
+    except OSError:
+        return False
+    return real == expected
 
 
 def is_run_checkpoint(path: str | Path) -> bool:
@@ -253,8 +314,10 @@ def sibling_thumb(src: str | Path) -> Path | None:
 def delete_model_files(path: str | Path):
     """Remove a workspace ``.pt`` plus its thumbnail and card sidecars."""
     p = Path(path)
-    if not inside_workspace(p):
-        raise ValidationError("refusing to delete a file outside the workspace")
+    if not owned_by_kiln(p):
+        raise ValidationError(
+            "this model is not in Kiln's workspace (or is linked in from elsewhere), "
+            "so Kiln will not delete it; hide it instead")
     if not p.exists():
         raise NotFoundError("model not found")
     thumb = sibling_thumb(p)

@@ -105,14 +105,25 @@ class ModelManager:
                 out.append(meta)
         return out
 
-    def scan_public(self) -> list[dict]:
-        """Scan plus role (main vs training checkpoint) and starred flags."""
+    def scan_public(self, include_hidden: bool = False) -> list[dict]:
+        """Scan plus role (main vs training checkpoint), starred and ownership flags.
+
+        ``owned`` says whether Kiln may delete the file (see
+        ``library.owned_by_kiln``); the UI offers Hide for everything else.
+        Hidden models are left out unless ``include_hidden``.
+        """
         from app.core import library
 
         stars = {library._norm_star_path(p) for p in library.list_stars()}
+        hidden = set(library.list_hidden())
         out = []
         for m in self.scan():
+            is_hidden = library._norm_star_path(m.path) in hidden
+            if is_hidden and not include_hidden:
+                continue
             d = m.to_dict()
+            d["hidden"] = is_hidden
+            d["owned"] = Path(m.path).is_file() and library.owned_by_kiln(m.path)
             is_ckpt = (m.source or "").startswith("run:")
             d["role"] = "checkpoint" if is_ckpt else "main"
             d["group"] = (m.source or "")[4:] if is_ckpt else None

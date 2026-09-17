@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { api } from "../api.js";
 import { useApp } from "../state.jsx";
-import { Text, Modal } from "./ui.jsx";
+import { ConfirmModal, DeleteBtn, Text, Modal } from "./ui.jsx";
 
 export function modelSubtitle(m) {
   if (!m) return "";
@@ -16,6 +16,64 @@ export function modelSubtitle(m) {
   if (m.attn) bits.push(`attention ${m.attn}`);
   if (m.size_mb != null) bits.push(`${m.size_mb} MB`);
   return bits.join(" · ");
+}
+
+/** Delete for models Kiln owns, Hide for models it only found (see library.owned_by_kiln). */
+export function RemoveModelBtn({ m, onRemove }) {
+  if (m.owned) return <DeleteBtn onClick={() => onRemove?.(m)} label={`Delete ${m.name}`} />;
+  return (
+    <button
+      type="button"
+      className="btn ghost sm"
+      onClick={() => onRemove?.(m)}
+      title="This file is not in Kiln's workspace. Hiding takes it off Kiln's lists and leaves the file alone."
+    >
+      Hide
+    </button>
+  );
+}
+
+/** Confirms and performs Delete or Hide, whichever applies to the model. */
+export function RemoveModelModal({ model, onClose, onDone }) {
+  const { toast, modelPath, setModelPath } = useApp();
+  const run = async () => {
+    onClose();
+    try {
+      if (model.owned) {
+        await api.del("/library/model", { path: model.path });
+        toast(`Deleted ${model.name}`, "success");
+      } else {
+        await api.post("/library/model/hide", { path: model.path, hidden: true });
+        toast(`Hid ${model.name}. The file is still on disk.`, "success");
+      }
+      if (modelPath === model.path) setModelPath("");
+      onDone?.();
+    } catch (e) { toast(e.message, "error"); }
+  };
+  return model.owned ? (
+    <ConfirmModal
+      title="Delete model"
+      body={`Delete “${model.name}”? This removes the file from Kiln's workspace.`}
+      confirmLabel="Delete"
+      danger
+      onCancel={onClose}
+      onConfirm={run}
+    />
+  ) : (
+    <ConfirmModal
+      title="Hide model"
+      body={<>
+        <p className="hint">
+          “{model.name}” lives outside Kiln's workspace, so Kiln won't delete it. Hiding
+          takes it off Kiln's lists; the file stays where it is:
+        </p>
+        <p className="sub mb-0" style={{ wordBreak: "break-all" }}>{model.path}</p>
+      </>}
+      confirmLabel="Hide from Kiln"
+      onCancel={onClose}
+      onConfirm={run}
+    />
+  );
 }
 
 export function RenameModal({ model, onClose, onRenamed }) {

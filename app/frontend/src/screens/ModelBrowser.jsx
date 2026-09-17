@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { api, pollJob } from "../api.js";
 import { useApp } from "../state.jsx";
-import { Text, Select, Progress, Empty, ConfirmModal, Loading } from "../components/ui.jsx";
-import { RenameModal } from "../components/modelMeta.jsx";
+import { Text, Select, Progress, Empty, Loading } from "../components/ui.jsx";
+import { RemoveModelModal, RenameModal } from "../components/modelMeta.jsx";
 import { ModelCards, tagStars } from "./ModelList.jsx";
 
 function GetModels({ onDone }) {
@@ -242,13 +242,18 @@ export default function ModelBrowser() {
   const tagged = useMemo(() => tagStars(models || [], stars), [models, stars]);
   const library = useMemo(() => tagged.filter((m) => m.role !== "checkpoint"), [tagged]);
 
-  const del = async () => {
-    const m = pendingDel;
-    setPendingDel(null);
-    if (!m) return;
+  // Hidden models are fetched only while the list is open; the shared model
+  // list everywhere else leaves them out.
+  const [showHidden, setShowHidden] = useState(false);
+  const [hidden, setHidden] = useState([]);
+  const loadHidden = () => api.get("/models?hidden=1")
+    .then((list) => setHidden((list || []).filter((m) => m.hidden)))
+    .catch(() => setHidden([]));
+  useEffect(() => { if (showHidden) loadHidden(); }, [showHidden, models]);
+  const unhide = async (m) => {
     try {
-      await api.del("/library/model", { path: m.path });
-      toast(`Deleted ${m.name}`, "success");
+      await api.post("/library/model/hide", { path: m.path, hidden: false });
+      toast(`${m.name} is back in Kiln's lists`, "success");
       load();
     } catch (e) { toast(e.message, "error"); }
   };
@@ -316,6 +321,20 @@ export default function ModelBrowser() {
           {library.length
             ? <ModelCards models={library} {...cardProps} />
             : <Empty>None yet. Save a snapshot from Train, merge two models in Create, or download one.</Empty>}
+          <label className="row gap-2 mt-2 sub">
+            <input type="checkbox" checked={showHidden} onChange={(e) => setShowHidden(e.target.checked)} />
+            Show hidden models
+          </label>
+          {showHidden && (hidden.length ? (
+            <div className="col gap-2 mt-2">
+              {hidden.map((m) => (
+                <div key={m.path} className="row gap-2">
+                  <span className="grow sub" title={m.path}>{m.name}</span>
+                  <button type="button" className="btn ghost sm" onClick={() => unhide(m)}>Unhide</button>
+                </div>
+              ))}
+            </div>
+          ) : <p className="sub mb-0">No hidden models.</p>)}
         </div>
       </div>
 
@@ -323,14 +342,7 @@ export default function ModelBrowser() {
         <RenameModal model={renameModel} onClose={() => setRenameModel(null)} onRenamed={() => load()} />
       )}
       {pendingDel && (
-        <ConfirmModal
-          title="Delete model"
-          body={`Delete ${pendingDel.name}? This removes the .pt from the library.`}
-          confirmLabel="Delete"
-          danger
-          onCancel={() => setPendingDel(null)}
-          onConfirm={del}
-        />
+        <RemoveModelModal model={pendingDel} onClose={() => setPendingDel(null)} onDone={load} />
       )}
     </div>
   );

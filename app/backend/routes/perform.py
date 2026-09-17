@@ -24,7 +24,7 @@ bp = Blueprint("perform", __name__, url_prefix="/api")
 
 @bp.get("/models")
 def list_models():
-    return ok(manager.scan_public())
+    return ok(manager.scan_public(include_hidden=request.args.get("hidden") == "1"))
 
 
 @bp.get("/samplers")
