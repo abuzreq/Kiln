@@ -30,3 +30,7 @@ vendor/xurdif/models/*.pt
 
 # Keep vendored engine source, ignore its sample outputs
 vendor/**/results/
+
+# Working notes and editor/agent config: kept locally, not part of the project
+.claude/
+/docs/
