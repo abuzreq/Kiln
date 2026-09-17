@@ -8,6 +8,7 @@ buffers we ignore).
 Moved from ``app/core/model_manager.py``; the caching/eviction layer stayed
 there because it is engine-independent.
 """
+import argparse
 import threading
 from collections import OrderedDict
 from dataclasses import replace
@@ -96,6 +97,14 @@ def ema_status(data: dict) -> str:
 _UNRECORDED = object()
 
 
+def _opt(data: dict):
+    """The saved training options as a namespace, whether stored as one or as a dict."""
+    opt = data.get("opt")
+    if isinstance(opt, dict):
+        return argparse.Namespace(**opt)
+    return opt
+
+
 def _recorded_spec(data: dict):
     """The attention layout exactly as a checkpoint stores it, or ``_UNRECORDED``.
 
@@ -104,17 +113,20 @@ def _recorded_spec(data: dict):
     given -- next to ``opt``, the whole argparse namespace, which also carries
     ``attn`` and, for the conf model, the parsed ``attn_config``. Files Kiln
     wrote on 2026-09-14, before it matched upstream, carry ``attn`` and
-    ``attn_config`` at the top level instead, and still read.
+    ``attn_config`` at the top level instead, and still read -- which is also
+    the layout upstream has offered to adopt. ``opt`` may be a plain dict
+    (``vars(opts)``), which, unlike a Namespace, loads with torch's default
+    weights-only unpickler.
     """
     if "attn_conf" in data:
         return data["attn_conf"]
-    opt = data.get("opt")
+    opt = _opt(data)
     if opt is not None and hasattr(opt, "attn"):
         return opt.attn if opt.attn is not None else getattr(opt, "attn_config", None)
-    if data.get("attn") is not None:
-        return data["attn"]
-    if isinstance(data.get("attn_config"), dict):
-        return data["attn_config"]
+    if "attn" in data or "attn_config" in data:
+        if data.get("attn") is not None:
+            return data["attn"]
+        return data.get("attn_config")
     return _UNRECORDED
 
 
@@ -154,15 +166,16 @@ def describe(path: str | Path) -> ModelDescriptor:
             return cached
 
     data = torch.load(str(path), map_location="cpu", weights_only=False)
+    opt = _opt(data)
     mults = data.get("mults")
-    if mults is None and isinstance(data.get("opt"), object):
-        mults = getattr(data.get("opt"), "mults", None)
+    if mults is None and opt is not None:
+        mults = getattr(opt, "mults", None)
     mtype = data.get("mtype")
-    if mtype is None and data.get("opt") is not None:
-        mtype = getattr(data["opt"], "model", None)
+    if mtype is None and opt is not None:
+        mtype = getattr(opt, "model", None)
     pred = data.get("pred")
-    if pred is None and data.get("opt") is not None:
-        pred = getattr(data["opt"], "pred", None)
+    if pred is None and opt is not None:
+        pred = getattr(opt, "pred", None)
     resolved_mults = list(mults) if mults is not None else list(DEFAULT_MULTS)
     mtype = mtype or DEFAULT_MTYPE
     meta = ModelDescriptor(

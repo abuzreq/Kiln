@@ -156,6 +156,25 @@ def check_roundtrip(tmp: Path):
     assert loader.describe(p3).attn == "-1:linear,mid:full"
     loader.load_net(str(p3))
 
+    # the layout upstream offered to move to: attn + attn_config at the top level,
+    # opt as a plain dict -- which torch's default weights-only load accepts
+    p3b = tmp / "top-level-dict-opt.pt"
+    d = _ckpt(net, mults, None, fmt=None)
+    d["attn"] = "-1:linear,mid:full"
+    d["attn_config"] = attn.parse("-1:linear,mid:full")
+    d["opt"] = {"model": CONF_MTYPE, "mults": mults, "pred": "x0", "attn": "-1:linear,mid:full"}
+    torch.save(d, p3b)
+    torch.load(str(p3b), map_location="cpu", weights_only=True)
+    assert loader.describe(p3b).attn == "-1:linear,mid:full"
+    loader.load_net(str(p3b))
+    d = _ckpt(net, mults, None, fmt=None)
+    d["opt"] = {"model": CONF_MTYPE, "mults": mults, "pred": "x0", "attn": "-1:linear,mid:full"}
+    del d["mtype"], d["mults"]
+    p3c = tmp / "dict-opt-only.pt"
+    torch.save(d, p3c)
+    m = loader.describe(p3c)
+    assert m.mtype == CONF_MTYPE and m.mults == mults and m.attn == "-1:linear,mid:full"
+
     # trained without --attn: recorded as None, which is the bottleneck-only default
     p4 = tmp / "no-attn-flag.pt"
     torch.save(_ckpt(default_net, mults, None), p4)
@@ -197,7 +216,8 @@ def check_roundtrip(tmp: Path):
     trainer_src = (ROOT / "vendor" / "xurdif" / "xurdiftrainer.py").read_text(encoding="utf-8")
     assert "torch.load(opt.load, weights_only=False)" in trainer_src, \
         "the vendored trainer resumes with torch's default load, which refuses 'opt'"
-    print("checkpoint round trip: ok (upstream, opt-only, 14-Sept Kiln, no --attn, unrecorded)")
+    print("checkpoint round trip: ok (upstream, opt-only, 14-Sept Kiln, top-level + dict opt, "
+          "no --attn, unrecorded)")
 
 
 if __name__ == "__main__":
