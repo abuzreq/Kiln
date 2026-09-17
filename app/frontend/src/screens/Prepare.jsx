@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { api, pollJob, mediaUrl } from "../api.js";
+import { api, pollJob } from "../api.js";
 import { useApp } from "../state.jsx";
 import {
   Slider, Text, Num, Select, Progress, Empty, ConfirmModal, DeleteBtn, Seg,
@@ -20,260 +20,214 @@ const AUGS = [
   { id: "contrast", label: "Contrast" },
 ];
 const MODE_TABS = [
-  { id: "create", label: "Create new", tip: "Import media, pre-process, and create a dataset" },
-  { id: "view", label: "View existing", tip: "Inspect a finished dataset" },
+  { id: "open", label: "Open", tip: "Edit or inspect a dataset" },
+  { id: "create", label: "New dataset", tip: "Start a dataset from folders on this computer" },
 ];
 const DEFAULT_AUG_SETTINGS = {
-  rotate: { mode: "random", angle: 90, all_angles: false, angles: [90, 180, 270] },
+  rotate: { mode: "random", angle: 90, angles: [90, 180, 270] },
   brightness: { min: 0.8, max: 1.2 },
   contrast: { min: 0.8, max: 1.2 },
 };
 
-/** Images written per source file (1 base + augmentation extras). */
-function imagesPerSource(augs, augSettings) {
-  let n = 1;
-  if (augs.includes("hflip")) n += 1;
-  if (augs.includes("vflip")) n += 1;
-  if (augs.includes("rotate")) {
-    const rot = { ...DEFAULT_AUG_SETTINGS.rotate, ...augSettings.rotate };
-    if (rot.mode === "fixed") n += 1;
-    else if (rot.all_angles) n += (rot.angles || [90, 180, 270]).length;
-    else n += 1;
-  }
-  if (augs.includes("brightness")) {
-    const b = { ...DEFAULT_AUG_SETTINGS.brightness, ...augSettings.brightness };
-    n += b.min === b.max ? 1 : 2;
-  }
-  if (augs.includes("contrast")) {
-    const c = { ...DEFAULT_AUG_SETTINGS.contrast, ...augSettings.contrast };
-    n += c.min === c.max ? 1 : 2;
-  }
-  return n;
+/** The recipe as the controls edit it, with every setting filled in. */
+function editable(recipe) {
+  const r = recipe || {};
+  const s = r.augment_settings || {};
+  return {
+    width: r.width ?? 512,
+    height: r.height ?? 512,
+    resize_mode: r.resize_mode || "center_crop",
+    padding_mode: r.padding_mode || "edge",
+    augmentations: r.augmentations || [],
+    augment_settings: {
+      rotate: { ...DEFAULT_AUG_SETTINGS.rotate, ...s.rotate },
+      brightness: { ...DEFAULT_AUG_SETTINGS.brightness, ...s.brightness },
+      contrast: { ...DEFAULT_AUG_SETTINGS.contrast, ...s.contrast },
+    },
+    video_fps: r.video_fps ?? 2,
+  };
 }
+
+const plural = (n, word) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
 
 export default function Prepare() {
   const { toast, openPrepare, setTrainDataset, setTabBusy } = useApp();
-  const [info, setInfo] = useState(null);
-  const [draftCount, setDraftCount] = useState(0);
-  const [dsMode, setDsMode] = useState("create");
-  const [viewDs, setViewDs] = useState(null);
-  const [importPath, setImportPath] = useState("");
-  const [mode, setMode] = useState("center_crop");
-  const [padding, setPadding] = useState("edge");
-  const [w, setW] = useState(512);
-  const [h, setH] = useState(512);
-  const [nonSquare, setNonSquare] = useState(false);
-  const [augs, setAugs] = useState([]);
-  const [augSettings, setAugSettings] = useState({ ...DEFAULT_AUG_SETTINGS });
-  const [dsName, setDsName] = useState("dataset");
-  const [videoFps, setVideoFps] = useState(2);
+  const [datasets, setDatasets] = useState(null);
+  const [dsMode, setDsMode] = useState("open");
+  const [selected, setSelected] = useState(null);
+  const [ds, setDs] = useState(null);           // summary of the selected dataset
+  const [recipe, setRecipe] = useState(editable(null));
+  const [newName, setNewName] = useState("");
+  const [nameAvailable, setNameAvailable] = useState(true);
+  const [linkPath, setLinkPath] = useState("");
   const [previews, setPreviews] = useState([]);
   const [previewBusy, setPreviewBusy] = useState(false);
-  const [building, setBuilding] = useState(null);
-  const [pendingDs, setPendingDs] = useState(null);
+  const [job, setJob] = useState(null);
+  const [pendingDelete, setPendingDelete] = useState(false);
   const [deleteFiles, setDeleteFiles] = useState(false);
   const [thumbLevel, setThumbLevel] = useState("md");
   const [sort, setSort] = useState("name");
-  const [nameAvailable, setNameAvailable] = useState(true);
+  const [showExcluded, setShowExcluded] = useState(false);
   const fileRef = useRef();
 
   const creating = dsMode === "create";
-  const trimmedName = (dsName || "").trim();
-  const selectedMeta = useMemo(
-    () => (viewDs ? info?.datasets?.find((d) => d.name === viewDs) : null),
-    [viewDs, info],
-  );
-  const localNameTaken = useMemo(
-    () => trimmedName && info?.datasets?.some((d) => d.name === trimmedName),
-    [trimmedName, info],
-  );
+  const isRecord = ds?.kind === "record";
+  const trimmedName = newName.trim();
+  const dirty = isRecord && JSON.stringify(editable(ds.recipe)) !== JSON.stringify(recipe);
 
-  const reloadDraftCount = () => {
-    if (!trimmedName) { setDraftCount(0); return; }
-    api.get(`/datasets/draft/files?name=${encodeURIComponent(trimmedName)}&offset=0&limit=1`)
-      .then((r) => setDraftCount(r.count || 0))
-      .catch(() => setDraftCount(0));
+  const loadList = () => api.get("/datasets")
+    .then((list) => { setDatasets(list || []); return list || []; })
+    .catch((e) => { toast(e.message, "error"); setDatasets([]); return []; });
+
+  const loadDs = (name) => {
+    if (!name) { setDs(null); return Promise.resolve(null); }
+    return api.get(`/datasets/${encodeURIComponent(name)}`)
+      .then((d) => { setDs(d); return d; })
+      .catch((e) => { toast(e.message, "error"); setDs(null); return null; });
   };
 
-  const reload = () => {
-    api.get("/studio").then(setInfo).catch((e) => toast(e.message, "error"));
-    reloadDraftCount();
-  };
-
-  useEffect(() => { reload(); }, []);
-  useEffect(() => { setTabBusy("data", !!building); }, [building, setTabBusy]);
-  useEffect(() => { reloadDraftCount(); }, [trimmedName, sort]);
+  // One place to take a fresh summary from any editing call.
+  const applySummary = (d) => { setDs(d); loadList(); };
 
   useEffect(() => {
-    if (dsMode !== "view" || !info?.datasets?.length) return;
-    if (!viewDs || !info.datasets.some((d) => d.name === viewDs)) {
-      setViewDs(info.datasets[0].name);
-    }
-  }, [dsMode, viewDs, info]);
+    loadList().then((list) => {
+      if (!list.length) setDsMode("create");
+      else setSelected((cur) => cur || list[0].name);
+    });
+  }, []);
+  useEffect(() => { setTabBusy("data", !!job); }, [job, setTabBusy]);
+  useEffect(() => {
+    setShowExcluded(false);
+    loadDs(selected).then((d) => setRecipe(editable(d?.recipe)));
+  }, [selected]);
 
   useEffect(() => {
-    if (!creating || !trimmedName) {
-      setNameAvailable(true);
-      return undefined;
-    }
+    if (!creating || !trimmedName) { setNameAvailable(true); return undefined; }
     const t = setTimeout(async () => {
       try {
         const r = await api.get(`/datasets/available?name=${encodeURIComponent(trimmedName)}`);
         setNameAvailable(!!r.available);
-      } catch {
-        setNameAvailable(false);
-      }
+      } catch { setNameAvailable(false); }
     }, 300);
     return () => clearTimeout(t);
   }, [creating, trimmedName]);
 
-  const previewParams = useMemo(() => ({
-    name: trimmedName,
-    width: w,
-    height: nonSquare ? h : w,
-    resize_mode: mode,
-    padding_mode: padding,
-    augmentations: augs,
-    augment_settings: augSettings,
-  }), [trimmedName, w, h, nonSquare, mode, padding, augs, augSettings]);
-
-  const perSourceImages = useMemo(() => imagesPerSource(augs, augSettings), [augs, augSettings]);
-  const totalOutputImages = draftCount * perSourceImages;
-
+  // Live preview of the recipe being edited, on the dataset's first image.
   useEffect(() => {
-    if (!creating || !trimmedName || draftCount === 0) {
-      setPreviews([]);
-      return undefined;
-    }
+    if (creating || !isRecord || !ds.count) { setPreviews([]); return undefined; }
     let cancelled = false;
     const t = setTimeout(async () => {
       setPreviewBusy(true);
       try {
-        const r = await api.post("/datasets/preview", previewParams);
+        const r = await api.post("/datasets/preview", { dataset: ds.name, recipe });
         if (!cancelled) setPreviews(r.previews || []);
       } catch (e) {
-        if (!cancelled) {
-          setPreviews([]);
-          toast(e.message, "error");
-        }
+        if (!cancelled) { setPreviews([]); toast(e.message, "error"); }
       } finally {
         if (!cancelled) setPreviewBusy(false);
       }
     }, 200);
     return () => { cancelled = true; clearTimeout(t); };
-  }, [creating, trimmedName, draftCount, previewParams, toast]);
+  }, [creating, isRecord, ds?.name, ds?.count, recipe]);
 
-  useEffect(() => {
-    if (creating) return undefined;
-    if (!viewDs) return undefined;
-    setPreviews([]);
-    api.get(`/datasets/${encodeURIComponent(viewDs)}/samples`)
-      .then((r) => {
-        if (r.images?.[0]) {
-          setPreviews([{ label: "Sample", image: mediaUrl(r.images[0]) }]);
-        }
-      })
-      .catch(() => {});
-    return undefined;
-  }, [creating, viewDs]);
-
-  const setAug = (key, val) => setAugSettings((s) => ({
-    ...s,
-    [key]: { ...(DEFAULT_AUG_SETTINGS[key] || {}), ...(s[key] || {}), ...val },
+  const setR = (patch) => setRecipe((r) => ({ ...r, ...patch }));
+  const setAug = (key, val) => setRecipe((r) => ({
+    ...r,
+    augment_settings: { ...r.augment_settings, [key]: { ...r.augment_settings[key], ...val } },
+  }));
+  const toggleAug = (id) => setRecipe((r) => ({
+    ...r,
+    augmentations: r.augmentations.includes(id)
+      ? r.augmentations.filter((x) => x !== id)
+      : [...r.augmentations, id],
   }));
 
-  const switchMode = (next) => {
-    setDsMode(next);
-    if (next === "create") {
-      setViewDs(null);
-      setPreviews([]);
-    }
-  };
-
-  const doImport = async () => {
-    if (!importPath || !trimmedName) return;
+  const call = async (fn, success) => {
     try {
-      const r = await api.post("/datasets/draft/import", { name: trimmedName, path: importPath, mode: "copy" });
-      toast(`Imported ${r.imported} files`, "success");
-      reload();
-    } catch (e) { toast(e.message, "error"); }
-  };
-
-  const doUpload = async (e) => {
-    const files = e.target.files;
-    if (!files?.length || !trimmedName) return;
-    const fd = new FormData();
-    fd.append("name", trimmedName);
-    for (const f of files) fd.append("files", f);
-    try {
-      const r = await api.upload("/datasets/draft/upload", fd);
-      toast(`Uploaded ${r.imported} files`, "success");
-      reload();
-    } catch (err) { toast(err.message, "error"); }
-  };
-
-  const removeDraftFile = async (path) => {
-    if (!trimmedName) return;
-    try {
-      await api.del("/datasets/draft/file", { name: trimmedName, path });
-      toast("Removed from dataset", "success");
-      reload();
-    } catch (e) { toast(e.message, "error"); }
+      const d = await fn();
+      applySummary(d);
+      if (success) toast(typeof success === "function" ? success(d) : success, "success");
+      return d;
+    } catch (e) { toast(e.message, "error"); return null; }
   };
 
   const doCreate = async () => {
-    if (!nameAvailable || localNameTaken) {
-      toast(`Dataset name “${trimmedName}” is already taken`, "error");
-      return;
-    }
     try {
-      const { job } = await api.post("/datasets/build", {
-        name: trimmedName,
-        width: w,
-        height: nonSquare ? h : w,
-        resize_mode: mode,
-        padding_mode: padding,
-        augmentations: augs,
-        augment_settings: augSettings,
-        video_fps: videoFps,
-      });
-      setBuilding(job);
-      const done = await pollJob(job.id, setBuilding);
-      if (done.status === "done") {
-        toast(`${done.message} — ready to train`, "success");
-        reload();
-        setDsMode("view");
-        setViewDs(trimmedName);
-      } else {
-        toast(done.message, "error");
-      }
-      setBuilding(null);
-    } catch (e) { toast(e.message, "error"); setBuilding(null); }
-  };
-
-  const confirmDelete = async () => {
-    const d = pendingDs;
-    const wipe = deleteFiles;
-    setPendingDs(null);
-    if (!d) return;
-    try {
-      await api.del(`/datasets/${encodeURIComponent(d.name)}`, { delete_files: wipe });
-      toast(wipe ? `Deleted “${d.name}”` : `Removed “${d.name}” (archived)`, "success");
-      if (viewDs === d.name) setViewDs(null);
-      reload();
+      const d = await api.post("/datasets", { name: trimmedName });
+      await loadList();
+      setNewName("");
+      setDsMode("open");
+      setSelected(d.name);
+      toast(`Created “${d.name}”. Add a folder of images to it.`, "success");
     } catch (e) { toast(e.message, "error"); }
   };
 
-  const draftListPath = `/datasets/draft/files?name=${encodeURIComponent(trimmedName)}`;
-  const gallerySourceKey = creating
-    ? `draft:${trimmedName}:${draftCount}:${thumbLevel}:${sort}`
-    : `ds:${viewDs}:${thumbLevel}:${sort}`;
-  const galleryPath = creating
-    ? draftListPath
-    : `/datasets/${encodeURIComponent(viewDs)}/files`;
-  const galleryCount = creating ? draftCount : (selectedMeta?.count || 0);
-  const canCreate = creating && !building && draftCount > 0 && nameAvailable && !localNameTaken && trimmedName;
-  const hasDatasets = (info?.datasets?.length || 0) > 0;
+  const doLink = () => call(async () => {
+    const d = await api.post(`/datasets/${encodeURIComponent(ds.name)}/link`, { path: linkPath });
+    setLinkPath("");
+    return d;
+  }, (d) => `Added. ${plural(d.count, "image")} in “${d.name}”.`);
+
+  const doUpload = (e) => {
+    const files = e.target.files;
+    if (!files?.length) return;
+    const fd = new FormData();
+    for (const f of files) fd.append("files", f);
+    e.target.value = "";
+    call(() => api.upload(`/datasets/${encodeURIComponent(ds.name)}/upload`, fd), "Uploaded");
+  };
+
+  const unlinkSource = (path) => call(
+    () => api.del(`/datasets/${encodeURIComponent(ds.name)}/source`, { path }),
+    "No longer used. The folder itself is untouched.",
+  );
+
+  const excludeFile = (path) => call(
+    () => api.post(`/datasets/${encodeURIComponent(ds.name)}/exclude`, { path }),
+    "Removed from the dataset",
+  );
+  const restoreFile = (path) => call(
+    () => api.post(`/datasets/${encodeURIComponent(ds.name)}/exclude`, { path, restore: true }),
+    "Restored",
+  );
+  const restoreAll = () => call(
+    () => api.post(`/datasets/${encodeURIComponent(ds.name)}/exclude`, { all: true, restore: true }),
+    "Every removed image is back",
+  );
+
+  const saveRecipe = () => call(
+    () => api.post(`/datasets/${encodeURIComponent(ds.name)}/recipe`, { recipe }),
+    "Saved",
+  );
+
+  const extractFrames = async () => {
+    try {
+      const { job: j } = await api.post(`/datasets/${encodeURIComponent(ds.name)}/frames`, {});
+      setJob(j);
+      const done = await pollJob(j.id, setJob);
+      toast(done.message, done.status === "done" ? "success" : "error");
+      applySummary(await loadDs(ds.name));
+    } catch (e) { toast(e.message, "error"); }
+    setJob(null);
+  };
+
+  const confirmDelete = async () => {
+    const name = ds.name;
+    setPendingDelete(false);
+    try {
+      const r = await api.del(`/datasets/${encodeURIComponent(name)}`, { delete_files: deleteFiles });
+      toast(r.archived ? `Removed “${name}” (archived)` : `Removed “${name}”`, "success");
+      const list = await loadList();
+      setSelected(list[0]?.name || null);
+      if (!list.length) setDsMode("create");
+    } catch (e) { toast(e.message, "error"); }
+  };
+
+  const hasDatasets = (datasets?.length || 0) > 0;
+  const galleryPath = ds
+    ? `/datasets/${encodeURIComponent(ds.name)}/${showExcluded ? "excluded" : "files"}`
+    : "";
+  const galleryCount = showExcluded ? (ds?.excluded_count || 0) : (ds?.count || 0);
 
   return (
     <div className="col">
@@ -282,231 +236,259 @@ export default function Prepare() {
           <h3 className="mb-0">Dataset</h3>
           <Seg
             ariaLabel="Dataset mode"
-            tabs={MODE_TABS.map((t) => (t.id === "view" && !hasDatasets ? { ...t, tip: "Create a dataset first" } : t))}
+            tabs={MODE_TABS.map((t) => (t.id === "open" && !hasDatasets ? { ...t, tip: "Create a dataset first" } : t))}
             value={dsMode}
             onChange={(m) => {
-              if (m === "view" && !hasDatasets) {
-                toast("Create a dataset first", "error");
-                return;
-              }
-              switchMode(m);
+              if (m === "open" && !hasDatasets) { toast("Create a dataset first", "error"); return; }
+              setDsMode(m);
             }}
           />
         </div>
         {creating ? (
-          <p className="hint mb-0">Import or upload files into this dataset draft, then create it when ready.</p>
-        ) : (
           <>
-            <p className="hint mb-2">Viewing a finished dataset.</p>
-            {hasDatasets ? (
-              <Select
-                label="Dataset"
-                value={viewDs || ""}
-                onChange={setViewDs}
-                options={info.datasets.map((d) => ({
-                  value: d.name,
-                  label: `${d.name} (${d.count} images)`,
-                }))}
-              />
-            ) : (
-              <Empty>No datasets yet.</Empty>
-            )}
+            <p className="hint">
+              A dataset is Kiln's list of your images: folders and files that stay where they
+              are on disk, plus how to frame and augment them for training.
+            </p>
+            <div className="row gap-2 wrap" style={{ alignItems: "flex-end" }}>
+              <div className="grow"><Text label="Name" value={newName} onChange={setNewName} /></div>
+              <button type="button" className="btn primary mb-2" onClick={doCreate}
+                disabled={!trimmedName || !nameAvailable}>Create</button>
+            </div>
+            {trimmedName && !nameAvailable && <p className="hint bad mb-0">That name is already taken.</p>}
           </>
+        ) : hasDatasets ? (
+          <Select
+            label="Dataset"
+            value={selected || ""}
+            onChange={setSelected}
+            options={datasets.map((d) => ({ value: d.name, label: `${d.name} (${plural(d.count, "image")})` }))}
+          />
+        ) : (
+          <Empty>No datasets yet.</Empty>
         )}
       </div>
 
-      <div className="work-split">
-        <div className="col">
-          {creating && (
-            <>
-              <div className="card">
-                <h3>Import</h3>
-                <Text label="Name" value={dsName} onChange={setDsName} tip="Dataset name — used as-is when created." />
-                <p className={`hint ${(!nameAvailable || localNameTaken) ? "warn-text" : ""}`}>
-                  {trimmedName && (!nameAvailable || localNameTaken) && "Name already taken"}
-                  {trimmedName && nameAvailable && !localNameTaken && "Name available"}
-                </p>
-                <Text label="Folder or file path" value={importPath} onChange={setImportPath} placeholder="Path to a folder of images, or a video file"
-                  tip="Copied into this dataset draft only." />
-                <div className="row gap-2">
-                  <button type="button" className="btn" onClick={doImport} disabled={!importPath || !trimmedName}>Import</button>
-                  <button type="button" className="btn ghost" onClick={() => fileRef.current.click()} disabled={!trimmedName}>Upload…</button>
-                  <input ref={fileRef} type="file" multiple hidden onChange={doUpload} accept="image/*,video/*" />
-                </div>
-              </div>
-
-              <div className="card">
-                <h3>Pre-processing</h3>
-                <Select label="Resize" value={mode} onChange={setMode} options={RESIZE_MODES} />
-                <div className="row gap-2">
-                  <div className="grow"><Num label="Width" value={w} onChange={setW} min={32} max={2048} step={32} /></div>
-                  <div className="grow"><Num label="Height" value={nonSquare ? h : w} onChange={setH} min={32} max={2048} step={32} /></div>
-                </div>
-                <label className="row center gap-2 mb-2">
-                  <input type="checkbox" checked={nonSquare} onChange={(e) => setNonSquare(e.target.checked)} />
-                  <span className="sub">Non-square</span>
-                </label>
-                {mode === "pad" && (
-                  <Select label="Padding" value={padding} onChange={setPadding} options={["edge", "reflect", "constant"]} />
-                )}
-                <div className="section-title mt-2">Augmentations</div>
-                <div className="row wrap gap-2 mb-2">
-                  {AUGS.map((a) => (
-                    <button
-                      key={a.id}
-                      type="button"
-                      className={`pill chip ${augs.includes(a.id) ? "on" : ""}`}
-                      onClick={() => setAugs((list) => list.includes(a.id) ? list.filter((x) => x !== a.id) : [...list, a.id])}
-                    >
-                      {a.label}
-                    </button>
-                  ))}
-                </div>
-                {augs.includes("rotate") && (
-                  <>
-                    <Select label="Rotate mode" value={augSettings.rotate.mode} onChange={(v) => setAug("rotate", { mode: v })}
-                      options={[{ value: "random", label: "Random angle" }, { value: "fixed", label: "Fixed angle" }]} />
-                    {augSettings.rotate.mode === "fixed" ? (
-                      <Num label="Angle (°)" value={augSettings.rotate.angle} onChange={(v) => setAug("rotate", { angle: v })} min={0} max={359} step={1} />
-                    ) : (
-                      <label className="row center gap-2 mb-2">
-                        <input type="checkbox" checked={augSettings.rotate.all_angles} onChange={(e) => setAug("rotate", { all_angles: e.target.checked })} />
-                        <span className="sub">Generate 90°, 180°, and 270° variants</span>
-                      </label>
-                    )}
-                  </>
-                )}
-                {augs.includes("brightness") && (
-                  <div className="row gap-2">
-                    <div className="grow"><Slider label="Brightness min" value={augSettings.brightness.min} min={0.4} max={1.5} step={0.05} onChange={(v) => setAug("brightness", { min: v })} /></div>
-                    <div className="grow"><Slider label="Brightness max" value={augSettings.brightness.max} min={0.4} max={1.5} step={0.05} onChange={(v) => setAug("brightness", { max: v })} /></div>
-                  </div>
-                )}
-                {augs.includes("contrast") && (
-                  <div className="row gap-2">
-                    <div className="grow"><Slider label="Contrast min" value={augSettings.contrast.min} min={0.4} max={1.5} step={0.05} onChange={(v) => setAug("contrast", { min: v })} /></div>
-                    <div className="grow"><Slider label="Contrast max" value={augSettings.contrast.max} min={0.4} max={1.5} step={0.05} onChange={(v) => setAug("contrast", { max: v })} /></div>
-                  </div>
-                )}
-                <Slider label="Video fps" value={videoFps} min={0.5} max={12} step={0.5} onChange={setVideoFps}
-                  tip="Frames extracted per second when importing video." />
-                {draftCount > 0 && (
-                  <p className="hint mb-0 mt-2">
-                    Creates <b>{totalOutputImages.toLocaleString()}</b> image{totalOutputImages === 1 ? "" : "s"} from{" "}
-                    <b>{draftCount}</b> source file{draftCount === 1 ? "" : "s"} ({perSourceImages} per source
-                    {augs.length ? ", incl. augmentations" : ""}).
-                    {videoFps > 0 && " Videos expand to more frames at create time."}
+      {!creating && ds && (
+        <div className="work-split">
+          <div className="col">
+            {isRecord ? (
+              <>
+                <div className="card">
+                  <h3>Images</h3>
+                  <p className="hint">
+                    Kiln reads your images where they are and never changes them. Only files you
+                    upload from the browser are copied into the dataset.
                   </p>
-                )}
-              </div>
-
-              {building && (
-                <div className="mb-2">
-                  <Progress value={building.progress} />
-                  <div className="sub mt-1">{building.message}</div>
+                  <Text label="Folder or file" value={linkPath} onChange={setLinkPath}
+                    placeholder="e.g. D:\photos\cats"
+                    tip="A folder (with its subfolders) or a single image or video. New files you later put in a linked folder join the dataset automatically." />
+                  <div className="row gap-2 mb-2">
+                    <button type="button" className="btn" onClick={doLink} disabled={!linkPath.trim()}>Add</button>
+                    <button type="button" className="btn ghost" onClick={() => fileRef.current.click()}>Upload…</button>
+                    <input ref={fileRef} type="file" multiple hidden onChange={doUpload} accept="image/*,video/*" />
+                  </div>
+                  {[...ds.sources, ...ds.added].length > 0 && (
+                    <div className="col gap-1 mb-2">
+                      {[...ds.sources, ...ds.added].map((p) => (
+                        <div key={p} className="row gap-2 center">
+                          <span className="grow sub" style={{ wordBreak: "break-all" }} title={p}>{p}</span>
+                          <button type="button" className="btn ghost sm" onClick={() => unlinkSource(p)}
+                            title="Stop using this in the dataset. Nothing on disk is deleted.">Remove</button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {ds.uploads > 0 && <p className="sub mb-1">{plural(ds.uploads, "uploaded file")} kept in the dataset.</p>}
+                  {ds.missing.length > 0 && (
+                    <p className="hint bad">
+                      Can't find {ds.missing.length === 1 ? "this" : "these"} any more: {ds.missing.join(", ")}
+                    </p>
+                  )}
+                  {ds.videos_pending > 0 && (
+                    <div className="callout">
+                      {plural(ds.videos_pending, "video")} need frames extracted before training.{" "}
+                      <button type="button" className="btn sm" onClick={extractFrames} disabled={!!job}>Extract frames</button>
+                    </div>
+                  )}
+                  {ds.excluded_count > 0 && (
+                    <div className="row gap-2 center wrap">
+                      <span className="sub grow">{plural(ds.excluded_count, "image")} removed from the dataset (still on disk).</span>
+                      <button type="button" className="btn ghost sm" onClick={() => setShowExcluded((v) => !v)}>
+                        {showExcluded ? "Show dataset" : "Show removed"}
+                      </button>
+                      <button type="button" className="btn ghost sm" onClick={restoreAll}>Restore all</button>
+                    </div>
+                  )}
+                  {job && (
+                    <div className="mt-2">
+                      <Progress value={job.progress} />
+                      <div className="sub mt-1">{job.message}</div>
+                    </div>
+                  )}
                 </div>
-              )}
-              <button type="button" className="btn primary w-full" onClick={doCreate} disabled={!canCreate}>
-                {building ? "Creating…" : "Create dataset"}
-              </button>
-            </>
-          )}
 
-          {!creating && selectedMeta && (
+                <div className="card">
+                  <h3>Framing and augmentation</h3>
+                  <Select label="Resize" value={recipe.resize_mode} onChange={(v) => setR({ resize_mode: v })} options={RESIZE_MODES} />
+                  <div className="row gap-2">
+                    <div className="grow"><Num label="Width" value={recipe.width} onChange={(v) => setR({ width: v })} min={32} max={2048} step={32} /></div>
+                    <div className="grow"><Num label="Height" value={recipe.height} onChange={(v) => setR({ height: v })} min={32} max={2048} step={32} /></div>
+                  </div>
+                  {recipe.resize_mode === "pad" && (
+                    <Select label="Padding" value={recipe.padding_mode} onChange={(v) => setR({ padding_mode: v })} options={["edge", "reflect", "constant"]} />
+                  )}
+                  <div className="section-title mt-2">Augmentations</div>
+                  <p className="hint">
+                    Applied fresh at every training step: each time an image is used, a random
+                    mix of the ones chosen here is drawn. Kiln doesn't save augmented copies,
+                    and your original files are never changed. The preview shows examples.
+                  </p>
+                  <div className="row wrap gap-2 mb-2">
+                    {AUGS.map((a) => (
+                      <button key={a.id} type="button"
+                        className={`pill chip ${recipe.augmentations.includes(a.id) ? "on" : ""}`}
+                        aria-pressed={recipe.augmentations.includes(a.id)}
+                        onClick={() => toggleAug(a.id)}>
+                        {a.label}
+                      </button>
+                    ))}
+                  </div>
+                  {recipe.augmentations.includes("rotate") && (
+                    <>
+                      <Select label="Rotate" value={recipe.augment_settings.rotate.mode} onChange={(v) => setAug("rotate", { mode: v })}
+                        options={[{ value: "random", label: "Random: 0°, 90°, 180° or 270°" }, { value: "fixed", label: "Fixed angle, half the time" }]} />
+                      {recipe.augment_settings.rotate.mode === "fixed" && (
+                        <Num label="Angle (°)" value={recipe.augment_settings.rotate.angle} onChange={(v) => setAug("rotate", { angle: v })} min={0} max={359} step={1} />
+                      )}
+                    </>
+                  )}
+                  {recipe.augmentations.includes("brightness") && (
+                    <div className="row gap-2">
+                      <div className="grow"><Slider label="Brightness min" value={recipe.augment_settings.brightness.min} min={0.4} max={1.5} step={0.05} onChange={(v) => setAug("brightness", { min: v })} /></div>
+                      <div className="grow"><Slider label="Brightness max" value={recipe.augment_settings.brightness.max} min={0.4} max={1.5} step={0.05} onChange={(v) => setAug("brightness", { max: v })} /></div>
+                    </div>
+                  )}
+                  {recipe.augmentations.includes("contrast") && (
+                    <div className="row gap-2">
+                      <div className="grow"><Slider label="Contrast min" value={recipe.augment_settings.contrast.min} min={0.4} max={1.5} step={0.05} onChange={(v) => setAug("contrast", { min: v })} /></div>
+                      <div className="grow"><Slider label="Contrast max" value={recipe.augment_settings.contrast.max} min={0.4} max={1.5} step={0.05} onChange={(v) => setAug("contrast", { max: v })} /></div>
+                    </div>
+                  )}
+                  <Slider label="Video fps" value={recipe.video_fps} min={0.5} max={12} step={0.5} onChange={(v) => setR({ video_fps: v })}
+                    tip="Frames taken per second from videos in the dataset. Changing it re-extracts them." />
+                  <div className="row gap-2 mt-2">
+                    <button type="button" className="btn primary grow" onClick={saveRecipe} disabled={!dirty}>
+                      {dirty ? "Save" : "Saved"}
+                    </button>
+                    {dirty && (
+                      <button type="button" className="btn ghost" onClick={() => setRecipe(editable(ds.recipe))}>Discard</button>
+                    )}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="card">
+                <h3>Details</h3>
+                <p className="hint">
+                  {ds.linked
+                    ? "This dataset is a folder linked into Kiln's workspace. It trains on the images as they are."
+                    : "Built by an earlier version of Kiln: a folder of finished images, augmentations included. It trains on them as they are."}
+                </p>
+                <div className="kv"><span>Images</span><b>{ds.count}</b></div>
+              </div>
+            )}
+
             <div className="card">
               <div className="row between center mb-2">
-                <h3 className="mb-0">Details</h3>
-                <DeleteBtn label={`Delete ${selectedMeta.name}`} onClick={() => { setDeleteFiles(false); setPendingDs(selectedMeta); }} />
+                <h3 className="mb-0">{plural(ds.count, "image")}</h3>
+                <DeleteBtn label={`Remove ${ds.name}`} onClick={() => { setDeleteFiles(false); setPendingDelete(true); }} />
               </div>
-              <div className="kv"><span>Size</span><b>{selectedMeta.width || "?"}×{selectedMeta.height || "?"}</b></div>
-              <div className="kv"><span>Resize</span><b>{selectedMeta.resize_mode || "—"}</b></div>
-              <div className="kv"><span>Augmentations</span><b>{(selectedMeta.augmentations || []).join(", ") || "none"}</b></div>
-              <div className="kv"><span>Images</span><b>{selectedMeta.count}</b></div>
+              {dirty && <p className="hint">Save the recipe first: training uses the saved one.</p>}
               <button
                 type="button"
-                className="btn primary w-full mt-2"
-                onClick={() => { setTrainDataset(selectedMeta.name); openPrepare({ tab: "train" }); }}
+                className="btn primary w-full"
+                disabled={!ds.count || dirty || ds.videos_pending > 0}
+                onClick={() => { setTrainDataset(ds.name); openPrepare({ tab: "train" }); }}
               >
                 Train on this dataset
               </button>
             </div>
-          )}
-        </div>
-
-        <div className="col">
-          <div className="card">
-            <div className="row between center mb-2">
-              <h3 className="mb-0">Preview</h3>
-              {previewBusy && <span className="sub">Updating…</span>}
-            </div>
-            <p className="hint mb-2">
-              {creating
-                ? "Live pre-processing preview from the first draft file, including augmentation variants."
-                : viewDs ? `Sample from “${viewDs}”.` : "Pick a dataset."}
-            </p>
-            {previews.length > 0 ? (
-              <div className="preview-var-grid">
-                {previews.map((p) => (
-                  <div key={p.label} className="preview-var-cell">
-                    <div className="preview-box preview-scroll">
-                      <img src={p.image} alt={p.label} />
-                    </div>
-                    <span className="sub">{p.label}</span>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="preview-box preview-scroll preview-h">
-                <span className="sub">{creating ? "Import files to see preview." : "Loading preview…"}</span>
-              </div>
-            )}
           </div>
 
-          <div className="card">
-            {(creating ? trimmedName : viewDs) ? (
-              <>
-                <ThumbGalleryToolbar
-                  title={creating ? "Files" : "Images"}
-                  count={galleryCount}
-                  sort={sort}
-                  onSortChange={setSort}
-                  thumbLevel={thumbLevel}
-                  onThumbLevelChange={setThumbLevel}
-                  sortOptions={GALLERY_SORT_OPTS}
-                />
+          <div className="col">
+            {isRecord && (
+              <div className="card">
+                <div className="row between center mb-2">
+                  <h3 className="mb-0">Preview</h3>
+                  {previewBusy && <span className="sub">Updating…</span>}
+                </div>
+                <p className="hint mb-2">The first image, framed, and what each augmentation can do to it.</p>
+                {previews.length > 0 ? (
+                  <div className="preview-var-grid">
+                    {previews.map((p) => (
+                      <div key={p.label} className="preview-var-cell">
+                        <div className="preview-box preview-scroll"><img src={p.image} alt={p.label} /></div>
+                        <span className="sub">{p.label}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="preview-box preview-scroll preview-h">
+                    <span className="sub">{ds.count ? "Loading preview…" : "Add images to see a preview."}</span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="card">
+              <ThumbGalleryToolbar
+                title={showExcluded ? "Removed" : "Images"}
+                count={galleryCount}
+                sort={sort}
+                onSortChange={setSort}
+                thumbLevel={thumbLevel}
+                onThumbLevelChange={setThumbLevel}
+                sortOptions={GALLERY_SORT_OPTS}
+              />
+              {galleryCount > 0 ? (
                 <LazySourceGallery
-                  sourceKey={gallerySourceKey}
+                  sourceKey={`${ds.name}:${showExcluded}:${galleryCount}:${thumbLevel}:${sort}`}
                   listPath={galleryPath}
                   totalCount={galleryCount}
                   thumbLevel={thumbLevel}
                   sort={sort}
-                  deletable={creating}
-                  onRemove={creating ? removeDraftFile : undefined}
+                  deletable={isRecord}
+                  onRemove={isRecord ? (showExcluded ? restoreFile : excludeFile) : undefined}
+                  removeLabel={showExcluded ? "Restore to dataset" : "Remove from dataset"}
                 />
-              </>
-            ) : (
-              <>
-                <h3 className="mb-0">Files</h3>
-                <Empty>Enter a dataset name and import files.</Empty>
-              </>
-            )}
+              ) : (
+                <Empty>{isRecord ? "Add a folder or upload images." : "No images."}</Empty>
+              )}
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
-      {pendingDs && (
+      {pendingDelete && ds && (
         <ConfirmModal
           title="Remove dataset"
-          body={`Remove dataset “${pendingDs.name}”?`}
-          confirmLabel={deleteFiles ? "Delete files" : "Remove"}
-          danger={deleteFiles}
-          extra={
+          body={
+            isRecord
+              ? `Remove “${ds.name}”? Kiln deletes its record of the dataset${ds.uploads ? ` and the ${plural(ds.uploads, "file")} uploaded into it` : ""}. Linked folders and files stay on disk untouched.`
+              : ds.linked
+                ? `Remove “${ds.name}”? Only the link in Kiln's workspace is removed; the folder it points to is untouched.`
+                : `Remove “${ds.name}”?`
+          }
+          confirmLabel={!isRecord && !ds.linked && deleteFiles ? "Delete files" : "Remove"}
+          danger={isRecord || ds.linked || deleteFiles}
+          extra={!isRecord && !ds.linked && (
             <label className="row center gap-2 mt-2">
               <input type="checkbox" checked={deleteFiles} onChange={(e) => setDeleteFiles(e.target.checked)} />
-              <span className="sub">Also permanently delete the files from disk</span>
+              <span className="sub">Also permanently delete the images (otherwise they are archived)</span>
             </label>
-          }
-          onCancel={() => setPendingDs(null)}
+          )}
+          onCancel={() => setPendingDelete(false)}
           onConfirm={confirmDelete}
         />
       )}

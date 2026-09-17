@@ -20,6 +20,7 @@ export default function LazySourceGallery({
   sort = "name",
   deletable = false,
   onRemove,
+  removeLabel = "Remove file",
 }) {
   const thumbMin = THUMB_LEVELS.find((t) => t.id === thumbLevel)?.min || 108;
   const wrapRef = useRef(null);
@@ -115,7 +116,7 @@ export default function LazySourceGallery({
         >
           {path ? <img src={thumbUrl(path)} alt="" loading="lazy" decoding="async" /> : null}
           {deletable && path && onRemove && (
-            <DeleteBtn label="Remove file" onClick={(e) => { e.stopPropagation(); onRemove(path); }} />
+            <DeleteBtn label={removeLabel} onClick={(e) => { e.stopPropagation(); onRemove(path); }} />
           )}
         </div>,
       );

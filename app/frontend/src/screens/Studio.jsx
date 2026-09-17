@@ -11,7 +11,7 @@ export default function Studio() {
   return (
     <div className="col">
       <p className="hint mb-0">
-        {tab === "data" && "Import media into a dataset draft, pre-process, and create."}
+        {tab === "data" && "Point a dataset at your image folders, choose framing and augmentation, and train on it. Nothing is copied."}
         {tab === "train" && "Start a run or inspect checkpoints and loss."}
         {tab === "models" && "Library models ready for Create."}
       </p>

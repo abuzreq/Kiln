@@ -79,7 +79,7 @@ def interpreter_has_cuda(py: str) -> bool | None:
 
 @dataclass
 class TrainConfig:
-    dataset: str                 # folder of training images
+    dataset: str                 # folder of training images (a record dataset's own folder)
     out_dir: str                 # where checkpoints + samples are written
     name: str = "model"
     image_size: int = 512
@@ -112,6 +112,10 @@ class TrainConfig:
     resume: str | None = None
     nostrict: bool = False
     continued_from: str | None = None
+    # A record-based dataset's snapshot (<run>/dataset.json: file list + recipe).
+    # When set the trainer reads images from it and augments as it loads them;
+    # None trains from the ``dataset`` folder exactly as before.
+    manifest: str | None = None
 
     def to_args(self) -> list[str]:
         args = [
@@ -137,6 +141,8 @@ class TrainConfig:
         ]
         if self.attn:
             args.append(f"--attn={self.attn}")
+        if self.manifest:
+            args += ["--manifest", str(self.manifest)]
         if self.amp:
             args.append("--amp")
         if not self.edge_loss:
@@ -172,7 +178,17 @@ def config_from_run(run_dir: str | Path, train_steps: int, checkpoint: str | Non
     if train_steps <= ckpt_step:
         raise ValidationError(f"train_steps must be greater than current step ({ckpt_step})")
     dataset = meta.get("dataset")
-    if not dataset or not Path(dataset).exists():
+    manifest = meta.get("dataset_snapshot") or None
+    if manifest:
+        # A record dataset resumes from the file list it trained on, so editing
+        # or deleting the dataset since does not change what the run continues on.
+        if not Path(manifest).exists():
+            raise ValidationError("this run's dataset snapshot is missing")
+        from app.core.engine.train_data import read_snapshot
+
+        if not any(Path(f).exists() for f in read_snapshot(manifest)["files"]):
+            raise ValidationError("none of the images this run trained on can be found any more")
+    elif not dataset or not Path(dataset).exists():
         raise ValidationError("original dataset for this run is missing")
     mults = meta.get("mults") or [1, 2, 2, 2]
     if isinstance(mults, str):
@@ -204,6 +220,7 @@ def config_from_run(run_dir: str | Path, train_steps: int, checkpoint: str | Non
         edge_loss=bool(meta.get("edge_loss", True)),
         resume=ckpt["path"],
         continued_from=ckpt["filename"],
+        manifest=manifest,
     )
 
 
@@ -294,6 +311,7 @@ def _write_run_meta(out_dir: Path, cfg: "TrainConfig", *, continued_from: str | 
         **existing,
         "name": cfg.name,
         "dataset": cfg.dataset,
+        "dataset_snapshot": cfg.manifest or "",
         "image_size": cfg.image_size,
         "batch_size": cfg.batch_size,
         "train_steps": cfg.train_steps,

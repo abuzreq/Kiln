@@ -14,7 +14,7 @@ export const MODE_TABS = [
 ];
 
 export const PREPARE_TABS = [
-  { id: "data", label: "Data", tip: "Import images and build datasets" },
+  { id: "data", label: "Data", tip: "Datasets from folders on this computer" },
   { id: "train", label: "Train", tip: "Start or revisit training runs" },
   { id: "models", label: "Models", tip: "Named library models" },
 ];

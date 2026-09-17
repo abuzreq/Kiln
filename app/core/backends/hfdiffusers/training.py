@@ -119,6 +119,8 @@ class DiffusersTrainConfig:
     lora_alpha: int = 16
     lora_dropout: float = 0.0
     lora_targets: list = field(default_factory=lambda: list(LORA_TARGETS))
+    # A record-based dataset's snapshot; see TrainConfig.manifest in engine/trainer.py.
+    manifest: str | None = None
 
     def to_meta(self) -> dict:
         d = dict(self.__dict__)
@@ -424,8 +426,15 @@ def _run(job: Job, cfg: DiffusersTrainConfig):
             prediction_type=sched_cfg.get("prediction_type", "epsilon"),
         )
 
-        ds = ImageFolder(cfg.dataset, cfg.image_size, cfg.fit)
-        emit(f"dataset: {len(ds)} images from {cfg.dataset}")
+        if cfg.manifest:
+            from app.core.engine.train_data import ManifestDataset
+
+            ds = ManifestDataset.from_snapshot(cfg.manifest, cfg.image_size, cfg.fit,
+                                               engine="diffusers", seed=cfg.seed)
+            emit(f"dataset: {len(ds)} images from {cfg.manifest}, augmented as they load")
+        else:
+            ds = ImageFolder(cfg.dataset, cfg.image_size, cfg.fit)
+            emit(f"dataset: {len(ds)} images from {cfg.dataset}")
         dl = DataLoader(ds, batch_size=cfg.batch_size, shuffle=True,
                         num_workers=0, drop_last=len(ds) >= cfg.batch_size)
         opt = torch.optim.AdamW(trainable, lr=cfg.lr)

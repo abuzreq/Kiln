@@ -13,9 +13,9 @@ Typical workflow: **Data → Train → Models → Create**.
 
 ## Features
 
-* **Prepare ▸ Data:** Image and video framing (crop, pad, stretch, non-square), data augmentations, and live dataset preview.
+* **Prepare ▸ Data:** Datasets that read your image folders where they are (nothing is copied), with framing (crop, pad, stretch, non-square) and augmentations applied at training time, plus a live preview. Remove images from a dataset without touching the files.
 * **Prepare ▸ Train:** Train from scratch or fine-tune existing models. Includes loss curves, live sample generation, and snapshot saves.
-* **Prepare ▸ Models:** Model library, checkpoint pinning, Hugging Face model imports, and format conversion.
+* **Prepare ▸ Models:** Model library, checkpoint pinning, Hugging Face model imports, and format conversion. Models in Kiln's workspace can be deleted; models Kiln only found elsewhere can be hidden, leaving the file alone.
 * **Create ▸ Canvas:** DDIM sampling with step-by-step previews, CLIP text/image guidance, img2img, inpainting (soft/hard brushes), and upscaling.
 * **Create ▸ Bend:** Interactive UNet layer activation targeting, hook-based ops, scheduled hooks, and seed-matched A/B comparison.
 * **Create ▸ Merge:** Two-way model weight merging with live comparison against parent models.
@@ -123,7 +123,7 @@ Repositories do not include checkpoint weights. Models can be sourced via:
 
 1. **Pretrained xurdif Checkpoints:** Download `.pt` files from the [author's Dropbox repository](https://www.dropbox.com/scl/fo/flh4pczukrrlb3ar1rfuc/AAT22M2b21Tf1yKe3Ji0HS0?rlkey=f1zdhexy36p3hffcun686m77c&dl=0) and load them in **Prepare ▸ Models ▸ Get a model**.
 2. **Hugging Face Hub:** Import unconditional DDPM models under **Prepare ▸ Models ▸ From Hugging Face**. *(Note: Latent text-to-image models like Stable Diffusion are not supported.)*
-3. **Local Training:** Prepare an image folder under **Prepare ▸ Data** and run training via **Prepare ▸ Train**.
+3. **Local Training:** Point a dataset at an image folder under **Prepare ▸ Data** and run training via **Prepare ▸ Train**.
 
 ---
 
@@ -155,6 +155,8 @@ python scripts/smoke_train.py             # xurdif tests require CUDA
 python scripts/smoke_tinyunet_parity.py   # Verifies TinyUNet Diffusers/xurdif parity
 python scripts/smoke_golden.py --check    # Checkpoint hashing regression test
 python scripts/smoke_cuda_pick.py         # Driver -> PyTorch build choice (no GPU needed)
+python scripts/smoke_datasets.py          # Linked datasets, safe delete, training-time augmentation
+python scripts/smoke_library.py           # Preview failures, Delete vs Hide for models
 
 ```
 

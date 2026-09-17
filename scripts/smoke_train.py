@@ -240,6 +240,73 @@ def check_diffusers_lora(base: str):
     print("  merged LoRA snapshot loads as a plain UNet2DModel")
 
 
+def check_record_dataset(diffusers_only: bool):
+    """A record dataset: non-square images in a folder outside the workspace,
+    framed and augmented while training, through the real /api/train route."""
+    from app.backend.app import create_app
+    from app.backend.data import manifest
+
+    external = Path(tempfile.mkdtemp(prefix="kiln_train_ext_"))
+    try:
+        torch.manual_seed(1)
+        for i in range(10):
+            small = torch.rand(3, 3, 5)
+            img = torch.nn.functional.interpolate(small[None], size=(60, 100), mode="bicubic",
+                                                  align_corners=False)[0]
+            Image.fromarray(img.clamp(0, 1).mul(255).byte().permute(1, 2, 0).numpy()).save(
+                external / f"wide{i:02d}.jpg")
+        ds_dir = WORKSPACE / "datasets" / "linked"
+        manifest.new(ds_dir, {"width": 64, "height": 64, "resize_mode": "pad",
+                              "augmentations": ["vflip", "rotate", "brightness"]})
+        manifest.add_path(ds_dir, str(external))
+        before = sorted(p.stat().st_mtime for p in external.iterdir())
+
+        c = create_app().test_client()
+        r = c.post("/api/train", json={
+            "dataset": "linked", "run_name": "drec", "backend": "diffusers", "mode": "scratch",
+            "preset": "small-64", "image_size": 64, "batch_size": 4, "train_steps": 20,
+            "save_every": 10, "model_name": "drec"})
+        assert r.status_code == 200, r.get_json()
+        from utils.process_control import registry
+        job = wait(registry.get(r.get_json()["data"]["job"]["id"]))
+        out_dir = WORKSPACE / "runs" / "drec"
+        check_run_shape(out_dir, job, "diffusers record", expect_dirs=True)
+        snap = json.loads((out_dir / "dataset.json").read_text(encoding="utf-8"))
+        assert len(snap["files"]) == 10 and snap["recipe"]["augmentations"] == ["vflip", "rotate", "brightness"]
+        log = " | ".join(job.detail.get("log") or [])
+        assert "augmented as they load" in log, log[-400:]
+
+        if not diffusers_only and torch.cuda.is_available():
+            backend = backends.get("xurdif")
+            xout = WORKSPACE / "runs" / "xrec"
+            cfg = backend.training_config({
+                "image_size": 64, "batch_size": 2, "train_steps": 100, "save_every": 50,
+                "accum": 1, "model_name": "xrec", "mults": [1, 2, 2, 2]}, ds_dir, xout)
+            cfg.manifest = str(manifest.snapshot(ds_dir, xout))
+            job = wait(backend.start_training(cfg), timeout=900)
+            if job.status != "done":
+                print("  log tail:", (job.detail.get("log") or [])[-8:])
+            check_run_shape(xout, job, "xurdif record", expect_dirs=False)
+            meta = json.loads((xout / "run.json").read_text(encoding="utf-8"))
+            assert meta["dataset_snapshot"] == cfg.manifest
+
+            # the dataset record goes away; the run still resumes from its snapshot
+            shutil.rmtree(ds_dir)
+            from app.core.engine.trainer import config_from_run
+            rcfg = config_from_run(xout, 200)
+            assert rcfg.manifest == cfg.manifest
+            rjob = wait(backend.start_training(rcfg), timeout=900)
+            assert rjob.status == "done", f"xurdif record resume: {rjob.message}"
+            print("  xurdif record run resumed from its snapshot after the dataset was deleted")
+        elif not diffusers_only:
+            print("  xurdif record leg skipped: no GPU")
+
+        after = sorted(p.stat().st_mtime for p in external.iterdir())
+        assert before == after and len(after) == 10, "training changed the linked images"
+    finally:
+        shutil.rmtree(external, ignore_errors=True)
+
+
 def check_refusals():
     """Capability gates, not backend name checks."""
     from app.backend.app import create_app
@@ -283,6 +350,8 @@ def main():
         check_tinyunet("xurdif")
         check_diffusers_finetune(base)
         check_diffusers_lora(base)
+        print("record dataset (linked folder, augmented at training time):")
+        check_record_dataset(diffusers_only)
         print("capability gates:")
         check_refusals()
     finally:

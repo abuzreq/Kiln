@@ -204,6 +204,13 @@ def start():
 
     try:
         cfg = backend.training_config(body, ds_dir, out_dir)
+        # A record dataset trains from a frozen copy of its file list and recipe,
+        # written into the run so resuming later sees the same images.
+        from app.backend.data import manifest
+
+        snap = manifest.snapshot(ds_dir, out_dir)
+        if snap is not None:
+            cfg.manifest = str(snap)
     except Exception as e:
         return err(str(e), 400)
 
@@ -271,17 +278,19 @@ def delete_run(run):
 
     run = safe_name(run, "run name")
     try:
-        run_dir = projects.find_run(run).resolve()
+        run_dir = projects.find_run(run)   # not resolved: a linked run loses only the link
     except Exception:
         return err("run not found", 404)
     for j in registry.list("train"):
         if j.get("status") != "running":
             continue
         out = (j.get("detail") or {}).get("out_dir") or ""
-        if out and Path(out).resolve() == run_dir:
+        if out and Path(out).resolve() == run_dir.resolve():
             return err("stop the running job before deleting this run", 409)
     library.remove_stars_under(run_dir)
-    shutil.rmtree(run_dir)
+    from utils.fs import safe_rmtree
+
+    safe_rmtree(run_dir)
     return ok({"deleted": run})
 
 

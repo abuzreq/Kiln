@@ -67,29 +67,36 @@ def variants(img: Image.Image, ops: list[str], settings: dict | None = None, see
     return [im for _, im in variants_labeled(img, ops, settings, seed)]
 
 
-def images_per_source(ops: list[str] | None, settings: dict | None = None) -> int:
-    """Images written per source file: 1 base + augmentation extras."""
-    ops = ops or []
+def random_augment(img: Image.Image, ops: list[str], settings: dict | None = None,
+                   rng: random.Random | None = None) -> Image.Image:
+    """One random variation of ``img``, drawn fresh each time. Used at training time.
+
+    Where ``variants_labeled`` writes a fixed set of copies, this picks one
+    outcome per call, so every training step sees a different mix:
+
+    - hflip / vflip: flipped with probability 1/2
+    - rotate: random mode picks one of 0° and the chosen angles; fixed mode
+      rotates by the angle with probability 1/2
+    - brightness / contrast: a factor drawn uniformly between min and max
+    """
+    rng = rng or random
     cfg = _merge_settings(settings)
-    n = 1
-    if "hflip" in ops:
-        n += 1
-    if "vflip" in ops:
-        n += 1
+    out = img
+    if "hflip" in ops and rng.random() < 0.5:
+        out = out.transpose(Image.FLIP_LEFT_RIGHT)
+    if "vflip" in ops and rng.random() < 0.5:
+        out = out.transpose(Image.FLIP_TOP_BOTTOM)
     if "rotate" in ops:
         rot = cfg.get("rotate", DEFAULT_SETTINGS["rotate"])
         if rot.get("mode") == "fixed":
-            n += 1
-        elif rot.get("all_angles"):
-            n += len(rot.get("angles") or [90, 180, 270])
+            angle = int(rot.get("angle", 90)) if rng.random() < 0.5 else 0
         else:
-            n += 1
-    if "brightness" in ops:
-        b = cfg.get("brightness", DEFAULT_SETTINGS["brightness"])
-        lo, hi = float(b.get("min", 0.8)), float(b.get("max", 1.2))
-        n += 1 if hi == lo else 2
-    if "contrast" in ops:
-        c = cfg.get("contrast", DEFAULT_SETTINGS["contrast"])
-        lo, hi = float(c.get("min", 0.8)), float(c.get("max", 1.2))
-        n += 1 if hi == lo else 2
-    return n
+            angle = int(rng.choice([0] + [int(a) for a in (rot.get("angles") or [90, 180, 270])]))
+        if angle % 360:
+            out = out.rotate(angle, expand=False)
+    for op, enhancer in (("brightness", ImageEnhance.Brightness), ("contrast", ImageEnhance.Contrast)):
+        if op in ops:
+            c = cfg.get(op, DEFAULT_SETTINGS[op])
+            lo, hi = sorted((float(c.get("min", 0.8)), float(c.get("max", 1.2))))
+            out = enhancer(out).enhance(rng.uniform(lo, hi))
+    return out

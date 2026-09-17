@@ -819,7 +819,8 @@ class Trainer(object):
         opts = {},
         transform = None,
         ddim_steps = 100,
-        pred = "eps"
+        pred = "eps",
+        dataset = None   # KILN: a ready dataset replaces the folder glob (xurdiftrainer --manifest)
     ):
         super().__init__()
         self.model = diffusion_model
@@ -835,7 +836,7 @@ class Trainer(object):
         self.gradient_accumulate_every = gradient_accumulate_every
         self.train_num_steps = train_num_steps
 
-        self.ds = Dataset(folder, image_size, transform=transform)
+        self.ds = dataset if dataset is not None else Dataset(folder, image_size, transform=transform)
         self.dl = cycle(data.DataLoader(self.ds, batch_size = train_batch_size, shuffle=True, pin_memory=True))
         self.opt = Adam(diffusion_model.parameters(), lr=train_lr, eps=1e-5)
 

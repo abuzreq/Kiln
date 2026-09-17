@@ -58,6 +58,11 @@ parser.add_argument('--noEdges', action="store_true", help='disable the edge-wei
 # one token, --attn=-1:linear,mid:full, because the value begins with '-'.
 # Transplanted from xurdiftrainer26b.py, which runs on the unfinished v2 engine.
 parser.add_argument("--attn", type=str, default=None, help='attention layout, e.g. "-1:linear,mid:full"')
+# KILN: train from a dataset snapshot (a file list plus a framing/augmentation
+# recipe) instead of globbing --images. Kiln's datasets read images where they
+# are and augment at training time; the dataset class lives in Kiln
+# (app/core/engine/train_data.py). Absent, training reads --images as before.
+parser.add_argument("--manifest", type=str, default=None, help='Kiln dataset snapshot (json)')
 
 
 opt = parser.parse_args()
@@ -145,6 +150,16 @@ diffusion = GaussianDiffusion(
 ).cuda()
 
 
+# KILN: see --manifest above. The snapshot's recipe decides flips; the stock
+# transform's unconditional RandomHorizontalFlip is not applied on top.
+manifest_ds = None
+if opt.manifest:
+    import sys, os
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")))
+    from app.core.engine.train_data import ManifestDataset
+    manifest_ds = ManifestDataset.from_snapshot(opt.manifest, opt.imageSize, fit=opt.fit, engine="xurdif")
+    print("dataset:", len(manifest_ds), "images from", opt.manifest)
+
 trainer = Trainer(
     diffusion,
     opt.images,
@@ -160,7 +175,8 @@ trainer = Trainer(
     nsamples = opt.nsamples,
     transform = xf, #,
     opts = opt,
-    pred = opt.pred
+    pred = opt.pred,
+    dataset = manifest_ds   # KILN: see --manifest above
 )
 
 if opt.load != "":

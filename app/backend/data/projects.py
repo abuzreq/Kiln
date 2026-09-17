@@ -31,21 +31,36 @@ class Store:
         return n
 
     def list_datasets(self) -> list[dict]:
+        """Every dataset with its image count.
+
+        Record-based datasets report ``kind: "record"`` and their recipe fields
+        (width, height, resize_mode, augmentations) at the top level, where the
+        screens already read them for built datasets.
+        """
+        from app.backend.data import manifest
+
         out, seen = [], set()
         for d in _dataset_dirs():
             if d.name in seen:
                 continue
             seen.add(d.name)
             info = {"name": d.name, "path": str(d), "count": 0}
-            meta = d / "dataset.json"
-            if meta.exists():
-                try:
-                    info.update(json.loads(meta.read_text(encoding="utf-8")))
-                except Exception:  # noqa: BLE001
-                    pass
+            record = manifest.load(d)
+            if record is not None:
+                info.update(record["recipe"])
+                info["kind"] = "record"
+                info["count"] = len(manifest.files(d))
+            else:
+                meta = d / "dataset.json"
+                if meta.exists():
+                    try:
+                        info.update(json.loads(meta.read_text(encoding="utf-8")))
+                    except Exception:  # noqa: BLE001
+                        pass
+                info["kind"] = "folder"
+                info["count"] = sum(1 for p in d.glob("*") if p.suffix.lower() in IMAGE_EXTS)
             info["name"] = d.name
             info["path"] = str(d)
-            info["count"] = sum(1 for p in d.glob("*") if p.suffix.lower() in IMAGE_EXTS)
             out.append(info)
         return out
 

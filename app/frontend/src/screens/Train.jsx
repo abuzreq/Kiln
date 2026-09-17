@@ -811,7 +811,7 @@ export default function Train() {
                       <div className="grow"><Select label="Prediction" value={form.pred} onChange={(v) => set("pred", v)} options={["x0", "eps"]}
                         tip={"What the network is asked to output at each step.\n\nx0 predicts the finished image directly and tends to settle faster on small datasets. eps predicts the noise to remove, the classic formulation. Fixed for the life of a model."} /></div>
                       <div className="grow"><Select label="Fit" value={form.fit} onChange={(v) => set("fit", v)} options={["resize", "crop"]}
-                        tip={"How training images that are not square are made to fit.\n\nresize squashes the whole image to the training size, keeping everything but distorting proportions. crop takes a center square, keeping proportions but discarding the edges."} /></div>
+                        tip={"How training images that are not square are made to fit.\n\nresize squashes the whole image to the training size, keeping everything but distorting proportions. crop takes a square from a random position each time, keeping proportions but not the whole image at once. A dataset's own framing (Data screen) happens first."} /></div>
                     </div>
                     <Num label="SSIM weight" value={form.ssimw} onChange={(v) => set("ssimw", v)} step={0.5}
                       tip="How much structural similarity is mixed into the loss on top of the edge-aware L1. 0 turns it off. Raising it pushes the model toward matching local structure and texture rather than just pixel values; too high and training can stall." />
