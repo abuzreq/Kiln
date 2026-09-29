@@ -13,6 +13,11 @@ const FOLDERS = [
   { key: "captures", label: "Captures", hint: "Images you saved, with their settings embedded" },
   { key: "sweeps", label: "Sweeps", hint: "Parameter grids and sweep animations" },
   { key: "library", label: "Library", hint: "Saved bends, merge recipes and pins" },
+  // Not workspace folders, but Kiln scans them, so they are places models can be
+  // and therefore places to be able to find again.
+  { key: "models_pretrained", label: "Bundled models",
+    hint: "Models that ship with the install, or that you dropped in yourself" },
+  { key: "models_fine_tuned", label: "Bundled fine-tunes", hint: "Also scanned by Kiln" },
 ];
 
 export default function WorkspaceModal({ onClose }) {

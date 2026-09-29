@@ -1,5 +1,7 @@
 """Library routes: reusable bends, merge recipes, sampling presets, model cards."""
+import shutil
 import threading
+from pathlib import Path
 
 from flask import Blueprint, request
 
@@ -7,6 +9,7 @@ from app.core import library
 from app.core.config import workspace
 from app.core.model_manager import manager, read_meta
 from utils.api_responses import ok, err
+from utils.exceptions import NotFoundError, ValidationError
 from utils.process_control import registry
 from utils.validators import require, safe_name
 
@@ -237,6 +240,70 @@ def download():
     job.thread = t
     t.start()
     return ok({"job": job.to_dict()})
+
+
+@bp.post("/model/import")
+def import_model():
+    """Take a .pt the user already has and put it where Kiln keeps models.
+
+    Two ways in, because there are two ways people have the file: a path they can
+    paste or pick, and a drop onto the window. Either way it is *copied* into
+    ``workspace/models`` rather than registered where it lies, so that "where do
+    my models live" has one answer, and so the copy is Kiln's own to delete --
+    a model found elsewhere can only ever be hidden.
+
+    Validated before it is kept, the same way a download is: a file that does not
+    parse as a checkpoint is removed again rather than left to vanish silently
+    from the listing.
+    """
+    upload = (request.files or {}).get("file")
+    body = request.form if upload else (request.get_json(force=True, silent=True) or {})
+    src_path = (body.get("path") or "").strip()
+    if not upload and not src_path:
+        raise ValidationError("give a path to a .pt file, or upload one")
+
+    origin = upload.filename if upload else src_path
+    stem = Path(origin).stem or "model"
+    name = safe_name((body.get("name") or stem).strip(), "model name")
+
+    if not upload:
+        src = Path(src_path).expanduser()
+        if not src.exists() or not src.is_file():
+            raise NotFoundError(f"no file at {src}")
+        if src.suffix.lower() != ".pt":
+            raise ValidationError("that is not a .pt checkpoint")
+
+    dest = workspace.models / f"{name}.pt"
+    if dest.exists():
+        raise ValidationError(
+            f"the library already has a model called {name} -- "
+            "rename that one, or import this under a different name")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        if upload:
+            upload.save(str(dest))
+        else:
+            shutil.copy2(src, dest)
+        read_meta(dest)
+    except Exception as e:
+        dest.unlink(missing_ok=True)
+        card_file = library.card_path(dest)
+        if card_file.exists():
+            card_file.unlink()
+        if isinstance(e, (ValidationError, NotFoundError)):
+            raise
+        raise ValidationError(f"that file is not a model Kiln can read: {e}") from e
+
+    library.ensure_card(dest, name=name, original_name=name, trained_as=[name])
+    manager.clear_cache()
+    return ok({"path": str(dest), "name": name, "from": str(origin)})
+
+
+@bp.get("/models/unreadable")
+def unreadable_models():
+    """Files in Kiln's model folders that look like checkpoints but will not load."""
+    return ok(manager.skipped())
 
 
 # --- Hugging Face models ---------------------------------------------

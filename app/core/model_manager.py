@@ -139,11 +139,43 @@ class ModelManager:
                 d["original_name"] = d["name"]
                 d["trained_as"] = []
             d["renamable"] = library.can_rename(m.path)
-            mtime = Path(m.path).stat().st_mtime
+            try:
+                mtime = Path(m.path).stat().st_mtime
+            except OSError:
+                # Deleted between the scan and here. One vanished model must not
+                # take the whole listing down with it.
+                continue
             if card and card.get("created_at"):
                 d["created_at"] = card["created_at"]
             d["mtime"] = card.get("created_at") if card and card.get("created_at") else mtime
             out.append(d)
+        return out
+
+    def skipped(self, extra_dirs: "list[Path] | None" = None) -> list[dict]:
+        """Files that look like models but could not be read, and why.
+
+        A checkpoint Kiln cannot parse is skipped with only a log line, so a
+        dropped-in file of the wrong kind simply never appears -- no error, no
+        entry, nothing to act on. This is what the Models screen shows instead.
+        """
+        from app.core.backends.xurdif.loader import describe
+
+        known = {str(Path(m.path).resolve()) for m in self.scan()}
+        out: list[dict] = []
+        for d, label in self._sources(extra_dirs):
+            if not d.exists():
+                continue
+            for pt in sorted(d.glob("*.pt")):
+                try:
+                    if str(pt.resolve()) in known:
+                        continue
+                except OSError:
+                    continue
+                try:
+                    describe(pt)
+                except Exception as e:  # noqa: BLE001
+                    out.append({"path": str(pt), "name": pt.name, "source": label,
+                                "why": str(e) or type(e).__name__})
         return out
 
     # --- loading ------------------------------------------------------

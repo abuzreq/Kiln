@@ -229,6 +229,84 @@ function RehomeModel({ onDone }) {
 }
 
 
+/**
+ * Bringing in a .pt the user already has.
+ *
+ * A tester's first move was to try their own models, find no way in, guess at
+ * models/pretrained, and then lose track of where they had put them. So: a path
+ * or a drop, and the file is copied into the workspace rather than read where it
+ * lies -- one place models live, and a copy Kiln owns and can delete.
+ */
+function ImportModel({ onDone }) {
+  const { toast, workspace } = useApp();
+  const [path, setPath] = useState("");
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [over, setOver] = useState(false);
+
+  const done = (r) => {
+    toast(`Imported ${r.name} into your library`, "success");
+    setPath(""); setName("");
+    onDone?.();
+  };
+
+  const importPath = async () => {
+    if (!path.trim()) return;
+    setBusy(true);
+    try { done(await api.post("/library/model/import", { path, name: name || undefined })); }
+    catch (e) { toast(e.message, "error"); }
+    finally { setBusy(false); }
+  };
+
+  const importFile = async (file) => {
+    if (!file) return;
+    if (!/\.pt$/i.test(file.name)) { toast("Kiln imports .pt checkpoints", "error"); return; }
+    setBusy(true);
+    const fd = new FormData();
+    fd.append("file", file);
+    if (name) fd.append("name", name);
+    try { done(await api.upload("/library/model/import", fd)); }
+    catch (e) { toast(e.message, "error"); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="col">
+      <div
+        className={`import-drop${over ? " over" : ""}`}
+        onDragOver={(e) => { e.preventDefault(); setOver(true); }}
+        onDragLeave={() => setOver(false)}
+        onDrop={(e) => {
+          e.preventDefault(); setOver(false);
+          importFile(e.dataTransfer?.files?.[0]);
+        }}
+      >
+        <span className="sub">Drop a .pt here</span>
+        <label className="btn sm">
+          Choose a file…
+          <input type="file" accept=".pt" style={{ display: "none" }} disabled={busy}
+                 onChange={(e) => { importFile(e.target.files?.[0]); e.target.value = ""; }} />
+        </label>
+      </div>
+      <Text label="…or a path on this computer" value={path} onChange={setPath}
+            placeholder="D:/models/mine.pt"
+            tip="The file is copied into your workspace models folder, not moved." />
+      <Text label="Name in the library" value={name} onChange={setName} placeholder="(the file name)"
+            tip="What to call it in Kiln. Leave empty to keep the file's own name." />
+      <button type="button" className="btn primary" onClick={importPath} disabled={!path.trim() || busy}>
+        {busy ? "Importing…" : "Import into library"}
+      </button>
+      {workspace?.models && (
+        <p className="hint mb-0">
+          Copied into <code>{workspace.models}</code>. You can also just put .pt files
+          there yourself — Kiln picks them up.
+        </p>
+      )}
+    </div>
+  );
+}
+
+
 export default function ModelBrowser() {
   const {
     toast, setModelPath, stars, toggleStar, setPrepareTab, setTrainFromPath,
@@ -236,8 +314,16 @@ export default function ModelBrowser() {
   } = useApp();
   const [renameModel, setRenameModel] = useState(null);
   const [pendingDel, setPendingDel] = useState(null);
+  // Files that look like checkpoints and will not load. They are skipped with
+  // only a log line, so without this a wrong-format .pt simply never appears and
+  // there is nothing to act on.
+  const [unreadable, setUnreadable] = useState([]);
 
   const load = () => refreshModels({ force: true });
+
+  useEffect(() => {
+    api.get("/library/models/unreadable").then(setUnreadable).catch(() => setUnreadable([]));
+  }, [models]);
 
   const tagged = useMemo(() => tagStars(models || [], stars), [models, stars]);
   const library = useMemo(() => tagged.filter((m) => m.role !== "checkpoint"), [tagged]);
@@ -292,6 +378,13 @@ export default function ModelBrowser() {
           </p>
         </div>
         <div className="card">
+          <h3>Import a model</h3>
+          <p className="hint">
+            Already have a .pt? Drop it in or point Kiln at it, and it joins your library.
+          </p>
+          <ImportModel onDone={load} />
+        </div>
+        <div className="card">
           <h3>Get a model</h3>
           <p className="hint">Download a xurdif .pt into the library from a direct URL.</p>
           <GetModels onDone={load} />
@@ -325,6 +418,23 @@ export default function ModelBrowser() {
             <input type="checkbox" checked={showHidden} onChange={(e) => setShowHidden(e.target.checked)} />
             Show hidden models
           </label>
+          {unreadable.length > 0 && (
+            <div className="mt-2">
+              <div className="section-title">Not loading</div>
+              <p className="hint mb-2">
+                Kiln found these where it looks for models but cannot read them. They are
+                left alone; nothing here has been changed or deleted.
+              </p>
+              <div className="col gap-2">
+                {unreadable.map((m) => (
+                  <div key={m.path} className="kv" title={m.path}>
+                    <span>{m.name} <span className="sub">· {m.source}</span></span>
+                    <b className="sub">{m.why}</b>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           {showHidden && (hidden.length ? (
             <div className="col gap-2 mt-2">
               {hidden.map((m) => (

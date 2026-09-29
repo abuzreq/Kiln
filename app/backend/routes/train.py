@@ -404,6 +404,7 @@ def delete_run(run):
         if out and Path(out).resolve() == run_dir.resolve():
             return err("stop the running job before deleting this run", 409)
     library.remove_stars_under(run_dir)
+    library.remove_hidden_under(run_dir)
     from utils.fs import safe_rmtree
 
     safe_rmtree(run_dir)

@@ -234,12 +234,22 @@ To pick one by hand, find your driver with `nvidia-smi` and use the matching ind
 
 ## Getting models
 
-The repository ships no weights. Three ways to get some:
+The repository ships no weights. Four ways to get some:
 
-1. **Pretrained xurdif checkpoints** from the [author's Dropbox folder](https://www.dropbox.com/scl/fo/flh4pczukrrlb3ar1rfuc/AAT22M2b21Tf1yKe3Ji0HS0?rlkey=f1zdhexy36p3hffcun686m77c&dl=0),
+1. **A model you already have** — drop the `.pt` onto **Prepare ▸ Models ▸ Import a model**,
+   or give it the path. Kiln copies it into `~/kiln/models` (or `$KILN_WORKSPACE/models`),
+   which is where it keeps models and the only folder you need to know about. Putting files
+   there yourself works too; **Workspace** in the header opens it.
+2. **Pretrained xurdif checkpoints** from the [author's Dropbox folder](https://www.dropbox.com/scl/fo/flh4pczukrrlb3ar1rfuc/AAT22M2b21Tf1yKe3Ji0HS0?rlkey=f1zdhexy36p3hffcun686m77c&dl=0),
    loaded under **Prepare ▸ Models ▸ Get a model**.
-2. **Hugging Face**, under **Prepare ▸ Models ▸ From Hugging Face**.
-3. **Train your own**, which is what the rest of Prepare is for.
+3. **Hugging Face**, under **Prepare ▸ Models ▸ From Hugging Face**.
+4. **Train your own**, which is what the rest of Prepare is for.
+
+Kiln also scans the install's own `models/pretrained` and `models/fine_tuned`, so a file
+dropped there shows up as well — but those are the install's folders, not yours, so Kiln
+will only ever hide such a model, never delete it. The workspace is the better home. A file
+Kiln finds but cannot read is listed under **Not loading** with the reason, instead of
+quietly not appearing.
 
 ---
 
@@ -286,7 +296,8 @@ app/
 utils/             # shared helpers
 scripts/           # smoke tests
 vendor/xurdif/     # vendored xurdif engine
-models/            # checkpoints that ship or are downloaded locally
+models/            # checkpoints that ship with the install (scanned, but ~/kiln/models
+                   #   is where your own models belong)
 ```
 
 ---

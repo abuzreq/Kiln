@@ -173,6 +173,14 @@ def list_hidden() -> list[str]:
     return [_norm_star_path(p) for p in paths if isinstance(p, str) and p]
 
 
+def _write_hidden(paths: list[str]) -> list[str]:
+    f = _hidden_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps({"paths": paths, "updated_at": time.time()}, indent=2),
+                 encoding="utf-8")
+    return paths
+
+
 def set_hidden(path: str, hidden: bool) -> list[str]:
     if not path:
         raise ValidationError("path required")
@@ -180,10 +188,45 @@ def set_hidden(path: str, hidden: bool) -> list[str]:
     paths = [p for p in list_hidden() if p != path]
     if hidden:
         paths.append(path)
-    f = _hidden_file()
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps({"paths": paths, "updated_at": time.time()}, indent=2), encoding="utf-8")
-    return paths
+    return _write_hidden(paths)
+
+
+def replace_hidden_path(old: str, new: str) -> list[str]:
+    """Keep a hidden model hidden across a rename.
+
+    Both lists are keyed by path, so both have to follow one. Without this a
+    renamed hidden model comes back into the lists and leaves a dead entry
+    behind, which is worse than either outcome on its own.
+    """
+    old, new = _norm_star_path(old), _norm_star_path(new)
+    paths = list_hidden()
+    if old not in paths:
+        return paths
+    out = []
+    for p in paths:
+        if p == old:
+            if new and new not in out:
+                out.append(new)
+        elif p not in out:
+            out.append(p)
+    return _write_hidden(out)
+
+
+def remove_hidden_under(root: str | Path) -> list[str]:
+    """Drop hidden paths inside ``root`` (e.g. a deleted run folder)."""
+    try:
+        base = str(Path(root).resolve())
+    except (ValueError, OSError):
+        return list_hidden()
+    kept = []
+    for p in list_hidden():
+        try:
+            if str(Path(p).resolve()).startswith(base):
+                continue
+        except (ValueError, OSError):
+            pass
+        kept.append(p)
+    return _write_hidden(kept)
 
 
 # --- model cards (display name vs training identity) -------------------
@@ -369,6 +412,7 @@ def rename_model(path: str, new_name: str) -> dict:
     card["trained_as"] = _uniq((card.get("trained_as") or []) + [old_stem, card.get("original_name"), new_name])
     write_card(dest, card)
     replace_star_path(str(src), str(dest))
+    replace_hidden_path(str(src), str(dest))
     return {
         "path": str(dest),
         "name": new_name,

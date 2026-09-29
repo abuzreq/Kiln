@@ -811,6 +811,19 @@ body {
   background: var(--bg-2);
 }
 
+/* Drop target for importing a model file. */
+.import-drop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  padding: var(--s-3) var(--s-2);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+}
+.import-drop.over { border-color: var(--accent); background: var(--bg-3, var(--bg-2)); }
+
 /* Breakpoint rows in the learning-rate editor: one drop per line. */
 .lr-points { display: flex; flex-direction: column; gap: var(--s-2); }
 

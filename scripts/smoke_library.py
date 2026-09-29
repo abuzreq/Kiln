@@ -150,11 +150,107 @@ def check_scan_public_hidden():
     print("model list: owned/hidden flags; hidden models listed only on request")
 
 
+def _tiny_checkpoint(dest):
+    """A real, loadable xurdif checkpoint, small enough to write in a test."""
+    import torch
+
+    from app.core.engine.arch import build_unet
+
+    mults = [1, 2, 2, 2]
+    unet = build_unet("tinyunet_with_attention3", mults)
+    state = {f"denoise_fn.{k}": v for k, v in unet.state_dict().items()}
+    torch.save({"step": 0, "model": state, "ema": state, "mults": mults,
+                "mtype": "tinyunet_with_attention3", "pred": "x0"}, dest)
+    return dest
+
+
+def check_import():
+    """Importing a .pt the user already has: copied in, validated, and Kiln's.
+
+    A tester could not find a way to get their own models in, guessed at
+    models/pretrained, and then lost track of the files. Copying into the
+    workspace is what makes "where do my models live" have one answer -- and what
+    makes the copy deletable rather than only hideable.
+    """
+    from app.backend.app import create_app
+    from app.core.model_manager import manager
+
+    c = create_app().test_client()
+    src = _tiny_checkpoint(OUTSIDE / "theirs-to-import.pt")
+
+    r = c.post("/api/library/model/import", json={"path": str(src), "name": "brought-in"})
+    assert r.status_code == 200, r.get_json()
+    dest = WORKSPACE / "models" / "brought-in.pt"
+    assert dest.exists(), "import wrote nothing"
+    assert src.exists(), "import moved the original instead of copying it"
+
+    manager.clear_cache()
+    listed = {m["name"]: m for m in manager.scan_public()}
+    assert listed["brought-in"]["owned"] is True, listed["brought-in"]
+    assert library.card_path(dest).exists(), "an imported model got no card"
+
+    # the same name twice would silently replace a model, so it is refused
+    r = c.post("/api/library/model/import", json={"path": str(src), "name": "brought-in"})
+    assert r.status_code >= 400, "a duplicate name was accepted"
+
+    # and a file that is not a checkpoint must not be left lying in the library
+    junk = OUTSIDE / "junk.pt"
+    junk.write_bytes(b"not a checkpoint")
+    r = c.post("/api/library/model/import", json={"path": str(junk), "name": "junky"})
+    assert r.status_code >= 400, "a non-checkpoint was imported"
+    assert not (WORKSPACE / "models" / "junky.pt").exists(), \
+        "a rejected import was left on disk"
+    assert c.post("/api/library/model/import",
+                  json={"path": str(OUTSIDE / "nope.pt")}).status_code == 404
+
+    # a file Kiln cannot read is reported rather than silently absent
+    shutil.copy2(junk, WORKSPACE / "models" / "broken.pt")
+    manager.clear_cache()
+    bad = c.get("/api/library/models/unreadable").get_json()["data"]
+    assert any(b["name"] == "broken.pt" and b["why"] for b in bad), bad
+    assert "broken" not in {m["name"] for m in manager.scan_public()}
+    (WORKSPACE / "models" / "broken.pt").unlink()
+
+    library.delete_model_files(dest)
+    print("import: copies in, validates, is Kiln's to delete; unreadable files are named")
+
+
+def check_hidden_follows_rename():
+    """Both path lists have to follow a rename, or the flag goes stale.
+
+    A hidden model that is renamed would otherwise reappear in the lists *and*
+    leave a dead entry behind -- worse than either outcome alone.
+    """
+    from app.core.model_manager import manager
+
+    src = _tiny_checkpoint(WORKSPACE / "models" / "to-rename.pt")
+    library.ensure_card(src, name="to-rename", original_name="to-rename")
+    library.set_hidden(str(src), True)
+    library.toggle_star(str(src))
+
+    result = library.rename_model(str(src), "renamed")
+    moved = Path(result["path"])
+    assert moved.name == "renamed.pt", result
+    hidden = library.list_hidden()
+    assert len(hidden) == 1, hidden
+    assert Path(hidden[0]).name == "renamed.pt", hidden
+    assert Path(library.list_stars()[0]).name == "renamed.pt", library.list_stars()
+
+    # and deleting the folder a hidden model lived in clears it out
+    library.remove_hidden_under(WORKSPACE / "models")
+    assert library.list_hidden() == [], library.list_hidden()
+    moved.unlink(missing_ok=True)
+    manager.clear_cache()
+    print("hide: follows a rename, and is cleared when its folder goes")
+
+
 def main():
     try:
         check_preview_failures()
         check_delete_vs_hide()
         check_scan_public_hidden()
+        check_import()
+        check_hidden_follows_rename()
     finally:
         shutil.rmtree(WORKSPACE, ignore_errors=True)
         shutil.rmtree(OUTSIDE, ignore_errors=True)

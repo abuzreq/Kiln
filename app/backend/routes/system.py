@@ -121,16 +121,23 @@ def open_workspace_folder():
 
     body = request.get_json(force=True, silent=True) or {}
     key = body.get("key", "root")
+    # to_dict also names the install's own model folders: discovery scans them, so
+    # a tester who guesses and drops a .pt into models/pretrained is right, and
+    # then cannot find it again from inside Kiln. They are openable for that reason.
     paths = workspace.to_dict()
     if key not in paths:
         return err(f"unknown workspace folder: {key}", 400)
 
     target = Path(paths[key])
-    # never open anything that resolves outside the workspace
+    # Still never anything outside the places Kiln itself owns.
+    proj_root = Path(__file__).resolve().parents[3]
+    allowed = [workspace.root, proj_root / "models", proj_root / "vendor"]
     try:
-        target.resolve().relative_to(workspace.root.resolve())
+        resolved = target.resolve()
+        if not any(_within(resolved, root) for root in allowed):
+            raise ValueError(target)
     except (ValueError, OSError):
-        return err("refusing to open a path outside the workspace", 400)
+        return err("refusing to open a path outside Kiln's own folders", 400)
     if not target.exists():
         target.mkdir(parents=True, exist_ok=True)
 
@@ -144,6 +151,14 @@ def open_workspace_folder():
     except Exception as e:  # noqa: BLE001
         return err(f"could not open the folder: {e}", 500)
     return ok({"opened": str(target)})
+
+
+def _within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(Path(root).resolve())
+        return True
+    except (ValueError, OSError):
+        return False
 
 
 @bp.get("/jobs")

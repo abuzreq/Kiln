@@ -13,6 +13,10 @@ from utils.logger import get_logger
 log = get_logger("config")
 
 APP_NAME = "kiln"
+
+# The install directory. Kiln also scans models/ here, so the UI needs to be able
+# to name and open those folders even though they are not part of the workspace.
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PORT = 8777
 
 
@@ -140,6 +144,10 @@ class Workspace:
             "assets": str(self.assets),
             "sweeps": str(self.sweeps),
             "library": str(self.root / "library"),
+            # Outside the workspace, but Kiln's discovery scans them and users do
+            # put models there, so the UI can name and open them.
+            "models_pretrained": str(_PROJECT_ROOT / "models" / "pretrained"),
+            "models_fine_tuned": str(_PROJECT_ROOT / "models" / "fine_tuned"),
         }
 
 
