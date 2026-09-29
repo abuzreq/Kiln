@@ -887,7 +887,7 @@ export default function Train() {
                         sketch and the per-level pickers below grow as the text is typed. */}
                     <Text label="Channel multipliers" value={form.mults}
                       onChange={(v) => setForm((f) => ({ ...f, mults: v, attn: trimToDepth(f.attn, depthOf(v)) }))}
-                      tip={"Width of the network at each resolution, shallowest first, coarsest last. Separate the numbers with commas.\n\n1,2,2,2 — the default: four levels, the image halved four times\n1,2,2,4 — wider at the deepest level, better for fine detail\n1,2,4,4,8 — five levels, needs image sizes that divide by 32\n\nBigger numbers mean more capacity and a slower model. The count of numbers sets how many times the image is halved. Two models can only be merged if these match."} />
+                      tip={"Width of the network at each resolution, shallowest first, coarsest last. Separate the numbers with commas.\n\n1,2,2,2 — four levels, one doubling. The smallest and fastest, and a probe rather than a result\n1,2,2,4 — Standard 512: wider at the deepest level, so detail has somewhere to live\n1,2,2,4,4 — Detailed 512: a level deeper, and needs image sizes that divide by 32\n\nBigger numbers mean more capacity and a slower model. The count of numbers sets how many times the image is halved. Two models can only be merged if these match."} />
                     <ArchSketch mults={form.mults} imageSize={form.image_size}
                       attn={isConf ? form.attn : null} baseDim={archInfo.base_dim} />
                     {isConf && (

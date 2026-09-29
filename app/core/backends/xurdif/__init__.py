@@ -71,7 +71,8 @@ class XurdifBackend(Backend):
         inference=True,
         train_from_scratch=True,
         finetune=True,
-        # The nets are ~3.8M params and their LoRA-able leaves have positional
+        # The nets are a few million params (3.8M at mults 1,2,2,2, 10.5M at
+        # 1,2,2,4,4) and their LoRA-able leaves have positional
         # names (`0`, `1`, `conv`) from living inside nn.Sequential. Full
         # fine-tuning is already cheap here, so adapters would buy nothing.
         lora=False,
