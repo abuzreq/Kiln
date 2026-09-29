@@ -22,6 +22,13 @@ export const api = {
       body: JSON.stringify(data || {}),
       ...opts,
     }).then(handle),
+  put: (path, data, opts) =>
+    fetch(`/api${path}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data || {}),
+      ...opts,
+    }).then(handle),
   del: (path, data) =>
     fetch(`/api${path}`, {
       method: "DELETE",

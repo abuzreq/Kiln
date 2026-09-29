@@ -8,6 +8,7 @@ import {
 } from "../attnLayout.js";
 import ArchSketch, { levelInfo } from "../components/ArchSketch.jsx";
 import LossChart from "../components/LossChart.jsx";
+import { LrScheduleField, LrPlanModal, LiveRateCard, fmtRate } from "../components/LrSchedule.jsx";
 import CheckpointGallery from "../components/CheckpointGallery.jsx";
 
 export function statusPillClass(status) {
@@ -43,6 +44,13 @@ function edgeLossDefault(backend) {
   return backend === "xurdif";
 }
 
+// The schedule a from-scratch run starts on. Lowering the rate once the model
+// has the general idea is the engine author's own practice and the reason this
+// exists, so it is the default rather than something to go and find. A fine-tune
+// overrides it to "constant": its rate is already chosen by the distance control,
+// and decaying away from that is not what the control means.
+const SCRATCH_LR_SCHEDULE = "drops-2";
+
 const EMPTY_FORM = {
   backend: "xurdif", mode: "scratch", preset: "standard-128",
   lora_r: 8, precision: "no", gradient_checkpointing: false,
@@ -54,13 +62,17 @@ const EMPTY_FORM = {
   edge_loss: edgeLossDefault("xurdif"),
   // The attention layout only means something to the configurable architecture.
   // It is the vendor's spec string; the pickers under "custom" are a view of it.
-  mtype: "tinyunet_conf_attention", attn: "-1:linear,mid:full", mults: "1,2,2,2", save_every: 1000,
+  mtype: "tinyunet_conf_attention", attn: "-1:linear,mid:full", mults: "1,2,2,4", save_every: 1000,
   nsamples: 1, sample_seed: 42, fit: "resize", amp: false, resume: "", nostrict: false,
+  // A named schedule, or "custom" with lr_plan holding the segments. Either way
+  // the server compiles it to absolute steps before the run starts.
+  lr_schedule: SCRATCH_LR_SCHEDULE, lr_plan: null,
 };
 
 // How far a fine-tune should travel from the model it starts on. Learning rate
-// is the whole mechanism -- there is no scheduler anywhere in Kiln, so this is
-// the only dial that decides it. It deliberately does not touch the step target.
+// is the whole mechanism, so this is the only dial that decides it. It
+// deliberately does not touch the step target, and a fine-tune holds its rate
+// for the whole run rather than decaying from it.
 const FT_DISTANCE = [
   { id: "close", label: "Stay close", lr: 5e-5,
     tip: "Small steps. Keeps the base model's look and picks up your images slowly." },
@@ -180,6 +192,15 @@ export default function Train() {
   const presetSeeded = useRef(false);
   const arrivedWithDataset = useRef("");
   const [continueSteps, setContinueSteps] = useState(280000);
+  const [lrPresets, setLrPresets] = useState({});
+  // null, or which schedule editor is open: "form" for a run being configured,
+  // "live" for one already going (or stopped and about to be continued).
+  const [lrEditor, setLrEditor] = useState(null);
+  const [lrBusy, setLrBusy] = useState(false);
+  // What the server last said the schedule is. run.json carries a summary too,
+  // but it goes stale the moment the rate is changed live.
+  const [liveSummary, setLiveSummary] = useState(null);
+  const [continuePlan, setContinuePlan] = useState(null);
   const logRef = useRef(null);
 
   const [form, setForm] = useState({ ...EMPTY_FORM });
@@ -258,6 +279,7 @@ export default function Train() {
         // place to start a fine-tune from. Everything below is architecture and
         // must match, or the checkpoint will not load.
         lr: FT_DEFAULT_LR,
+        lr_schedule: "constant", lr_plan: null,   // see SCRATCH_LR_SCHEDULE
         mtype: d.mtype || f.mtype,
         mults: Array.isArray(d.mults) ? d.mults.join(",") : f.mults,
         attn: d.attn ?? f.attn,
@@ -372,11 +394,34 @@ export default function Train() {
 
   useEffect(() => {
     const t = setTimeout(() => {
-      api.get(`/train/estimate?image_size=${form.image_size || 0}&batch_size=${form.batch_size || 1}`)
-        .then(setEst).catch(() => {});
+      const q = new URLSearchParams({
+        image_size: form.image_size || 0,
+        batch_size: form.batch_size || 1,
+        // Width changes what a run costs -- mostly through optimizer state rather
+        // than activations -- so the readout has to be told about it.
+        mults: form.mults || "",
+        mtype: form.mtype || "",
+        attn: form.attn || "",
+      });
+      api.get(`/train/estimate?${q}`).then(setEst).catch(() => {});
     }, 250);
     return () => clearTimeout(t);
-  }, [form.image_size, form.batch_size]);
+  }, [form.image_size, form.batch_size, form.mults, form.mtype, form.attn]);
+
+  // The schedules, compiled by the server against this run's own base rate and
+  // step target, so the step numbers shown are the ones the trainer will use.
+  // Debounced like the estimate above, and for the same reason.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      const q = new URLSearchParams({
+        lr: form.lr || 0.0004,
+        train_steps: form.train_steps || 280000,
+        save_every: form.save_every || 1000,
+      });
+      api.get(`/train/lr_presets?${q}`).then(setLrPresets).catch(() => {});
+    }, 250);
+    return () => clearTimeout(t);
+  }, [form.lr, form.train_steps, form.save_every]);
 
   const datasetInfo = useMemo(
     () => (info?.datasets || []).find((d) => d.name === form.dataset) || null,
@@ -465,11 +510,31 @@ export default function Train() {
     if (job) { await api.post(`/jobs/${job.id}/cancel`); toast("Stopping training…"); }
   };
 
+  /** Write a run's schedule. One path for a run that is training and one that is
+   *  stopped: the server writes a file either way and says when it takes hold. */
+  const putLrPlan = async (body) => {
+    if (!inspectRun) return;
+    setLrBusy(true);
+    try {
+      const r = await api.put(`/runs/${encodeURIComponent(inspectRun)}/lr_plan`, body);
+      setLiveSummary(r.summary);
+      setContinuePlan(r.plan);
+      setLrEditor(null);
+      toast(r.at_step != null
+        ? `Learning rate ${fmtRate(r.lr_now)} from step ${r.at_step} — applies ${r.applies}`
+        : `Schedule set to ${r.summary} — applies on the ${r.applies}`, "success");
+    } catch (e) { toast(e.message, "error"); }
+    finally { setLrBusy(false); }
+  };
+
   const continueTraining = async () => {
     if (!inspectRun || running) return;
     try {
       const { job: j, warning } = await api.post(`/runs/${encodeURIComponent(inspectRun)}/continue`, {
         train_steps: continueSteps,
+        // Continuing at a lower rate is the habit this replaces. null means
+        // "whatever the run already has", which is read back from its plan file.
+        lr_plan: continuePlan,
       });
       setJob(j);
       setMode("run");
@@ -537,6 +602,13 @@ export default function Train() {
   const checkpoints = (running && job?.detail?.checkpoints?.length ? job.detail.checkpoints : (runView?.checkpoints || [])) || [];
   const logLines = (running && job?.detail?.log?.length ? job.detail.log : (runView?.log || [])) || [];
   const losses = (running && job?.detail?.losses?.length ? job.detail.losses : (runView?.losses || [])) || [];
+  // The past (recorded events) while a run goes, the whole picture from disk
+  // afterwards; see lr_plan.marks_for_chart.
+  const lrMarks = (running && job?.detail?.lr_marks?.length
+    ? job.detail.lr_marks : (runView?.lr_marks || [])) || [];
+  const liveRate = running ? job?.detail?.lr : null;
+  const formSchedule = form.lr_plan ? null : lrPresets[form.lr_schedule];
+  const runSchedule = liveSummary || runMeta.lr_schedule_summary || null;
   const cmd = job?.detail?.cmd;
   const showRun = mode === "run" && (inspectRun || running);
   const latestCkptStep = checkpoints.length
@@ -554,6 +626,26 @@ export default function Train() {
   useEffect(() => {
     if (showLogs && logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [logLines.length, showLogs]);
+
+  // One editor, two callers: configuring a run writes into the form, a live or
+  // stopped run writes through the server so the trainer sees it.
+  const lrModal = lrEditor && (
+    <LrPlanModal
+      presets={lrPresets}
+      plan={lrEditor === "live"
+        ? (continuePlan || job?.detail?.lr_plan || runView?.lr_plan)
+        : (form.lr_plan || lrPresets[form.lr_schedule]?.plan)}
+      baseLr={lrEditor === "live" ? (liveRate || runMeta.lr) : form.lr}
+      title={lrEditor === "live" ? `Learning rate · ${inspectRun}` : "Learning rate schedule"}
+      onClose={() => setLrEditor(null)}
+      onApply={(spec) => {
+        if (lrEditor === "live") { putLrPlan(spec); return; }
+        if (spec.preset) setForm((f) => ({ ...f, lr_schedule: spec.preset, lr_plan: null }));
+        else setForm((f) => ({ ...f, lr_schedule: "custom", lr_plan: spec }));
+        setLrEditor(null);
+      }}
+    />
+  );
 
   if (!info) return <Loading>Loading training…</Loading>;
 
@@ -768,9 +860,16 @@ export default function Train() {
                   <div className="grow"><Num label="Save every" value={form.save_every} onChange={(v) => set("save_every", v)} disabled={running} tip="Write a snapshot every N steps." /></div>
                 </div>
                 <div className="row gap-2">
-                  <div className="grow"><Num label="Learning rate" value={form.lr} onChange={(v) => set("lr", v)} step={0.0001} disabled={running} tip="How big each weight update is. Fine-tuning sets this from the distance control instead." /></div>
+                  <div className="grow"><Num label="Learning rate" value={form.lr} onChange={(v) => set("lr", v)} step={0.0001} disabled={running} tip="How big each weight update is, at the start of the run. Fine-tuning sets this from the distance control instead." /></div>
                   <div className="grow"><Num label="Grad accum" value={form.accum} onChange={(v) => set("accum", v)} disabled={running} tip="Accumulate this many micro-batches before an optimizer step." /></div>
                 </div>
+                <LrScheduleField
+                  presets={lrPresets}
+                  value={form.lr_plan ? "custom" : form.lr_schedule}
+                  onChange={(id) => setForm((f) => ({ ...f, lr_schedule: id, lr_plan: null }))}
+                  onEdit={() => setLrEditor("form")}
+                  disabled={running}
+                />
                 <div className="section-title mt-2">Architecture & loss</div>
                 {engines.length > 1 && (
                   <Select label="Engine" value={form.backend} onChange={(v) => {
@@ -883,6 +982,10 @@ export default function Train() {
                 <div className="kv"><span>{fromMode === "library" ? "Train until step" : "Iterations"}</span><b>{Number(form.train_steps).toLocaleString()}</b></div>
                 <div className="kv"><span>Save every</span><b>{form.save_every}</b></div>
                 <div className="kv"><span>Learning rate</span><b>{form.lr}</b></div>
+                <div className="kv"><span>Schedule</span>
+                  <b>{formSchedule?.summary
+                    || (form.lr_plan ? form.lr_plan.segments.map((s) => fmtRate(s.lr)).join(" → ") : "constant")}</b>
+                </div>
                 <div className="kv"><span>Grad accum</span><b>{form.accum}</b></div>
                 {form.backend === "xurdif" && (
                   <div className="kv"><span>Channel multipliers</span><b>{form.mults}</b></div>
@@ -932,9 +1035,24 @@ export default function Train() {
                   </div>
                   {running && <Progress value={job.progress} />}
                   {job?.detail?.warning && <div className="warn-banner">⚠ {job.detail.warning}</div>}
+                  {running && (
+                    <LiveRateCard
+                      lr={liveRate}
+                      summary={runSchedule}
+                      busy={lrBusy}
+                      onDrop={(rate) => putLrPlan({ from_now: true, lr: rate })}
+                      onEdit={() => setLrEditor("live")}
+                    />
+                  )}
                   {canContinue && (
                     <div className="continue-run-box mt-2">
                       <p className="hint mb-2">Resume this run from its latest checkpoint ({latestCkptStep} steps).</p>
+                      <p className="hint mb-2 row between center gap-2">
+                        <span>Learning rate: {runSchedule || "as recorded"}</span>
+                        <button type="button" className="btn ghost sm" onClick={() => setLrEditor("live")}>
+                          Change…
+                        </button>
+                      </p>
                       <Num
                         label="Train until step"
                         value={continueSteps}
@@ -970,7 +1088,7 @@ export default function Train() {
 
             <div className="card">
               <h3>Loss</h3>
-              <LossChart points={losses} />
+              <LossChart points={losses} marks={lrMarks} />
             </div>
 
             {Object.keys(runMeta).length > 0 && (
@@ -986,6 +1104,11 @@ export default function Train() {
                   {runMeta.attn && <div className="kv"><span>Attention</span><b>{layoutLabel(runMeta.attn)}</b></div>}
                   <div className="kv"><span>Prediction</span><b>{runMeta.pred || "—"}</b></div>
                   <div className="kv"><span>Learning rate</span><b>{runMeta.lr ?? "—"}</b></div>
+                  <div className="kv"><span>Schedule</span><b>{runSchedule || "constant"}</b></div>
+                  {lrMarks.length > 1 && (
+                    <div className="kv"><span>Rate changes</span>
+                      <b>{lrMarks.map((m) => m.label).join(" → ")}</b></div>
+                  )}
                   <div className="kv"><span>Accumulation</span><b>{runMeta.accum ?? "—"}</b></div>
                   <div className="kv"><span>Diffusion steps</span><b>{runMeta.diffusion_steps ?? "—"}</b></div>
                   <div className="kv"><span>Loss</span><b>{lossLabel(runMeta)}</b></div>
@@ -1031,6 +1154,7 @@ export default function Train() {
         </div>
       )}
 
+      {lrModal}
       {saveTarget && (
         <Modal
           title="Save snapshot to library"

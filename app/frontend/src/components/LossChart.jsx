@@ -27,7 +27,7 @@ function formatLoss(v) {
   return v.toExponential(2);
 }
 
-function ChartSvg({ points, height, large = false }) {
+function ChartSvg({ points, marks = [], height, large = false }) {
   const W = large ? 880 : 520;
   const H = height;
   const padL = large ? 72 : 48;
@@ -83,6 +83,22 @@ function ChartSvg({ points, height, large = false }) {
           <text x={sx(t)} y={H - padB + 22} fill={textColor} fontSize={fs} textAnchor="middle">{Math.round(t)}</text>
         </g>
       ))}
+      {marks
+        .filter((m) => m.step >= minX && m.step <= maxX)
+        .reduce((keep, m) => {
+          // One label per ~14px, first wins: a long run can carry more rate
+          // changes than the chart has room to name.
+          const x = sx(m.step);
+          if (!keep.length || Math.abs(x - sx(keep[keep.length - 1].step)) > 14) keep.push(m);
+          return keep;
+        }, [])
+        .map((m) => (
+          <g key={`lr-${m.step}`}>
+            <line x1={sx(m.step)} y1={padT} x2={sx(m.step)} y2={padT + plotH}
+                  stroke={axisColor} strokeWidth="1" strokeDasharray="2 3" opacity="0.7" />
+            <text x={sx(m.step) + 3} y={padT + fs} fill={textColor} fontSize={fs}>{m.label}</text>
+          </g>
+        ))}
       <line x1={padL} y1={padT + plotH} x2={W - padR} y2={padT + plotH} stroke={axisColor} strokeWidth="1.5" />
       <line x1={padL} y1={padT} x2={padL} y2={padT + plotH} stroke={axisColor} strokeWidth="1.5" />
       <path d={d} fill="none" stroke="url(#lossGrad)" strokeWidth={large ? 2.5 : 2} strokeLinejoin="round" strokeLinecap="round" />
@@ -101,7 +117,7 @@ function ChartSvg({ points, height, large = false }) {
   );
 }
 
-export default function LossChart({ points, height = 140 }) {
+export default function LossChart({ points, marks = [], height = 140 }) {
   const [open, setOpen] = useState(false);
   const valid = points && points.length >= 2;
 
@@ -131,7 +147,7 @@ export default function LossChart({ points, height = 140 }) {
         aria-label="Enlarge loss chart"
         title="Click to enlarge"
       >
-        <ChartSvg points={points} height={height} />
+        <ChartSvg points={points} marks={marks} height={height} />
         <span className="sub loss-chart-hint">Click to enlarge</span>
       </button>
       {open && (
@@ -147,9 +163,18 @@ export default function LossChart({ points, height = 140 }) {
               <div><span className="loss-stat-label">Min</span><b>{formatLoss(stats.min)}</b></div>
               <div><span className="loss-stat-label">Max</span><b>{formatLoss(stats.max)}</b></div>
               <div><span className="loss-stat-label">Steps</span><b>{stats.start}–{stats.step}</b></div>
+              {marks.length > 0 && (
+                <div>
+                  <span className="loss-stat-label">Learning rate</span>
+                  <b>{marks[marks.length - 1].label}</b>
+                  <span className="sub">
+                    {marks.length > 1 ? ` · ${marks.length} changes` : ""}
+                  </span>
+                </div>
+              )}
             </div>
           )}
-          <ChartSvg points={points} height={420} large />
+          <ChartSvg points={points} marks={marks} height={420} large />
         </Modal>
       )}
     </>

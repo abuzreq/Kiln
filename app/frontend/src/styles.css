@@ -811,6 +811,9 @@ body {
   background: var(--bg-2);
 }
 
+/* Breakpoint rows in the learning-rate editor: one drop per line. */
+.lr-points { display: flex; flex-direction: column; gap: var(--s-2); }
+
 .create-generate-box {
   padding: var(--s-2);
   border: 1px solid var(--line);

@@ -205,6 +205,7 @@ class XurdifBackend(Backend):
 
     def training_config(self, body: dict, dataset, out_dir):
         """Build a TrainConfig. Moved verbatim from routes/train.py."""
+        from app.core.engine import lr_plan as lrplan
         from app.core.engine.trainer import TrainConfig
         from utils.validators import as_float, as_int
 
@@ -216,6 +217,9 @@ class XurdifBackend(Backend):
         image_size = as_int(body.get("image_size", 512), "image_size", 32, 4096)
         mtype = body.get("mtype") or attn_spec.MTYPE
         mults = _clean_mults(body.get("mults"), image_size)
+        lr = as_float(body.get("lr", 4e-4), "lr", 1e-6, 1.0)
+        train_steps = as_int(body.get("train_steps", 280000), "train_steps", 100, 5_000_000)
+        save_every = as_int(body.get("save_every", 1000), "save_every", 10, 100000)
         return TrainConfig(
             dataset=str(dataset),
             out_dir=str(out_dir),
@@ -223,9 +227,14 @@ class XurdifBackend(Backend):
             image_size=image_size,
             batch_size=as_int(body.get("batch_size", 8), "batch_size", 1, 64),
             diffusion_steps=as_int(body.get("diffusion_steps", 1000), "diffusion_steps", 10, 4000),
-            train_steps=as_int(body.get("train_steps", 280000), "train_steps", 100, 5_000_000),
+            train_steps=train_steps,
             accum=as_int(body.get("accum", 10), "accum", 1, 128),
-            lr=as_float(body.get("lr", 4e-4), "lr", 1e-6, 1.0),
+            lr=lr,
+            # The schedule, compiled to absolute steps here so the numbers the UI
+            # previewed and the ones the trainer runs are the same numbers.
+            lr_plan=lrplan.compile_plan(
+                body.get("lr_plan") or {"preset": body.get("lr_schedule") or "constant"},
+                lr=lr, train_steps=train_steps, save_every=save_every),
             loss_type=body.get("loss_type", "l1"),
             l1w=as_float(body.get("l1w", 1.0), "l1w", 0, 100),
             ssimw=as_float(body.get("ssimw", 0.0), "ssimw", 0, 100),
@@ -236,7 +245,7 @@ class XurdifBackend(Backend):
             fit=body.get("fit", "resize"),
             nsamples=as_int(body.get("nsamples", 1), "nsamples", 1, 16),
             sample_seed=as_int(body.get("sample_seed", 42), "sample_seed", -1, 2 ** 31 - 1),
-            save_every=as_int(body.get("save_every", 1000), "save_every", 10, 100000),
+            save_every=save_every,
             amp=bool(body.get("amp", False)),
             resume=resume,
             nostrict=bool(body.get("nostrict", False)),

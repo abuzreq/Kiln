@@ -16,6 +16,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.core.engine import lr_plan as lrplan
 from app.core.engine._vendor import VENDOR_XURDIF
 from utils.logger import get_logger
 from utils.process_control import Job, registry
@@ -24,6 +25,14 @@ log = get_logger("trainer")
 
 _STEP_RE = re.compile(r"^(\d+):\s+([\d.eE+-]+)\s*$")
 _AVG_RE = re.compile(r"average loss:\s+([\d.eE+-]+)")
+# What the learning-rate hook prints when the rate changes. Deliberately shaped
+# so it matches neither parser above (_STEP_RE is anchored on "^<digits>:").
+_LR_RE = re.compile(r"^lr\s+([\d.eE+-]+)\s+from step\s+(\d+)\s*$")
+
+# How many previous launches' logs to keep beside train.log. A continue used to
+# truncate the log, which threw away the loss history you need in order to judge
+# whether a rate drop helped.
+LOG_KEEP = 9
 
 # how many recent stdout lines to keep in the (JSON-polled) live log tail
 LOG_TAIL = 500
@@ -88,6 +97,11 @@ class TrainConfig:
     train_steps: int = 280000    # --trainsteps (iterations)
     accum: int = 10
     lr: float = 4e-4
+    # Learning-rate plan (app/core/engine/lr_plan.py), written to
+    # <out_dir>/lr_plan.json before launch and re-read by the training loop when
+    # it changes. ``lr`` stays a bare float and remains the base rate -- the
+    # plan's value at step 0 -- so everything that already reads it is untouched.
+    lr_plan: dict | None = None
     loss_type: str = "l1"
     l1w: float = 1.0
     ssimw: float = 0.0
@@ -143,6 +157,11 @@ class TrainConfig:
             args.append(f"--attn={self.attn}")
         if self.manifest:
             args += ["--manifest", str(self.manifest)]
+        # The path, not the schedule: because the plan is a file, choosing a curve
+        # up front and dropping the rate mid-run are the same code path. Passed
+        # unconditionally -- a constant run gets a one-segment plan -- so there is
+        # one path in the loop and "drop it now" works on any run.
+        args += ["--lrPlan", str(Path(self.out_dir) / lrplan.PLAN_NAME)]
         if self.amp:
             args.append("--amp")
         if not self.edge_loss:
@@ -190,9 +209,7 @@ def config_from_run(run_dir: str | Path, train_steps: int, checkpoint: str | Non
             raise ValidationError("none of the images this run trained on can be found any more")
     elif not dataset or not Path(dataset).exists():
         raise ValidationError("original dataset for this run is missing")
-    mults = meta.get("mults") or [1, 2, 2, 2]
-    if isinstance(mults, str):
-        mults = [int(x.strip()) for x in mults.split(",") if x.strip()]
+    mults = parse_mults(meta.get("mults"))
     return TrainConfig(
         dataset=str(dataset),
         out_dir=str(run_dir),
@@ -203,6 +220,9 @@ def config_from_run(run_dir: str | Path, train_steps: int, checkpoint: str | Non
         train_steps=int(train_steps),
         accum=int(meta.get("accum", 10)),
         lr=float(meta.get("lr", 4e-4)),
+        # From the plan file, not run.json: a live edit writes the file, and
+        # run.json's read-modify-write races the trainer thread.
+        lr_plan=lrplan.read(run_dir),
         loss_type=meta.get("loss_type", "l1"),
         l1w=float(meta.get("l1w", 1.0)),
         ssimw=float(meta.get("ssimw", 0.0)),
@@ -271,22 +291,139 @@ def list_checkpoints(out_dir: str | Path, save_every: int | None = None) -> list
     return items
 
 
-def estimate_peak_mib(image_size: int, batch_size: int) -> int:
-    """Rough peak-VRAM estimate for the default tinyunet trainer.
+# The measured fit below was taken at mults 1,2,2,2, whose activation profile is
+# this sum; dividing by it normalises any other width set against that baseline.
+_BASE_MULTS = (1, 2, 2, 2)
+_FIXED_MIB = 825.0          # CUDA context + framework, with the weights term split out
+_PER_IMG_512_MIB = 715.0    # activations per 512px image at _BASE_MULTS
+_BYTES_PER_PARAM = 20       # fp32 weights + grads + two Adam moments + the EMA copy
+_param_cache: dict[tuple, int] = {}
 
-    Fitted from measured peaks on an RTX 3060 (tinyunet_with_attn3, dim=64,
-    mults 1,2,2,2, AMP): activation memory scales ~ (size/512)^2 * 715 MiB per
-    image, plus fixed overhead for weights, Adam state and the CUDA context.
+
+def parse_mults(raw) -> list[int]:
+    """Channel multipliers as a list of ints, from a list or a "1,2,2,4" string.
+
+    Shape only -- ``backends.xurdif._clean_mults`` is the validating parser, which
+    also checks the image size divides by 2**len(mults). This one exists because
+    mults arrive from query strings and from run.json in both spellings.
     """
-    per_img = 715.0 * (image_size / 512.0) ** 2
-    return int(per_img * max(batch_size, 1) + 900.0)
+    if not raw:
+        return list(_BASE_MULTS)
+    if isinstance(raw, str):
+        raw = [x.strip() for x in raw.split(",") if x.strip()]
+    try:
+        out = [int(m) for m in raw]
+    except (TypeError, ValueError):
+        raise ValueError(f"channel multipliers must be whole numbers, got {raw!r}")
+    if not out or any(m < 1 for m in out):
+        raise ValueError(f"channel multipliers must be positive, got {raw!r}")
+    return out
 
 
-def recommended_batch(image_size: int, total_mib: int) -> int:
+def _act_scale(mults) -> float:
+    """How activation memory scales with width, relative to mults 1,2,2,2.
+
+    Level *i* holds ``dim * m_i`` channels at ``size / 2**i`` on a side, so its
+    cost goes as ``m_i / 4**i``. Deep levels are spatially tiny, which is why
+    widening the tail barely moves activations at all -- the real cost of a wider
+    net is the optimizer state below and the step time.
+    """
+    def total(ms):
+        return sum(float(m) / (4.0 ** i) for i, m in enumerate(ms)) or 1.0
+    return total(parse_mults(mults)) / total(_BASE_MULTS)
+
+
+def param_count(mults, mtype: str | None = None, attn: str | None = None) -> int:
+    """Parameters in the net these settings build. Built on the CPU and memoised:
+    construction is pure ``torch.nn`` and takes no measurable time."""
+    from app.core.engine.arch import CONF_MTYPE
+
+    mults = tuple(parse_mults(mults))
+    mtype = mtype or CONF_MTYPE
+    key = (mults, mtype, attn)
+    if key in _param_cache:
+        return _param_cache[key]
+    try:
+        from app.core.backends.xurdif import attn as attn_spec
+        from app.core.engine.arch import build_unet
+
+        cfg = attn_spec.parse(attn) if mtype == CONF_MTYPE else None
+        net = build_unet(mtype, mults, attn_config=cfg)
+        n = sum(p.numel() for p in net.parameters())
+    except Exception as e:  # noqa: BLE001
+        # Only reachable if torch or the vendored snapshot is unusable, in which
+        # case training cannot run either; fall back to the baseline net's size.
+        log.warning("could not count parameters for mults %s: %s", list(mults), e)
+        n = 3_759_043          # the baseline net at mults 1,2,2,2
+    _param_cache[key] = n
+    return n
+
+
+def _weights_mib(mults, mtype=None, attn=None) -> float:
+    return param_count(mults, mtype, attn) * _BYTES_PER_PARAM / (1024.0 * 1024.0)
+
+
+def estimate_peak_mib(image_size: int, batch_size: int, mults=None,
+                      mtype: str | None = None, attn: str | None = None) -> int:
+    """Rough peak-VRAM estimate for the tinyunet trainer.
+
+    Fitted from measured peaks on an RTX 3060 (dim=64, mults 1,2,2,2, AMP):
+    activation memory scales ~ (size/512)^2 * 715 MiB per image. The rest is the
+    CUDA context plus weights, gradients, Adam's two moments and the EMA copy --
+    which is where a wider network actually costs, since its extra activations
+    sit at the spatially smallest levels.
+    """
+    per_img = _PER_IMG_512_MIB * (image_size / 512.0) ** 2 * _act_scale(mults)
+    return int(per_img * max(batch_size, 1) + _FIXED_MIB + _weights_mib(mults, mtype, attn))
+
+
+def recommended_batch(image_size: int, total_mib: int, mults=None,
+                      mtype: str | None = None, attn: str | None = None) -> int:
     """Largest batch that should fit comfortably (avoids sysmem-fallback cliff)."""
-    per_img = 715.0 * (image_size / 512.0) ** 2
-    budget = total_mib * 0.82 - 900.0
+    per_img = _PER_IMG_512_MIB * (image_size / 512.0) ** 2 * _act_scale(mults)
+    budget = total_mib * 0.82 - _FIXED_MIB - _weights_mib(mults, mtype, attn)
     return max(1, int(budget / per_img)) if per_img > 0 else 1
+
+
+def _rotate_run_log(out_dir: Path) -> Path:
+    """Shift train.log to train.log.1 (and so on) so a relaunch does not destroy
+    the previous one.
+
+    A continue used to open train.log with "w". Since load_run_view rebuilds the
+    loss curve by parsing the log, that threw away every point before the resume
+    -- which is exactly the half of the chart you need in order to see whether a
+    learning-rate drop helped.
+    """
+    live = out_dir / "train.log"
+    if not live.exists():
+        return live
+    try:
+        oldest = out_dir / f"train.log.{LOG_KEEP}"
+        if oldest.exists():
+            oldest.unlink()
+        for n in range(LOG_KEEP - 1, 0, -1):
+            src = out_dir / f"train.log.{n}"
+            if src.exists():
+                src.replace(out_dir / f"train.log.{n + 1}")
+        live.replace(out_dir / "train.log.1")
+    except OSError as e:
+        log.warning("could not rotate train.log: %s", e)
+    return live
+
+
+def _log_segments(out_dir: Path) -> list[list[str]]:
+    """Every launch's log lines, oldest launch first."""
+    paths = [out_dir / f"train.log.{n}" for n in range(LOG_KEEP, 0, -1)]
+    paths.append(out_dir / "train.log")
+    segs: list[list[str]] = []
+    for f in paths:
+        if not f.exists():
+            continue
+        try:
+            segs.append(f.read_text(encoding="utf-8", errors="replace").splitlines())
+        except OSError:
+            continue
+    return segs
 
 
 def _read_run_meta(out_dir: Path) -> dict:
@@ -297,6 +434,11 @@ def _read_run_meta(out_dir: Path) -> dict:
         except Exception:  # noqa: BLE001
             pass
     return {}
+
+
+def run_meta(out_dir: str | Path) -> dict:
+    """A run's run.json, or {} if it has none."""
+    return _read_run_meta(Path(out_dir))
 
 
 def _loss_stride(save_every) -> int:
@@ -321,6 +463,10 @@ def _write_run_meta(out_dir: Path, cfg: "TrainConfig", *, continued_from: str | 
         "attn": cfg.attn,
         "pred": cfg.pred,
         "lr": cfg.lr,
+        # Display only, and stale-tolerant: the plan itself lives in its own file
+        # so a live rewrite cannot race this read-modify-write.
+        **({"lr_schedule": (cfg.lr_plan or {}).get("preset") or "custom",
+            "lr_schedule_summary": lrplan.summarize(cfg.lr_plan)} if cfg.lr_plan else {}),
         "loss_type": cfg.loss_type,
         "l1w": cfg.l1w,
         "ssimw": cfg.ssimw,
@@ -362,33 +508,43 @@ def load_run_view(out_dir: str | Path) -> dict:
     save_every = meta.get("save_every")
     ckpts = list_checkpoints(out_dir, save_every) if out_dir.exists() else []
     log_path = out_dir / "train.log"
-    log_lines: list[str] = []
-    all_lines: list[str] = []
-    if log_path.exists():
-        try:
-            text = log_path.read_text(encoding="utf-8", errors="replace")
-            all_lines = text.splitlines()
-            log_lines = all_lines[-LOG_TAIL:]
-        except Exception:  # noqa: BLE001
-            all_lines = []
-            log_lines = []
-    # the log panel shows a tail, but the loss curve is parsed from the whole
-    # file so it spans every step of the run, not just the last few hundred lines.
-    losses = []
-    for line in all_lines:
-        m = _STEP_RE.match(line)
-        if not m:
-            continue
-        step = int(m.group(1))
-        # Sampled, not every line -- but capped at 50 so curve density stops
-        # riding on snapshot frequency. At save_every 1000 the old half-of-it
-        # rule plotted a point every 500 steps, which is a chart of four dots.
-        if save_every and step % _loss_stride(save_every) != 0:
-            continue
-        losses.append({"step": step, "loss": float(m.group(2))})
+    segments = _log_segments(out_dir) if out_dir.exists() else []
+    # The log panel shows a tail of the *current* launch. The loss curve spans
+    # every launch, so it survives a continue.
+    log_lines = segments[-1][-LOG_TAIL:] if segments else []
+
+    def _points(lines: list[str]) -> list[dict]:
+        pts = []
+        for line in lines:
+            m = _STEP_RE.match(line)
+            if not m:
+                continue
+            step = int(m.group(1))
+            # Sampled, not every line -- but capped at 50 so curve density stops
+            # riding on snapshot frequency. At save_every 1000 the old half-of-it
+            # rule plotted a point every 500 steps, which is a chart of four dots.
+            if save_every and step % _loss_stride(save_every) != 0:
+                continue
+            pts.append({"step": step, "loss": float(m.group(2))})
+        return pts
+
+    # Newest launch first, keeping only steps no later launch already describes.
+    # Continuing from an *earlier* checkpoint therefore supersedes the overlapping
+    # tail of the run it replaced, instead of drawing a zigzag.
+    chunks: list[list[dict]] = []
+    cutoff = None
+    for lines in reversed(segments):
+        pts = _points(lines)
+        if cutoff is not None:
+            pts = [q for q in pts if q["step"] < cutoff]
+        if pts:
+            cutoff = pts[0]["step"]
+            chunks.append(pts)
+    losses = [q for c in reversed(chunks) for q in c]
     if len(losses) > 240:
         step_n = max(len(losses) // 240, 1)
         losses = losses[::step_n]
+    plan = lrplan.read(out_dir)
     return {
         "name": out_dir.name,
         "path": str(out_dir),
@@ -397,6 +553,8 @@ def load_run_view(out_dir: str | Path) -> dict:
         "checkpoints": ckpts,
         "log": log_lines,
         "losses": losses,
+        "lr_plan": plan,
+        "lr_marks": lrplan.marks_for_chart(lrplan.read_events(out_dir), plan),
         "sample": _latest_sample(out_dir),
         "log_path": str(log_path) if log_path.exists() else None,
     }
@@ -406,8 +564,16 @@ def _run(job: Job, cfg: TrainConfig):
     out_dir = Path(cfg.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     _write_run_meta(out_dir, cfg, continued_from=cfg.continued_from)
+    plan = cfg.lr_plan or lrplan.compile_plan(
+        None, lr=cfg.lr, train_steps=cfg.train_steps, save_every=cfg.save_every)
+    lrplan.write(out_dir, plan)
+    job.detail["lr_plan"] = plan
+    job.detail["lr"] = lrplan.lr_at(plan, 0)
     py = trainer_python()
-    cmd = [py, "xurdiftrainer.py", *cfg.to_args()]
+    # -u because the child's prints otherwise sit in an 8KB pipe buffer for some
+    # 300 steps, which delays the live loss curve and makes "the new rate applies
+    # on the next step" impossible to see.
+    cmd = [py, "-u", "xurdiftrainer.py", *cfg.to_args()]
     job.detail["cmd"] = " ".join(cmd)
     job.detail["python"] = py
     job.detail["out_dir"] = str(out_dir)
@@ -457,7 +623,7 @@ def _run(job: Job, cfg: TrainConfig):
     pending_ckpt_refresh = False
 
     try:
-        logf = open(out_dir / "train.log", "w", encoding="utf-8", errors="replace")
+        logf = open(_rotate_run_log(out_dir), "w", encoding="utf-8", errors="replace")
     except Exception:  # noqa: BLE001
         logf = None
 
@@ -496,6 +662,13 @@ def _run(job: Job, cfg: TrainConfig):
         elif _AVG_RE.search(line):
             job.detail["avg_loss_line"] = line
             pending_ckpt_refresh = True
+        elif (lm := _LR_RE.match(line)):
+            at, rate = int(lm.group(2)), float(lm.group(1))
+            job.detail["lr"] = rate
+            lrplan.append_event(out_dir, at, rate)
+            job.detail["lr_plan"] = lrplan.read(out_dir)
+            job.detail["lr_marks"] = lrplan.marks_for_chart(
+                lrplan.read_events(out_dir), job.detail["lr_plan"])
 
         if job.cancelled():
             _stop_proc(proc)
@@ -557,7 +730,7 @@ def start_training(cfg: TrainConfig) -> Job:
     # surface the exact command + run dir on the very first poll (before the
     # worker thread has spun up), so the UI can show it during startup.
     py = trainer_python()
-    job.detail["cmd"] = " ".join([py, "xurdiftrainer.py", *cfg.to_args()])
+    job.detail["cmd"] = " ".join([py, "-u", "xurdiftrainer.py", *cfg.to_args()])
     job.detail["python"] = py
     job.detail["out_dir"] = str(Path(cfg.out_dir))
     t = threading.Thread(target=_run, args=(job, cfg), daemon=True)

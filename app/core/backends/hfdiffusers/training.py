@@ -103,6 +103,10 @@ class DiffusersTrainConfig:
     train_steps: int = 20000
     accum: int = 1
     lr: float = 1e-4
+    # Learning-rate plan; see app/core/engine/lr_plan.py. None means the constant
+    # plan, which is what `lr` alone already meant. to_meta() copies __dict__, so
+    # this lands in run.json without any extra plumbing.
+    lr_plan: dict | None = None
     save_every: int = 500
     diffusion_steps: int = 1000
     seed: int = 42
@@ -173,6 +177,12 @@ def config_from_body(body: dict, dataset: str, out_dir: str) -> DiffusersTrainCo
         train_steps=as_int(body.get("train_steps", 20000), "train_steps", 10, 5_000_000),
         accum=as_int(body.get("accum", 1), "accum", 1, 128),
         lr=as_float(body.get("lr", 1e-4), "lr", 1e-7, 1.0),
+        lr_plan=_lr_plan_from(body,
+                              lr=as_float(body.get("lr", 1e-4), "lr", 1e-7, 1.0),
+                              train_steps=as_int(body.get("train_steps", 20000),
+                                                 "train_steps", 10, 5_000_000),
+                              save_every=as_int(body.get("save_every", 500),
+                                                "save_every", 10, 100000)),
         save_every=as_int(body.get("save_every", 500), "save_every", 10, 100000),
         diffusion_steps=as_int(body.get("diffusion_steps", 1000), "diffusion_steps", 10, 4000),
         seed=as_int(body.get("seed", 42), "seed", 0, 2 ** 31 - 1),
@@ -188,6 +198,14 @@ def config_from_body(body: dict, dataset: str, out_dir: str) -> DiffusersTrainCo
         lora_dropout=as_float(body.get("lora_dropout", 0.0), "lora_dropout", 0.0, 0.9),
         lora_targets=list(body.get("lora_targets") or LORA_TARGETS),
     )
+
+
+def _lr_plan_from(body: dict, *, lr: float, train_steps: int, save_every: int) -> dict:
+    """The schedule this request asks for, compiled to absolute steps."""
+    from app.core.engine import lr_plan as lrplan
+
+    spec = body.get("lr_plan") or {"preset": body.get("lr_schedule") or "constant"}
+    return lrplan.compile_plan(spec, lr=lr, train_steps=train_steps, save_every=save_every)
 
 
 class ImageFolder:
@@ -365,17 +383,28 @@ def _run(job: Job, cfg: DiffusersTrainConfig):
     import torch
     from torch.utils.data import DataLoader
 
-    from app.core.engine.trainer import list_checkpoints, patch_run_meta
+    from app.core.engine import lr_plan as lrplan
+    from app.core.engine.trainer import (list_checkpoints, patch_run_meta,
+                                         _rotate_run_log)
 
     out_dir = Path(cfg.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    plan = cfg.lr_plan or lrplan.compile_plan(
+        None, lr=cfg.lr, train_steps=cfg.train_steps, save_every=cfg.save_every)
     meta = cfg.to_meta()
     meta["status"] = "training"
+    meta["lr_schedule"] = plan.get("preset") or "custom"
+    meta["lr_schedule_summary"] = lrplan.summarize(plan)
     (out_dir / "run.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    lrplan.write(out_dir, plan)
+    job.detail["lr_plan"] = plan
+    job.detail["lr"] = lrplan.lr_at(plan, 0)
 
     logf = None
     try:
-        logf = open(out_dir / "train.log", "w", encoding="utf-8", errors="replace")
+        # Rotate rather than truncate, so continuing a run keeps the loss history
+        # you need in order to see whether a rate change helped.
+        logf = open(_rotate_run_log(out_dir), "w", encoding="utf-8", errors="replace")
     except Exception:  # noqa: BLE001
         pass
     logbuf: list = job.detail.setdefault("log", [])
@@ -439,6 +468,7 @@ def _run(job: Job, cfg: DiffusersTrainConfig):
                         num_workers=0, drop_last=len(ds) >= cfg.batch_size)
         opt = torch.optim.AdamW(trainable, lr=cfg.lr)
         net, opt, dl = accel.prepare(net, opt, dl)
+        lr_watch = lrplan.Watcher(out_dir, cfg.lr)
 
         torch.manual_seed(cfg.seed)
         losses = job.detail.setdefault("losses", [])
@@ -451,6 +481,20 @@ def _run(job: Job, cfg: DiffusersTrainConfig):
             for batch in dl:
                 if job.cancelled() or step >= cfg.train_steps:
                     break
+                # Evaluated on the pre-increment step, so "step N ran at lr(N)"
+                # means the same here as in the vendored loop. Read at the top of
+                # the iteration and so outside the pause barrier below: a run
+                # paused while its plan is edited picks the change up on resume.
+                rate_now, rate_changed = lr_watch.lr_for(step)
+                for g in opt.param_groups:
+                    g["lr"] = rate_now
+                job.detail["lr"] = rate_now
+                if rate_changed:
+                    emit("lr %.6g from step %d" % (rate_now, step))
+                    lrplan.append_event(out_dir, step, rate_now)
+                    job.detail["lr_plan"] = lrplan.read(out_dir)
+                    job.detail["lr_marks"] = lrplan.marks_for_chart(
+                        lrplan.read_events(out_dir), job.detail["lr_plan"])
                 with accel.accumulate(net):
                     clean = batch
                     noise = torch.randn_like(clean)

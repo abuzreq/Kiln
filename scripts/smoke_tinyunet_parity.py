@@ -265,6 +265,70 @@ def check_vendor_harness():
           "GaussianDiffusion")
 
 
+def check_step_hook():
+    """The vendored per-step hook: inert by default, effective when installed.
+
+    The seam Kiln adds to ``Trainer`` for learning-rate scheduling is two lines,
+    and its whole contract is that ``kiln_step_hook is None`` trains exactly as
+    upstream did. That is what this asserts -- and then that an installed hook
+    really is called, without which the first half would pass on a hook that
+    never runs.
+    """
+    if not torch.cuda.is_available():
+        print("  step hook: skipped (the vendored Trainer hardcodes .cuda())")
+        return
+    from types import SimpleNamespace
+
+    tmp = Path(tempfile.mkdtemp(prefix="kiln_hook_"))
+
+    def build(where):
+        torch.manual_seed(0)
+        net = build_unet("tinyunet_with_attention3", [1, 2, 2, 2]).cuda()
+        gd = V.GaussianDiffusion(net, image_size=64, timesteps=1000,
+                                 l1w=1.0, ssimw=0.0, pred="x0").cuda()
+        torch.manual_seed(5)
+        ds = [torch.randn(3, 64, 64) for _ in range(8)]
+        opts = SimpleNamespace(mults=[1, 2, 2, 2], model="tinyunet_with_attention3",
+                               pred="x0", attn=None, sampleSeed=-1)
+        where.mkdir(parents=True, exist_ok=True)
+        return V.Trainer(gd, "", image_size=64, train_batch_size=2, train_lr=1e-4,
+                         train_num_steps=4, gradient_accumulate_every=1,
+                         save_and_sample_every=10 ** 9, results_folder=str(where),
+                         nsamples=1, opts=opts, ddim_steps=0, dataset=ds)
+
+    # the default is the invariant
+    assert build(tmp / "a").kiln_step_hook is None, "the step hook must default to None"
+
+    def train(name, hook):
+        tr = build(tmp / name)
+        tr.kiln_step_hook = hook
+        torch.manual_seed(1234)
+        torch.cuda.manual_seed_all(1234)
+        tr.train()
+        return tr, {k: v.detach().cpu().clone() for k, v in tr.model.state_dict().items()}
+
+    _, plain = train("plain", None)
+    _, noop = train("noop", lambda tr: None)
+    off = [k for k in plain if not torch.equal(plain[k], noop[k])]
+    assert not off, f"a no-op hook changed training: {len(off)} tensors differ, e.g. {off[0]}"
+
+    seen = []
+
+    def lower(tr):
+        seen.append(tr.step)
+        for g in tr.opt.param_groups:
+            g["lr"] = 1e-6
+
+    tr, slowed = train("slow", lower)
+    assert seen == [0, 1, 2, 3], f"the hook was not called once per step: {seen}"
+    assert tr.opt.param_groups[0]["lr"] == 1e-6, tr.opt.param_groups[0]["lr"]
+    moved = [k for k in plain if not torch.equal(plain[k], slowed[k])]
+    assert moved, "dropping the rate to 1e-6 changed nothing -- the hook cannot be working"
+    shutil.rmtree(tmp, ignore_errors=True)
+    print("  step hook: None trains byte-for-byte as upstream; an installed hook "
+          "runs every step (%d tensors moved at lr 1e-6)" % len(moved))
+
+
 def check_schedule_provenance():
     """The two vendored cosine schedules agree, and conversion pins the curve."""
     from app.core.backends.xurdif import cosine_betas
@@ -384,6 +448,7 @@ def main():
         check_objective()
         check_edge_switch()
         check_vendor_harness()
+        check_step_hook()
         check_schedule_provenance()
         check_conversion(tmp)
         check_craft_and_peft(tmp)

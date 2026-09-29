@@ -118,6 +118,189 @@ def check_loss_defaults():
     print("  loss defaults: xurdif edge on, diffusers MSE")
 
 
+def check_lr_plan():
+    """The schedule evaluator: presets, shapes, round-trip, refusals. No GPU."""
+    import math
+
+    from app.core.engine import lr_plan as lrplan
+    from utils.exceptions import ValidationError
+
+    for lr, total in ((5e-4, 280000), (4e-4, 120000), (3e-4, 400000)):
+        for pid in lrplan.PRESETS:
+            plan = lrplan.compile_plan({"preset": pid}, lr=lr, train_steps=total,
+                                       save_every=1000)
+            assert plan["segments"][0]["from"] == 0
+            assert abs(lrplan.lr_at(plan, 0) - lr) < 1e-15, (pid, lr)
+            assert json.loads(json.dumps(plan)) == plan, pid
+            assert lrplan.summarize(plan), pid
+
+    # the author's own pattern, at the numbers the design doc quotes
+    d2 = lrplan.compile_plan({"preset": "drops-2"}, lr=5e-4, train_steps=280000,
+                             save_every=1000)
+    assert [s["from"] for s in d2["segments"]] == [0, 84000, 182000], d2["segments"]
+    assert [s["lr"] for s in d2["segments"]] == [5e-4, 1e-4, 5e-5], d2["segments"]
+    # drops never go up, and every breakpoint lands on a snapshot boundary so
+    # there is a checkpoint from just before each one to compare against
+    for pid in ("drops-2", "drops-3"):
+        plan = lrplan.compile_plan({"preset": pid}, lr=5e-4, train_steps=280000,
+                                   save_every=1000)
+        assert all(s["from"] % 1000 == 0 for s in plan["segments"]), plan
+        seen = [lrplan.lr_at(plan, s) for s in range(0, 280001, 1000)]
+        assert all(b <= a + 1e-18 for a, b in zip(seen, seen[1:])), pid
+
+    # the smooth curve must stay the cosine it claims to be, not "some decay"
+    cos = lrplan.compile_plan({"preset": "cosine-floor"}, lr=5e-4, train_steps=280000,
+                              save_every=1000)
+    seg = cos["segments"][0]
+    hi, lo, until = seg["lr"], seg["to_lr"], seg["until"]
+    for i in range(51):
+        s = int(i * until / 50)
+        want = lo + (hi - lo) * 0.5 * (1 + math.cos(math.pi * min(s / until, 1.0)))
+        assert abs(lrplan.lr_at(cos, s) - want) < 1e-12, (s, lrplan.lr_at(cos, s), want)
+    assert abs(lrplan.lr_at(cos, 10 ** 9) - lo) < 1e-18, "a ramp must hold its floor"
+
+    # a cycle's troughs are where the good snapshots are, so they must land on
+    # save_every boundaries -- which needs an even multiple of it as the period
+    cyc = lrplan.compile_plan({"preset": "cyclic"}, lr=5e-4, train_steps=280000,
+                              save_every=1000)
+    seg = cyc["segments"][0]
+    per = seg["period"]
+    assert per % 2000 == 0 and (per // 2) % 1000 == 0, per
+    assert abs(lrplan.lr_at(cyc, 0) - seg["lr"]) < 1e-18, "a cycle starts high"
+    for k in range(3):
+        assert abs(lrplan.lr_at(cyc, per // 2 + k * per) - seg["to_lr"]) < 1e-18, k
+        assert abs(lrplan.lr_at(cyc, k * per) - seg["lr"]) < 1e-18, k
+
+    # a one-click drop keeps the history in front of it
+    dropped = lrplan.override_from(d2, 100000, 1e-6)
+    assert abs(lrplan.lr_at(dropped, 0) - 5e-4) < 1e-18
+    assert abs(lrplan.lr_at(dropped, 99999) - 1e-4) < 1e-18
+    assert abs(lrplan.lr_at(dropped, 100000) - 1e-6) < 1e-18
+
+    refusals = [
+        ({"segments": []}, "no segments"),
+        ({"segments": [{"from": 5, "kind": "const", "lr": 1e-4}]}, "first not at step 0"),
+        ({"segments": [{"from": 0, "kind": "const", "lr": 1e-4},
+                       {"from": 0, "kind": "const", "lr": 1e-5}]}, "out of order"),
+        ({"segments": [{"from": 0, "kind": "const", "lr": -1e-4}]}, "negative rate"),
+        ({"segments": [{"from": 0, "kind": "const", "lr": 5.0}]}, "rate above 1"),
+        ({"segments": [{"from": 0, "kind": "cosine", "lr": 1e-4, "to_lr": 1e-5,
+                        "until": 0}]}, "until not after from"),
+        ({"segments": [{"from": 0, "kind": "cyclic", "lr": 1e-4, "to_lr": 1e-5,
+                        "period": 7}]}, "odd period"),
+        ({"segments": [{"from": 0, "kind": "wobble", "lr": 1e-4}]}, "unknown shape"),
+        ({"preset": "nope"}, "unknown preset"),
+    ]
+    for spec, why in refusals:
+        try:
+            lrplan.compile_plan(spec, lr=1e-4, train_steps=1000, save_every=100)
+        except ValidationError:
+            continue
+        raise AssertionError("a plan with %s should have been refused" % why)
+
+    print("  %d schedules compile; cosine matches the closed form; %d refusals hold"
+          % (len(lrplan.PRESETS), len(refusals)))
+
+
+def check_lr_log_merge():
+    """Relaunching a run must not throw away the loss history.
+
+    train.log used to be truncated on every launch, which erased exactly the half
+    of the curve you need in order to see whether a rate drop helped. No GPU:
+    this drives the rotation and the parser directly.
+    """
+    from app.core.engine.trainer import _log_segments, _rotate_run_log
+
+    out = WORKSPACE / "runs" / "_logmerge"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "run.json").write_text(json.dumps({"name": "lm", "save_every": 50}),
+                                  encoding="utf-8")
+
+    def launch(steps, loss):
+        with open(_rotate_run_log(out), "w", encoding="utf-8") as f:
+            for s in steps:
+                f.write("%d: %s\n" % (s, loss))
+
+    launch(range(0, 100, 25), "0.5")             # first launch, steps 0..75
+    launch(range(100, 200, 25), "0.3")           # continued on to 175
+    assert (out / "train.log.1").exists(), "the first launch's log was destroyed"
+    assert len(_log_segments(out)) == 2, _log_segments(out)
+    steps = [p["step"] for p in load_run_view(out)["losses"]]
+    assert steps == [0, 25, 50, 75, 100, 125, 150, 175], steps
+
+    # continuing from an *earlier* checkpoint: the newer launch supersedes the
+    # overlapping tail instead of drawing a zigzag back down the x axis
+    launch(range(50, 150, 25), "0.1")
+    pts = load_run_view(out)["losses"]
+    steps = [p["step"] for p in pts]
+    assert steps == sorted(steps), steps
+    assert steps == [0, 25, 50, 75, 100, 125], steps
+    assert all(p["loss"] == 0.1 for p in pts if p["step"] >= 50), pts
+    print("  log rotation keeps %d launches; the curve spans them and stays ordered"
+          % len(_log_segments(out)))
+
+
+def check_vram_estimate():
+    """A wider network must cost more than a narrow one, or the preset badges lie."""
+    from app.core.engine.trainer import estimate_peak_mib, param_count, parse_mults
+
+    narrow, standard, deep = [1, 2, 2, 2], [1, 2, 2, 4], [1, 2, 2, 4, 4]
+    assert param_count(narrow) < param_count(standard) < param_count(deep)
+    seen = [estimate_peak_mib(512, 4, m) for m in (narrow, standard, deep)]
+    assert seen[0] < seen[1] < seen[2], seen
+    # the fit was measured at 1,2,2,2, so that point must not have moved
+    assert abs(seen[0] - 3760) < 20, seen[0]
+    assert parse_mults("1,2,2,4") == standard and parse_mults(None) == narrow
+    print("  VRAM estimate tracks width: %s MiB at 512px batch 4 for %s / %s / %s"
+          % (seen, narrow, standard, deep))
+
+
+def check_live_lr_edit():
+    """Changing the rate mid-run, end to end on the engine that needs no GPU."""
+    from app.core.engine import lr_plan as lrplan
+
+    backend = backends.get("diffusers")
+    out_dir = WORKSPACE / "runs" / "dlive"
+    cfg = backend.training_config({
+        "mode": "scratch", "preset": "small-64", "image_size": 64, "batch_size": 4,
+        "train_steps": 100, "save_every": 50, "lr": 1e-4, "model_name": "dlive",
+    }, DATASET, out_dir)
+    assert cfg.lr_plan and cfg.lr_plan["preset"] == "constant", cfg.lr_plan
+
+    job = backend.start_training(cfg)
+    edited = False
+    t0 = time.time()
+    while job.status == "running" and time.time() - t0 < 600:
+        step = (job.detail or {}).get("step") or 0
+        if not edited and step >= 30:
+            lrplan.write(out_dir, lrplan.override_from(lrplan.read(out_dir) or {},
+                                                       step, 1e-5))
+            lrplan.append_event(out_dir, step, 1e-5, "live")
+            edited = True
+        time.sleep(0.2)
+    wait(job)
+    assert job.status == "done", "live lr run: %s" % job.message
+    assert edited, "the run finished before it could be edited"
+
+    assert abs(job.detail["lr"] - 1e-5) < 1e-12, job.detail.get("lr")
+    logged = [l for l in job.detail.get("log") or [] if l.startswith("lr ")]
+    assert any("1e-05" in l for l in logged), logged
+    events = lrplan.read_events(out_dir)
+    assert any(e["why"] == "live" for e in events), events
+    assert any(e["step"] >= 30 and abs(e["lr"] - 1e-5) < 1e-12 for e in events), events
+
+    view = load_run_view(out_dir)
+    assert len(view["lr_marks"]) >= 2, view["lr_marks"]
+    # the loop reads the plan and must never write it back
+    disk = lrplan.read(out_dir)
+    assert disk["segments"][-1]["lr"] == 1e-5, disk
+    # `lr` in run.json stays a bare float: config_from_run does float() on it
+    meta = json.loads((out_dir / "run.json").read_text(encoding="utf-8"))
+    assert isinstance(meta["lr"], float), meta["lr"]
+    print("  live rate change took effect at step %s; %d marks on the curve"
+          % (events[-1]["step"], len(view["lr_marks"])))
+
+
 def check_xurdif(run_name: str = "xur", **over):
     """One short xurdif run. With no overrides this is what a fresh Train
     screen launches: the conf architecture on its default attention layout."""
@@ -130,7 +313,12 @@ def check_xurdif(run_name: str = "xur", **over):
         # xurdif's own validators floor these at 100 / 10.
         "image_size": 64, "batch_size": 2, "train_steps": 100, "save_every": 50,
         "accum": 1, "diffusion_steps": 1000, "nsamples": 1, "sample_seed": 42,
-        "model_name": run_name, "mults": [1, 2, 2, 2], **over,
+        "model_name": run_name, "mults": [1, 2, 2, 2],
+        # A two-segment plan: the only end-to-end proof that the vendored step
+        # hook is installed and fires inside the real subprocess.
+        "lr_plan": {"segments": [{"from": 0, "kind": "const", "lr": 1e-4},
+                                 {"from": 50, "kind": "const", "lr": 1e-5}]},
+        **over,
     }, DATASET, out_dir)
     assert cfg.image_size == 64 and cfg.save_every == 50 and cfg.mults == [1, 2, 2, 2]
     job = wait(backend.start_training(cfg), timeout=900)
@@ -159,16 +347,30 @@ def check_xurdif(run_name: str = "xur", **over):
         assert "down_attns.3" in ids and "mid_attn" in ids, ids
     print("  trained checkpoint loads back as:", meta.mtype, meta.mults, meta.attn)
 
+    # the vendored step hook ran: the plan's second segment took effect on time
+    from app.core.engine import lr_plan as lrplan
+    logged = [l for l in (job.detail.get("log") or []) if l.startswith("lr ")]
+    assert any("from step 50" in l and "1e-05" in l for l in logged), logged
+    assert [e["step"] for e in lrplan.read_events(out_dir)] == [0, 50], \
+        lrplan.read_events(out_dir)
+    print("  learning-rate plan applied inside the subprocess:", logged)
+
     # and resuming the run keeps the same layout without being told it again
     from app.core.engine.trainer import config_from_run
     rcfg = config_from_run(out_dir, 200)
     assert rcfg.mtype == cfg.mtype and rcfg.attn == cfg.attn, (rcfg.mtype, rcfg.attn)
+    # the plan comes back from its own file, without the caller passing it again
+    assert rcfg.lr_plan == cfg.lr_plan, (rcfg.lr_plan, cfg.lr_plan)
     rjob = wait(backend.start_training(rcfg), timeout=900)
     if rjob.status != "done":
         print("  log tail:", (rjob.detail.get("log") or [])[-8:])
     assert rjob.status == "done", f"xurdif resume: {rjob.message}"
     assert len(list_checkpoints(out_dir, 50)) >= 3, "resume added no snapshots"
-    print("  resumed to step 200 on the same layout")
+    # the resume kept the first launch's log, so the curve still starts near 0
+    assert (out_dir / "train.log.1").exists(), "the resume truncated train.log"
+    first = min(p["step"] for p in load_run_view(out_dir)["losses"])
+    assert first < 100, "the pre-resume half of the loss curve is missing"
+    print("  resumed to step 200 on the same layout, curve intact from step", first)
 
 
 def check_diffusers_scratch():
@@ -341,12 +543,17 @@ def main():
         print("workspace:", WORKSPACE)
         print("training defaults:")
         check_loss_defaults()
+        print("learning-rate schedules:")
+        check_lr_plan()
+        check_lr_log_merge()
+        check_vram_estimate()
         print("training runs:")
         if not diffusers_only:
             check_xurdif()
             # the class every earlier model was trained with still trains
             check_xurdif("xur-old", mtype="tinyunet_with_attention3")
         base = check_diffusers_scratch()
+        check_live_lr_edit()
         check_tinyunet("mse")
         check_tinyunet("xurdif")
         check_diffusers_finetune(base)

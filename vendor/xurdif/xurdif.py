@@ -851,6 +851,15 @@ class Trainer(object):
         self.nsamples = nsamples
         self.opts = opts
 
+        # KILN: optional per-step control hook, called at the top of every
+        # training step with the Trainer itself. None -- the default -- means a
+        # bare upstream invocation runs exactly as before, which
+        # scripts/smoke_tinyunet_parity.py::check_step_hook asserts. Kiln installs
+        # one for learning-rate scheduling (xurdiftrainer.py --lrPlan). Kept
+        # generic rather than an lr hook: a cooperative pause would need the same
+        # two lines, and the trainer honours only cancellation today.
+        self.kiln_step_hook = None
+
         self.reset_parameters()
         
         if ddim_steps > 0:
@@ -896,6 +905,8 @@ class Trainer(object):
     def train(self):
         cl = 0
         while self.step < self.train_num_steps:
+            if self.kiln_step_hook is not None:   # KILN: see __init__
+                self.kiln_step_hook(self)
             al = 0
             for i in range(self.gradient_accumulate_every):
                 data = next(self.dl).cuda()

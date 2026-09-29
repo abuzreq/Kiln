@@ -63,6 +63,11 @@ parser.add_argument("--attn", type=str, default=None, help='attention layout, e.
 # are and augment at training time; the dataset class lives in Kiln
 # (app/core/engine/train_data.py). Absent, training reads --images as before.
 parser.add_argument("--manifest", type=str, default=None, help='Kiln dataset snapshot (json)')
+# KILN: learning-rate plan (app/core/engine/lr_plan.py) -- a path to a small JSON
+# file in the run folder. The loop re-reads it when its mtime changes, so Kiln can
+# change the rate mid-run by rewriting one file, and the schedule survives a
+# resume. Absent, the rate is --lr for the whole run, exactly as upstream.
+parser.add_argument("--lrPlan", type=str, default=None, help='Kiln learning-rate plan (json)')
 
 
 opt = parser.parse_args()
@@ -193,6 +198,26 @@ if opt.load != "":
       print("loaded "+opt.load+", correct mults: "+",".join(str(x) for x in data['mults']))
     except:
       print("loaded "+opt.load+", no mults stored")
+
+# KILN: see --lrPlan above. Installed after --load so trainer.step is already the
+# resumed step the first time the hook runs. The sys.path insert is repeated from
+# the --manifest block on purpose, so the two blocks stay independently
+# re-appliable after an upstream refresh.
+if opt.lrPlan:
+    import sys, os
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")))
+    from app.core.engine import lr_plan as kiln_lr_plan
+
+    kiln_lr_watch = kiln_lr_plan.Watcher(os.path.dirname(os.path.abspath(opt.lrPlan)), opt.lr)
+
+    def kiln_apply_lr(tr, _w=kiln_lr_watch):
+        rate, changed = _w.lr_for(tr.step)
+        for g in tr.opt.param_groups:
+            g["lr"] = rate
+        if changed:
+            print("lr %.6g from step %d" % (rate, tr.step), flush=True)
+
+    trainer.kiln_step_hook = kiln_apply_lr
 
 #if opt.losstype == "lpips":
 #  trainer.model._lpips_fn = lpips_fn
