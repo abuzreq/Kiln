@@ -17,6 +17,19 @@ bp = Blueprint("library", __name__, url_prefix="/api/library")
 
 # Curated starting points. xurdif ships no official model zoo, so this is a small
 # seed list plus support for any direct .pt URL; entries download into the workspace.
+#
+# Two kinds of entry. ``info`` is a link to open in a browser -- a folder of
+# models, a project page -- and Kiln downloads nothing. ``model`` names one
+# checkpoint Kiln can fetch in a click:
+#
+#     {"name": "tnxmgl-58", "kind": "model", "label": "Tangled mesh",
+#      "url": "https://.../tnxmgl-58.pt", "arch": "tinyunet_with_attention3",
+#      "mults": [1, 2, 2, 2], "size_mb": 29,
+#      "description": "What it was trained on and what it looks like."}
+#
+# ``name`` becomes the filename in the library, so it has to survive safe_name.
+# Adding a model the engine's author shares is then one entry here rather than a
+# README edit; the URL box below stays for anything not on the list.
 DOWNLOAD_CATALOG = [
     {
         "name": "xurdif-sample-models",

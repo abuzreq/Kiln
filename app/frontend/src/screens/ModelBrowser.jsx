@@ -25,15 +25,52 @@ function GetModels({ onDone }) {
     } catch (e) { toast(e.message, "error"); }
   };
 
+  // Two kinds of catalog entry: one Kiln can fetch itself, and one that is just
+  // a link to go and look at. See DOWNLOAD_CATALOG in routes/library.py.
+  const ready = catalog.filter((c) => c.kind === "model");
+  const links = catalog.filter((c) => c.kind !== "model");
+
+  const fetchOne = async (c) => {
+    setName(c.name); setUrl(c.url);
+    try {
+      const { job: j } = await api.post("/library/download", { url: c.url, name: c.name });
+      setJob(j);
+      const done = await pollJob(j.id, setJob, 500);
+      toast(done.message, done.status === "done" ? "success" : "error");
+      setJob(null);
+      if (done.status === "done") onDone?.();
+    } catch (e) { toast(e.message, "error"); }
+  };
+
   return (
     <div className="col">
+      {ready.length > 0 && (
+        <div className="col gap-2">
+          {ready.map((c) => (
+            <div key={c.name} className="kv">
+              <span>
+                {c.label}
+                {(c.arch || c.size_mb) && (
+                  <span className="sub">
+                    {" · "}{[c.arch, c.size_mb && `${c.size_mb} MB`].filter(Boolean).join(" · ")}
+                  </span>
+                )}
+                {c.description && <div className="hint">{c.description}</div>}
+              </span>
+              <button type="button" className="btn sm" onClick={() => fetchOne(c)} disabled={!!job}>
+                Download
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       <Text label="Name" value={name} onChange={setName} placeholder="my-download"
         tip="Filename for the downloaded .pt in the library." />
       <Text label="URL" value={url} onChange={setUrl} placeholder="https://…/model.pt"
         tip="Direct link to a .pt checkpoint." />
       {job && <div><Progress value={job.progress} /><div className="sub">{job.message}</div></div>}
       <button type="button" className="btn primary" onClick={download} disabled={!url || !name || !!job}>Download into library</button>
-      {catalog.map((c) => (
+      {links.map((c) => (
         <div key={c.name} className="kv">
           <span>{c.label}</span>
           <a className="btn sm" href={c.url} target="_blank" rel="noreferrer">Open</a>
