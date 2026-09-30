@@ -170,7 +170,7 @@ def _nvidia_gpu_present() -> bool:
     try:
         out = subprocess.run(
             [exe, "--query-gpu=name", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=4,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=4,
         )
         return out.returncode == 0 and bool(out.stdout.strip())
     except Exception:  # noqa: BLE001

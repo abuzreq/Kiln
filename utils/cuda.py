@@ -53,7 +53,7 @@ def driver_version() -> float | None:
     try:
         out = subprocess.run(
             [exe, "--query-gpu=driver_version", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=6,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=6,
         )
     except Exception:  # noqa: BLE001
         return None

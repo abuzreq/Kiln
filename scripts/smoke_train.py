@@ -15,6 +15,7 @@ it. The Diffusers legs run anywhere.
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -253,6 +254,50 @@ def check_vram_estimate():
     assert parse_mults("1,2,2,4") == standard and parse_mults(None) == narrow
     print("  VRAM estimate tracks width: %s MiB at 512px batch 4 for %s / %s / %s"
           % (seen, narrow, standard, deep))
+
+
+def check_child_stream_decoding():
+    """A tqdm progress bar must not be able to kill the log reader.
+
+    tqdm draws with U+2588. Read back with the locale encoding -- cp1252 on a
+    default Windows install -- that raised UnicodeDecodeError inside
+    ``for line in proc.stdout``, which killed the reader thread. With nobody
+    draining the pipe the trainer then blocked forever on write() as soon as the
+    8KB buffer filled, which is the first snapshot. It looked like a hung GPU:
+    the process sat at 0 CPU with the sampling bar frozen part-drawn, and the
+    job stayed "running" for ever because the thread died before it could set a
+    final status.
+
+    The child writes raw UTF-8 bytes, so the case is reproduced whatever the
+    child's own locale is -- what is under test here is the reader.
+    """
+    from app.core.engine.trainer import _CHILD_IO
+
+    child = "\n".join([
+        "import sys",
+        "FULL = chr(0x2588)",
+        # tqdm draws fractional progress with the partial blocks U+2589..U+258F.
+        # U+258D encodes to E2 96 8D, and 0x8D is one of the five bytes cp1252
+        # leaves undefined -- that is the byte that actually killed the reader.
+        "PARTIAL = [chr(c) for c in range(0x2589, 0x2590)]",
+        "for i in range(400):",
+        "    line = chr(13) + '%3d%%|' % (i * 100 // 400) + FULL * 18 + PARTIAL[i % 7] + '| %d/400' % i",
+        "    sys.stdout.buffer.write(line.encode('utf-8'))",
+        "    sys.stdout.buffer.flush()",
+        "sys.stdout.buffer.write(chr(10).join(['', 'done', '']).encode('utf-8'))",
+    ])
+    proc = subprocess.Popen([sys.executable, "-u", "-c", child], **_CHILD_IO)
+    lines = [ln.rstrip() for ln in proc.stdout]        # the decode that used to raise
+    proc.wait(timeout=60)
+    assert proc.returncode == 0, proc.returncode
+    assert any(ln.endswith("done") for ln in lines), lines[-3:]
+    assert any(chr(0x2588) in ln for ln in lines), "block characters did not survive the decode"
+    # Bytes, not characters: it is the encoded size that fills the OS pipe, and
+    # filling it is what turned a dead reader into a deadlocked trainer.
+    written = sum(len(x.encode("utf-8")) for x in lines)
+    assert written > 16384, "child wrote %d bytes, too little to fill the pipe buffer" % written
+    print("  log reader survives a %d-line tqdm bar (%d KiB, well past the 8 KiB pipe buffer)"
+          % (len(lines), written // 1024))
 
 
 def check_live_lr_edit():
@@ -547,6 +592,7 @@ def main():
         check_lr_plan()
         check_lr_log_merge()
         check_vram_estimate()
+        check_child_stream_decoding()
         print("training runs:")
         if not diffusers_only:
             check_xurdif()

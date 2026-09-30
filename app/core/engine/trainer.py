@@ -29,6 +29,24 @@ _AVG_RE = re.compile(r"average loss:\s+([\d.eE+-]+)")
 # so it matches neither parser above (_STEP_RE is anchored on "^<digits>:").
 _LR_RE = re.compile(r"^lr\s+([\d.eE+-]+)\s+from step\s+(\d+)\s*$")
 
+# How a trainer subprocess's output is wired back. In one place so the smoke
+# test can prove these exact settings survive a tqdm progress bar.
+#
+# Not bare text=True: that decodes with the locale encoding, which on a default
+# Windows install is cp1252. tqdm draws its sampling bar with U+2588 block
+# characters, so the first snapshot fed the reader bytes cp1252 has no mapping
+# for; the thread died of UnicodeDecodeError, and with nobody draining the pipe
+# the trainer blocked forever on write() once the 8KB buffer filled -- at the
+# first snapshot, every time, looking exactly like a hung GPU.
+# errors="replace" means a decode can no longer raise at all.
+_CHILD_IO = {
+    "stdout": subprocess.PIPE,
+    "stderr": subprocess.STDOUT,
+    "encoding": "utf-8",
+    "errors": "replace",
+    "bufsize": 1,
+}
+
 # How many previous launches' logs to keep beside train.log. A continue used to
 # truncate the log, which threw away the loss history you need in order to judge
 # whether a rate drop helped.
@@ -71,7 +89,8 @@ def interpreter_cuda_report(py: str) -> dict:
             "torch.cuda.is_available()]))")
     try:
         out = subprocess.check_output(
-            [py, "-c", code], text=True, stderr=subprocess.DEVNULL, timeout=300,
+            [py, "-c", code], text=True, encoding="utf-8", errors="replace",
+            stderr=subprocess.DEVNULL, timeout=300,
         ).strip()
         version, cuda, ok = json.loads(out.splitlines()[-1])
         report = {"available": bool(ok), "version": version, "cuda": cuda}
@@ -603,10 +622,7 @@ def _run(job: Job, cfg: TrainConfig):
         proc = subprocess.Popen(
             cmd,
             cwd=str(VENDOR_XURDIF),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
+            **_CHILD_IO,
         )
     except Exception as e:  # noqa: BLE001
         job.status = "error"
