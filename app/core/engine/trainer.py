@@ -314,8 +314,16 @@ def list_checkpoints(out_dir: str | Path, save_every: int | None = None) -> list
 # this sum; dividing by it normalises any other width set against that baseline.
 _BASE_MULTS = (1, 2, 2, 2)
 _FIXED_MIB = 825.0          # CUDA context + framework, with the weights term split out
-_PER_IMG_512_MIB = 715.0    # activations per 512px image at _BASE_MULTS
+_PER_IMG_512_MIB = 715.0    # activations per 512px image at _BASE_MULTS, with AMP
 _BYTES_PER_PARAM = 20       # fp32 weights + grads + two Adam moments + the EMA copy
+# Activations without AMP, relative to with. Measured on the RTX 3060 by
+# differencing the allocator peak between two batch sizes at fixed settings, so
+# every constant term -- context, weights, grads, moments, EMA -- cancels and
+# what is left is activations per image: 733 MiB with AMP against 1436 without,
+# at 256px and at 512px independently (both agreed to within 1%). Close to the
+# 2.0 that fp16 activations would predict, and the measured number is used
+# rather than that 2.0 because the cast is not applied to every tensor.
+_FP32_ACT_FACTOR = 1.96
 _param_cache: dict[tuple, int] = {}
 
 
@@ -382,24 +390,40 @@ def _weights_mib(mults, mtype=None, attn=None) -> float:
     return param_count(mults, mtype, attn) * _BYTES_PER_PARAM / (1024.0 * 1024.0)
 
 
+def _per_img_mib(image_size: int, mults, amp: bool) -> float:
+    """Activation memory for one image at these settings."""
+    scale = _PER_IMG_512_MIB if amp else _PER_IMG_512_MIB * _FP32_ACT_FACTOR
+    return scale * (image_size / 512.0) ** 2 * _act_scale(mults)
+
+
 def estimate_peak_mib(image_size: int, batch_size: int, mults=None,
-                      mtype: str | None = None, attn: str | None = None) -> int:
+                      mtype: str | None = None, attn: str | None = None,
+                      amp: bool = False) -> int:
     """Rough peak-VRAM estimate for the tinyunet trainer.
 
-    Fitted from measured peaks on an RTX 3060 (dim=64, mults 1,2,2,2, AMP):
-    activation memory scales ~ (size/512)^2 * 715 MiB per image. The rest is the
-    CUDA context plus weights, gradients, Adam's two moments and the EMA copy --
-    which is where a wider network actually costs, since its extra activations
-    sit at the spatially smallest levels.
+    Fitted from measured peaks on an RTX 3060 (dim=64, mults 1,2,2,2):
+    activation memory scales ~ (size/512)^2 * 715 MiB per image with AMP, and
+    ~1.96x that without. The rest is the CUDA context plus weights, gradients,
+    Adam's two moments and the EMA copy -- which is where a wider network
+    actually costs, since its extra activations sit at the spatially smallest
+    levels.
+
+    ``amp`` defaults to False because that is what ``TrainConfig`` and a fresh
+    form both default to, and because the fit only ever covered the AMP case:
+    a 256px batch-8 run estimated at 2327 MiB really used about 4.2 GB, so
+    nothing warned before it exhausted a 6 GB card. Guessing high is the safe
+    direction -- the failure it prevents is a silent fall into the Windows
+    shared-memory fallback, which does not raise, it just stops.
     """
-    per_img = _PER_IMG_512_MIB * (image_size / 512.0) ** 2 * _act_scale(mults)
+    per_img = _per_img_mib(image_size, mults, amp)
     return int(per_img * max(batch_size, 1) + _FIXED_MIB + _weights_mib(mults, mtype, attn))
 
 
 def recommended_batch(image_size: int, total_mib: int, mults=None,
-                      mtype: str | None = None, attn: str | None = None) -> int:
+                      mtype: str | None = None, attn: str | None = None,
+                      amp: bool = False) -> int:
     """Largest batch that should fit comfortably (avoids sysmem-fallback cliff)."""
-    per_img = _PER_IMG_512_MIB * (image_size / 512.0) ** 2 * _act_scale(mults)
+    per_img = _per_img_mib(image_size, mults, amp)
     budget = total_mib * 0.82 - _FIXED_MIB - _weights_mib(mults, mtype, attn)
     return max(1, int(budget / per_img)) if per_img > 0 else 1
 

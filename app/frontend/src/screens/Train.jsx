@@ -399,11 +399,14 @@ export default function Train() {
         mults: form.mults || "",
         mtype: form.mtype || "",
         attn: form.attn || "",
+        // Mixed precision roughly halves the activation memory, which is the
+        // whole batch term -- without it the readout is ~2x out.
+        amp: form.amp ? "1" : "0",
       });
       api.get(`/train/estimate?${q}`).then(setEst).catch(() => {});
     }, 250);
     return () => clearTimeout(t);
-  }, [form.image_size, form.batch_size, form.mults, form.mtype, form.attn]);
+  }, [form.image_size, form.batch_size, form.mults, form.mtype, form.attn, form.amp]);
 
   // The schedules, compiled by the server against this run's own base rate and
   // step target, so the step numbers shown are the ones the trainer will use.

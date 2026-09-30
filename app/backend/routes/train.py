@@ -54,13 +54,16 @@ def estimate():
     mults = request.args.get("mults") or None
     mtype = request.args.get("mtype") or None
     attn = request.args.get("attn") or None
+    # Mixed precision roughly halves activation memory, so the readout is wrong
+    # by ~2x on the whole batch term if it does not know which way the form is set.
+    amp = str(request.args.get("amp", "")).lower() in ("1", "true", "yes", "on")
     dev = get_device_info()
     gpus = dev.get("gpus") or []
     total = gpus[0]["total_mem_mb"] if gpus else 0
     free = gpus[0].get("free_mem_mb", 0) if gpus else 0
     try:
-        est = estimate_peak_mib(image_size, batch_size, mults, mtype, attn)
-        rec = recommended_batch(image_size, total, mults, mtype, attn) if total else None
+        est = estimate_peak_mib(image_size, batch_size, mults, mtype, attn, amp)
+        rec = recommended_batch(image_size, total, mults, mtype, attn, amp) if total else None
     except Exception as e:  # noqa: BLE001
         return err(f"could not size that architecture: {e}", 400)
     return ok({
@@ -122,7 +125,10 @@ def presets_view() -> dict:
     total = _gpu_total_mib()
     out = {}
     for rank, (pid, p) in enumerate(CONFIG_PRESETS.items()):
-        est = estimate_peak_mib(p["image_size"], p["batch_size"], p["mults"])
+        # No preset sets AMP, so these are costed the way a fresh form would run
+        # them -- EMPTY_FORM.amp is false. Costing them with AMP would badge a
+        # preset as fitting that then does not.
+        est = estimate_peak_mib(p["image_size"], p["batch_size"], p["mults"], amp=False)
         # ``order`` because Flask sorts JSON keys alphabetically, which would
         # hand the picker "Detailed, Quick, Standard" -- declaration order here
         # runs cheapest to richest and is what the list should show.
@@ -338,11 +344,12 @@ def _vram_warning(job, cfg, backend_name: str) -> str | None:
     if backend_name != "xurdif":
         return None
     total = _gpu_total_mib()
-    est = estimate_peak_mib(cfg.image_size, cfg.batch_size, cfg.mults, cfg.mtype, cfg.attn)
+    est = estimate_peak_mib(cfg.image_size, cfg.batch_size, cfg.mults, cfg.mtype, cfg.attn,
+                            cfg.amp)
     job.detail["vram_estimate_mib"] = est
     if not (total and est > 0.85 * total):
         return None
-    rec = recommended_batch(cfg.image_size, total, cfg.mults, cfg.mtype, cfg.attn)
+    rec = recommended_batch(cfg.image_size, total, cfg.mults, cfg.mtype, cfg.attn, cfg.amp)
     warning = (
         f"Estimated peak VRAM ~{est} MiB may exceed your {total} MiB GPU — training "
         f"can spill to system RAM and run ~10x slower. Try batch size ≤ {rec} at "

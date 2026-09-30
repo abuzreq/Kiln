@@ -247,13 +247,48 @@ def check_vram_estimate():
 
     narrow, standard, deep = [1, 2, 2, 2], [1, 2, 2, 4], [1, 2, 2, 4, 4]
     assert param_count(narrow) < param_count(standard) < param_count(deep)
-    seen = [estimate_peak_mib(512, 4, m) for m in (narrow, standard, deep)]
+    seen = [estimate_peak_mib(512, 4, m, amp=True) for m in (narrow, standard, deep)]
     assert seen[0] < seen[1] < seen[2], seen
-    # the fit was measured at 1,2,2,2, so that point must not have moved
+    # the fit was measured at 1,2,2,2 with AMP, so that point must not have moved
     assert abs(seen[0] - 3760) < 20, seen[0]
     assert parse_mults("1,2,2,4") == standard and parse_mults(None) == narrow
     print("  VRAM estimate tracks width: %s MiB at 512px batch 4 for %s / %s / %s"
           % (seen, narrow, standard, deep))
+
+
+def check_vram_estimate_amp():
+    """Running without AMP must cost more, and the estimate has to say so.
+
+    It did not, and the omission was expensive: the fit only ever covered the
+    AMP case while TrainConfig and the form both default AMP off, so a 256px
+    batch-8 run was estimated at 2327 MiB and really used about 4.2 GB. Nothing
+    warned, and the run died on a 6 GB card -- silently, because CUDA falls into
+    the Windows shared-memory fallback rather than raising.
+    """
+    from app.core.engine.trainer import estimate_peak_mib, recommended_batch
+
+    mults = [1, 2, 2, 2]
+    on = estimate_peak_mib(256, 8, mults, amp=True)
+    off = estimate_peak_mib(256, 8, mults, amp=False)
+    assert off > on, (on, off)
+    # The default is the conservative one: guessing high only costs a warning,
+    # guessing low costs the run.
+    assert estimate_peak_mib(256, 8, mults) == off
+
+    # Only activations scale with AMP, so difference two batch sizes to isolate
+    # them -- context, weights, grads, moments and the EMA copy all cancel.
+    def act(amp):
+        return (estimate_peak_mib(512, 5, mults, amp=amp)
+                - estimate_peak_mib(512, 1, mults, amp=amp)) / 4.0
+    ratio = act(False) / act(True)
+    assert 1.9 <= ratio <= 2.05, ratio          # measured 1.96 on an RTX 3060
+
+    # and the batch advice has to move with it, or it recommends a batch that
+    # cannot run: this card was told 23 when 11 was the honest answer.
+    assert recommended_batch(256, 6144, mults, amp=False) < \
+           recommended_batch(256, 6144, mults, amp=True)
+    print("  AMP: %d MiB on / %d MiB off at 256px batch 8; activations x%.2f without it"
+          % (on, off, ratio))
 
 
 def check_child_stream_decoding():
@@ -592,6 +627,7 @@ def main():
         check_lr_plan()
         check_lr_log_merge()
         check_vram_estimate()
+        check_vram_estimate_amp()
         check_child_stream_decoding()
         print("training runs:")
         if not diffusers_only:
