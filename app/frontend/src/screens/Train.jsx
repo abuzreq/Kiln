@@ -1069,7 +1069,7 @@ export default function Train() {
                       </button>
                     </div>
                   )}
-                  <div className="preview-box preview-scroll preview-h-lg mt-2">
+                  <div className="preview-box preview-scroll preview-natural preview-h-lg mt-2">
                     {sample ? <img src={mediaUrl(sample)} alt="sample" /> : <span className="sub">Sample grid appears at the first snapshot.</span>}
                   </div>
                   {/* Below the sample, not above it: the command is reference you

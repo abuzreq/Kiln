@@ -1098,6 +1098,15 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .preview-box img { max-width: 100%; max-height: 100%; object-fit: contain; }
 .preview-scroll { overflow: auto; align-items: flex-start; justify-content: flex-start; }
 .preview-scroll img { max-height: none; width: 100%; height: auto; object-fit: contain; }
+/* A snapshot shown at its own size rather than stretched to the column.
+   ``preview-scroll`` sets width:100% so a tall sample grid fills a narrow
+   sidebar, which was right when the run view had one; in the wide column it
+   blew a 256px sample up to 905px inside a 280px box, so two thirds of it was
+   below the scroll line. Never upscaling keeps the whole sample visible and
+   shows the model at the resolution it actually paints. */
+.preview-box.preview-natural { justify-content: center; }
+.preview-box.preview-natural img { width: auto; max-width: 100%; }
+
 .preview-h { height: 240px; }
 .preview-h-lg { height: 280px; }
 .preview-square { aspect-ratio: 1; }
