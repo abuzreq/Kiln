@@ -84,8 +84,8 @@ step by step in front of you, and can be paused or stopped and kept as it is.
   harmonize pass to settle the seam.
 * **CLIP guidance** steers sampling towards a prompt or a reference image.
 * **Finish** applies contrast, gamma and sharpening, and upscales.
-* Layers, saved assets, and a Results history sit alongside; any result can become a layer or be
-  saved.
+* Layers and saved assets sit alongside the canvas, and a Results history sits under it; any result
+  can become a layer or be saved.
 * Downloaded PNGs carry their settings inside them, so opening one later can restore the run.
 
 Shortcuts: `Ctrl+Z` / `Ctrl+Shift+Z` undo and redo, `Ctrl+D` clears the mask, `Ctrl+Shift+I`

@@ -1065,11 +1065,13 @@ export default function Play() {
               onDragLeave={() => setDragOver(false)}
               onDrop={(e) => { e.preventDefault(); setDragOver(false); const f = e.dataTransfer.files?.[0]; if (f) loadFile(f); }}
             >
-              <PlayCanvas brushable={!!canvasImage} />
+              <div className="play-main">
+                <PlayCanvas brushable={!!canvasImage} />
+                <ResultsPanel />
+              </div>
               <div className="play-rail">
                 <AssetsPanel />
                 <LayersPanel />
-                <ResultsRail />
               </div>
             </div>
           )}
@@ -1370,12 +1372,14 @@ function CaptureButton({ image, card, label = "Save", className = "btn sm" }) {
   );
 }
 
-/** Create's output column: every image this session produced, newest first.
+/** Every image this session produced, newest first.
  *
- *  Sits beside the canvas rather than under it — a vertical rail keeps the
- *  full history in view while you work instead of scrolling sideways through it.
+ *  Sits directly under the canvas, as wide as it, in a wrapping grid. A side
+ *  rail left it a 232px column under Assets and Layers, where only the first
+ *  few ever showed; under the picture it has the canvas's full width, and it is
+ *  where a batch or a queue of runs lands.
  */
-function ResultsRail() {
+function ResultsPanel() {
   const {
     history, frame, placeHistory, removeHistory, clearHistory,
     addHistoryAsLayer, applyCard, activeLayer,
@@ -1383,12 +1387,12 @@ function ResultsRail() {
   if (!history.length) return null;
 
   return (
-    <aside className="card results-rail" aria-label="Results">
+    <section className="card results-panel" aria-label="Results">
       <div className="row between center mb-2">
         <h3 className="mb-0">Results <span className="sub">· {history.length}</span></h3>
         <button type="button" className="btn ghost sm" onClick={clearHistory}>Clear</button>
       </div>
-      <div className="results-rail-list">
+      <div className="results-grid">
         {history.map((h, i) => {
           const selected = h.img === frame;
           const seed = h.card?.params?.seed;
@@ -1428,7 +1432,7 @@ function ResultsRail() {
           );
         })}
       </div>
-    </aside>
+    </section>
   );
 }
 
