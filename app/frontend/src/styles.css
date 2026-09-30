@@ -38,6 +38,12 @@
   --topbar-h: 48px;
   --content-pad-y: 12px;
   --sidebar-w: 320px;
+  /* Create's canvas column stops growing here, and its picture area stops
+     growing at --canvas-max-h. Past them a wide or tall monitor only adds
+     empty ground around a picture that is not getting any bigger. */
+  --canvas-max-w: 1100px;
+  --canvas-max-h: 960px;
+  --rail-w: 232px;
   font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
 }
 
@@ -153,7 +159,14 @@ body {
   .tab-runbar::after { animation: none; left: 0; width: 100%; opacity: 0.6; }
 }
 
-.play { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+/* The whole screen is capped, not just the canvas, so the model picker and
+   sample settings above keep lining up with the columns below them. The cap is
+   the three columns at their widest: tools, canvas, rail. */
+.play {
+  display: flex; flex-direction: column; gap: 10px; min-height: 0;
+  width: 100%; margin-inline: auto;
+  max-width: calc(var(--sidebar-w) + var(--canvas-max-w) + var(--rail-w) + 2 * var(--s-3));
+}
 .play-body { display: grid; grid-template-columns: minmax(260px, var(--sidebar-w)) minmax(0, 1fr); gap: var(--s-3); align-items: start; }
 .play-tools { min-width: 0; }
 @media (max-width: 900px) {
@@ -163,12 +176,13 @@ body {
 .canvas-card .hero {
   position: relative; background: var(--bg-2); border: 1px solid var(--line);
   border-radius: var(--radius-sm); min-height: 360px;
-  max-height: calc(100vh - var(--topbar-h) - var(--content-pad-y) * 2 - 160px);
+  max-height: min(calc(100vh - var(--topbar-h) - var(--content-pad-y) * 2 - 160px), var(--canvas-max-h));
   display: flex; align-items: center; justify-content: center; overflow: hidden;
 }
 .canvas-card .hero img {
   max-width: 100%;
-  max-height: calc(100vh - var(--topbar-h) - var(--content-pad-y) * 2 - 170px);
+  max-height: min(calc(100vh - var(--topbar-h) - var(--content-pad-y) * 2 - 170px),
+                  calc(var(--canvas-max-h) - 10px));
   object-fit: contain; display: block;
   /* Checkerboard so a transparent-black blank canvas is visible on the dark UI. */
   background-color: var(--bg-1);
@@ -349,9 +363,11 @@ body {
 .btn.xs { padding: 1px 6px; font-size: var(--fs-xs); }
 .btn.xs.w-full { width: 100%; margin-top: 4px; }
 
-/* Canvas + the right rail (Layers, then Results). The rail collapses under the
-   canvas on narrow viewports, where a side column would squeeze the image too
-   far. */
+/* The canvas with Results under it, and the right rail (Assets, Layers). The
+   rail drops under the canvas on narrow viewports, where a side column would
+   squeeze the image too far. */
+.play-main { display: flex; flex-direction: column; gap: var(--s-3); min-width: 0; }
+.play-main > .col { min-width: 0; }
 .play-rail {
   display: flex; flex-direction: column; gap: var(--s-3);
   min-width: 0; position: sticky; top: 0;
@@ -361,44 +377,33 @@ body {
 @media (max-width: 1100px) { .play-rail { position: static; max-height: none; overflow: visible; } }
 .play-stage.with-rail {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 232px;
+  grid-template-columns: minmax(0, 1fr) var(--rail-w);
   gap: var(--s-3);
   align-items: start;
 }
 @media (max-width: 1100px) {
   .play-stage.with-rail { grid-template-columns: 1fr; }
-  .results-rail-list {
-    flex-direction: row;
-    max-height: none;
-    overflow-x: auto;
-    overflow-y: hidden;
-  }
-  .results-rail .play-result { width: 112px; flex: 0 0 112px; }
+  /* One column: Layers belongs next to the picture it edits, so the rail goes
+     between the canvas and Results rather than under a long results grid. */
+  .play-main { display: contents; }
+  .play-rail { order: 1; }
+  .results-panel { order: 2; }
 }
-.results-rail { padding: var(--s-2) var(--s-3); min-width: 0; }
-.results-rail .play-result { width: 100%; }
-.results-rail .play-result-thumb {
+
+/* Results: a grid as wide as the canvas. No scroller of its own -- the session
+   keeps at most HISTORY_MAX images, so the page scrolls instead. */
+.results-panel { padding: var(--s-2) var(--s-3) var(--s-3); min-width: 0; }
+.results-grid {
+  display: grid;
+  /* 144px is the narrowest cell whose four actions still fit one row. */
+  grid-template-columns: repeat(auto-fill, minmax(144px, 1fr));
+  gap: var(--s-3) 10px;
+}
+.results-panel .play-result { width: 100%; min-width: 0; }
+.results-panel .play-result-thumb {
   width: 100%;
   height: auto;
   aspect-ratio: 1;
-}
-/* Four actions never fit one row in a narrow column — give them a 2x2 block. */
-.results-rail .play-result-actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 3px;
-}
-.results-rail .play-result-actions .tip-wrap { display: flex; }
-.results-rail .play-result-actions .btn { width: 100%; }
-
-.results-rail-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  max-height: calc(100vh - var(--topbar-h) - var(--content-pad-y) * 2 - 190px);
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding-right: 2px;
 }
 .play-result {
   flex: 0 0 auto;
