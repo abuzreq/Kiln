@@ -277,6 +277,8 @@ def _build_model(cfg: DiffusersTrainConfig):
 
     from app.core import backends
 
+    from . import scheduler_config_of
+
     backend, ref = backends.resolve(cfg.base_model)
     if backend.name != "diffusers":
         raise ValidationError(
@@ -284,12 +286,9 @@ def _build_model(cfg: DiffusersTrainConfig):
             "cannot continue from one. Use the xurdif trainer for xurdif models.")
     adapter, meta = backend.load(ref, device="cpu")
     net = adapter.wrapped
-    sched = {"_class_name": "DDIMScheduler",
-             "num_train_timesteps": meta.extra.get("num_train_timesteps", 1000),
-             "beta_schedule": meta.extra.get("beta_schedule", "linear"),
-             "beta_start": meta.extra.get("beta_start", 0.0001),
-             "beta_end": meta.extra.get("beta_end", 0.02),
-             "prediction_type": "epsilon" if meta.pred == "eps" else "sample"}
+    # The base model's own schedule, trained_betas included: continuing a
+    # cosine model on linear noise would retrain it at the wrong noise levels.
+    sched = scheduler_config_of(meta)
 
     if cfg.mode == "finetune":
         return net, sched, list(net.parameters()), f"fine-tuning {meta.name}"
@@ -314,16 +313,22 @@ def _build_model(cfg: DiffusersTrainConfig):
 
 
 def _noise_scheduler(sched_cfg: dict):
-    """The scheduler that noises training batches."""
+    """The scheduler that noises training batches.
+
+    Built from the very dict ``_save_snapshot`` writes, through the same
+    ``schedule_from_config`` the sampler uses to read it back. Reading the
+    named-schedule keys here by hand once dropped ``trained_betas``: the tiny
+    presets trained on linear noise and were then sampled on cosine.
+    """
+    from dataclasses import replace
+
     from diffusers import DDPMScheduler
 
-    return DDPMScheduler(
-        num_train_timesteps=int(sched_cfg["num_train_timesteps"]),
-        beta_schedule=sched_cfg.get("beta_schedule", "linear"),
-        beta_start=sched_cfg.get("beta_start", 0.0001),
-        beta_end=sched_cfg.get("beta_end", 0.02),
-        prediction_type=sched_cfg.get("prediction_type", "epsilon"),
-    )
+    from . import schedule_from_config
+
+    schedule = replace(schedule_from_config(sched_cfg),
+                       prediction_type=sched_cfg.get("prediction_type", "epsilon"))
+    return DDPMScheduler(**schedule.scheduler_kwargs())
 
 
 def _save_snapshot(net, cfg: DiffusersTrainConfig, sched_cfg: dict, out_dir: Path,

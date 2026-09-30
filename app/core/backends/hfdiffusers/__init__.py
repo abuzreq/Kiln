@@ -96,26 +96,7 @@ class DiffusersBackend(Backend):
         a real user choice; here the value is a property of the trained weights,
         and overriding it is how you get a plausible-looking but wrong image.
         """
-        import numpy as np
-
-        meta = self.describe(ref)
-        x = meta.extra
-        trained = x.get("trained_betas")
-        return BetaSchedule(
-            num_train_timesteps=int(x.get("num_train_timesteps", 1000)),
-            trained_betas=np.asarray(trained, dtype=np.float32) if trained else None,
-            beta_schedule=x.get("beta_schedule", "linear"),
-            beta_start=x.get("beta_start", 0.0001),
-            beta_end=x.get("beta_end", 0.02),
-            # Always epsilon, whatever the model itself predicts. The denoise
-            # loop converts the model's output to eps *before* calling
-            # scheduler.step (see sampler.Sampler.run), so the scheduler is only
-            # ever handed noise. Deriving this from the model's own
-            # prediction_type made an x0-predicting model take the wrong step and
-            # silently produced a different image -- caught by the conversion
-            # parity test, which samples the same weights through both backends.
-            prediction_type="epsilon",
-        )
+        return schedule_from_config(self.describe(ref).extra)
 
     def to_display(self, x0, meta=None):
         """Straight [-1,1] -> [0,1] by default, with one documented exception.
@@ -231,23 +212,56 @@ class DiffusersBackend(Backend):
         # Carry the schedule across: without scheduler_config.json the merged
         # model would silently fall back to defaults, which is the same class of
         # bug as using the wrong betas in the first place.
-        sched = {k: meta.extra[k] for k in
-                 ("num_train_timesteps", "beta_schedule", "beta_start", "beta_end")}
-        if meta.extra.get("trained_betas"):
-            # A converted xurdif model pins its exact curve; naming a schedule
-            # instead would quietly resample it on a different one.
-            sched["trained_betas"] = list(meta.extra["trained_betas"])
-        sched["_class_name"] = "DDIMScheduler"
-        sched["prediction_type"] = "epsilon" if meta.pred == "eps" else "sample"
         (dest / "scheduler_config.json").write_text(
-            json.dumps(sched, indent=2), encoding="utf-8")
+            json.dumps(scheduler_config_of(meta), indent=2), encoding="utf-8")
         (dest / "kiln_merge.json").write_text(json.dumps(info, indent=2), encoding="utf-8")
         loader.forget(str(dest))
         return str(dest)
+
+
+def schedule_from_config(x: dict) -> BetaSchedule:
+    """A ``BetaSchedule`` from a scheduler config, or from a model's ``extra``.
+
+    The two share key names (see ``loader.describe``), so sampling a saved model
+    and training the model that is about to be saved go through this one
+    function -- which is what keeps them on the same noise levels.
+    """
+    import numpy as np
+
+    trained = x.get("trained_betas")
+    return BetaSchedule(
+        num_train_timesteps=int(x.get("num_train_timesteps", 1000)),
+        trained_betas=np.asarray(trained, dtype=np.float32) if trained else None,
+        beta_schedule=x.get("beta_schedule", "linear"),
+        beta_start=x.get("beta_start", 0.0001),
+        beta_end=x.get("beta_end", 0.02),
+        # Always epsilon, whatever the model itself predicts. The denoise
+        # loop converts the model's output to eps *before* calling
+        # scheduler.step (see sampler.Sampler.run), so the scheduler is only
+        # ever handed noise. Deriving this from the model's own
+        # prediction_type made an x0-predicting model take the wrong step and
+        # silently produced a different image -- caught by the conversion
+        # parity test, which samples the same weights through both backends.
+        prediction_type="epsilon",
+    )
+
+
+def scheduler_config_of(meta) -> dict:
+    """The ``scheduler_config.json`` to write for a model derived from ``meta``."""
+    sched = {k: meta.extra[k] for k in
+             ("num_train_timesteps", "beta_schedule", "beta_start", "beta_end")}
+    if meta.extra.get("trained_betas"):
+        # A converted xurdif model pins its exact curve; naming a schedule
+        # instead would quietly resample it on a different one.
+        sched["trained_betas"] = list(meta.extra["trained_betas"])
+    sched["_class_name"] = "DDIMScheduler"
+    sched["prediction_type"] = "epsilon" if meta.pred == "eps" else "sample"
+    return sched
 
 
 def _installed(pkg: str) -> bool:
     return importlib.util.find_spec(pkg) is not None
 
 
-__all__ = ["DiffusersBackend", "graph", "loader"]
+__all__ = ["DiffusersBackend", "graph", "loader", "schedule_from_config",
+           "scheduler_config_of"]
