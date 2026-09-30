@@ -8,7 +8,7 @@ import {
 } from "../attnLayout.js";
 import ArchSketch, { levelInfo } from "../components/ArchSketch.jsx";
 import LossChart from "../components/LossChart.jsx";
-import { LrScheduleField, LrPlanModal, LiveRateCard, fmtRate } from "../components/LrSchedule.jsx";
+import { LrScheduleField, LiveRateCard, fmtRate } from "../components/LrSchedule.jsx";
 import CheckpointGallery from "../components/CheckpointGallery.jsx";
 
 export function statusPillClass(status) {
@@ -193,9 +193,6 @@ export default function Train() {
   const arrivedWithDataset = useRef("");
   const [continueSteps, setContinueSteps] = useState(280000);
   const [lrPresets, setLrPresets] = useState({});
-  // null, or which schedule editor is open: "form" for a run being configured,
-  // "live" for one already going (or stopped and about to be continued).
-  const [lrEditor, setLrEditor] = useState(null);
   const [lrBusy, setLrBusy] = useState(false);
   // What the server last said the schedule is. run.json carries a summary too,
   // but it goes stale the moment the rate is changed live.
@@ -519,7 +516,6 @@ export default function Train() {
       const r = await api.put(`/runs/${encodeURIComponent(inspectRun)}/lr_plan`, body);
       setLiveSummary(r.summary);
       setContinuePlan(r.plan);
-      setLrEditor(null);
       toast(r.at_step != null
         ? `Learning rate ${fmtRate(r.lr_now)} from step ${r.at_step} — applies ${r.applies}`
         : `Schedule set to ${r.summary} — applies on the ${r.applies}`, "success");
@@ -626,26 +622,6 @@ export default function Train() {
   useEffect(() => {
     if (showLogs && logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [logLines.length, showLogs]);
-
-  // One editor, two callers: configuring a run writes into the form, a live or
-  // stopped run writes through the server so the trainer sees it.
-  const lrModal = lrEditor && (
-    <LrPlanModal
-      presets={lrPresets}
-      plan={lrEditor === "live"
-        ? (continuePlan || job?.detail?.lr_plan || runView?.lr_plan)
-        : (form.lr_plan || lrPresets[form.lr_schedule]?.plan)}
-      baseLr={lrEditor === "live" ? (liveRate || runMeta.lr) : form.lr}
-      title={lrEditor === "live" ? `Learning rate · ${inspectRun}` : "Learning rate schedule"}
-      onClose={() => setLrEditor(null)}
-      onApply={(spec) => {
-        if (lrEditor === "live") { putLrPlan(spec); return; }
-        if (spec.preset) setForm((f) => ({ ...f, lr_schedule: spec.preset, lr_plan: null }));
-        else setForm((f) => ({ ...f, lr_schedule: "custom", lr_plan: spec }));
-        setLrEditor(null);
-      }}
-    />
-  );
 
   if (!info) return <Loading>Loading training…</Loading>;
 
@@ -879,8 +855,12 @@ export default function Train() {
                 <LrScheduleField
                   presets={lrPresets}
                   value={form.lr_plan ? "custom" : form.lr_schedule}
+                  plan={form.lr_plan || lrPresets[form.lr_schedule]?.plan}
+                  baseLr={form.lr}
                   onChange={(id) => setForm((f) => ({ ...f, lr_schedule: id, lr_plan: null }))}
-                  onEdit={() => setLrEditor("form")}
+                  onApply={(spec) => setForm((f) => (spec.preset
+                    ? { ...f, lr_schedule: spec.preset, lr_plan: null }
+                    : { ...f, lr_schedule: "custom", lr_plan: spec }))}
                   disabled={running}
                 />
                 </div>
@@ -1035,7 +1015,7 @@ export default function Train() {
       )}
 
       {showRun && (
-        <div className="work-split">
+        <div className="work-split run-split">
           <div className="col">
             <div className="card">
               <h3>{running ? "Live output" : `Run · ${inspectRun}`}</h3>
@@ -1056,20 +1036,25 @@ export default function Train() {
                     <LiveRateCard
                       lr={liveRate}
                       summary={runSchedule}
+                      plan={continuePlan || job?.detail?.lr_plan || runView?.lr_plan}
+                      presets={lrPresets}
                       busy={lrBusy}
                       onDrop={(rate) => putLrPlan({ from_now: true, lr: rate })}
-                      onEdit={() => setLrEditor("live")}
+                      onApply={putLrPlan}
                     />
                   )}
                   {canContinue && (
                     <div className="continue-run-box mt-2">
                       <p className="hint mb-2">Resume this run from its latest checkpoint ({latestCkptStep} steps).</p>
-                      <p className="hint mb-2 row between center gap-2">
-                        <span>Learning rate: {runSchedule || "as recorded"}</span>
-                        <button type="button" className="btn ghost sm" onClick={() => setLrEditor("live")}>
-                          Change…
-                        </button>
-                      </p>
+                      <LiveRateCard
+                        bare
+                        summary={runSchedule || "as recorded"}
+                        plan={continuePlan || runView?.lr_plan}
+                        presets={lrPresets}
+                        busy={lrBusy}
+                        canDrop={false}
+                        onApply={putLrPlan}
+                      />
                       <Num
                         label="Train until step"
                         value={continueSteps}
@@ -1084,8 +1069,13 @@ export default function Train() {
                       </button>
                     </div>
                   )}
+                  <div className="preview-box preview-scroll preview-h-lg mt-2">
+                    {sample ? <img src={mediaUrl(sample)} alt="sample" /> : <span className="sub">Sample grid appears at the first snapshot.</span>}
+                  </div>
+                  {/* Below the sample, not above it: the command is reference you
+                      reach for once, the sample is what you came to watch. */}
                   {cmd && running && (
-                    <div className="cmd-box">
+                    <div className="cmd-box mt-2">
                       <div className="row between center mb-2">
                         <span className="sub">
                           Subprocess{job?.detail?.pid ? ` · pid ${job.detail.pid}` : ""}
@@ -1096,9 +1086,6 @@ export default function Train() {
                       <code>{cmd}</code>
                     </div>
                   )}
-                  <div className="preview-box preview-scroll preview-h-lg mt-2">
-                    {sample ? <img src={mediaUrl(sample)} alt="sample" /> : <span className="sub">Sample grid appears at the first snapshot.</span>}
-                  </div>
                 </>
               ) : <Empty>Loading run…</Empty>}
             </div>
@@ -1171,7 +1158,6 @@ export default function Train() {
         </div>
       )}
 
-      {lrModal}
       {saveTarget && (
         <Modal
           title="Save snapshot to library"

@@ -824,8 +824,29 @@ body {
 }
 .import-drop.over { border-color: var(--accent); background: var(--bg-3, var(--bg-2)); }
 
-/* Breakpoint rows in the learning-rate editor: one drop per line. */
+/* The learning-rate editor, opened in place rather than over the screen. Set in
+   from its surroundings so it reads as a panel that belongs to the control above
+   it, not as another block of form. */
+.lr-editor {
+  margin-top: var(--s-2);
+  padding: var(--s-2);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+}
+
+/* Breakpoint rows: one drop per line, the two numbers and their Remove button
+   side by side. A narrower min than .field-row, so all three still fit inside
+   one Advanced column instead of the button dropping to a line of its own. */
 .lr-points { display: flex; flex-direction: column; gap: var(--s-2); }
+.lr-point {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--s-2);
+  align-items: end;
+}
+.lr-point > button { justify-self: start; }
 
 .create-generate-box {
   padding: var(--s-2);
@@ -880,6 +901,14 @@ body {
      readout of the fields being edited, so it is only useful next to them. */
   .work-split.form-first { grid-template-columns: minmax(0, 1fr) minmax(280px, 340px); }
   .work-split.form-first > :last-child { position: sticky; top: var(--s-3); }
+
+  /* A run being watched has two jobs, and both want room: the sample and the
+     loss curve on one side, the snapshots and the log on the other. The default
+     sidebar width left the loss chart 292px wide and 79px tall while 102 thumbs
+     of 89px had 1221px to themselves. Neither side is a sidebar, so this is a
+     ratio rather than a fixed column -- and the snapshot grid scrolls, so it
+     gives up width more gracefully than a chart does. */
+  .work-split.run-split { grid-template-columns: minmax(0, 1.6fr) minmax(320px, 1fr); }
 }
 
 /* Form fields side by side while there is room, stacked when there is not. A
