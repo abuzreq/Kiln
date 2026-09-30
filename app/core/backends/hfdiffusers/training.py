@@ -313,6 +313,19 @@ def _build_model(cfg: DiffusersTrainConfig):
     return net, sched, trainable, f"LoRA r={cfg.lora_r} on {meta.name} ({pct:.2f}% trainable)"
 
 
+def _noise_scheduler(sched_cfg: dict):
+    """The scheduler that noises training batches."""
+    from diffusers import DDPMScheduler
+
+    return DDPMScheduler(
+        num_train_timesteps=int(sched_cfg["num_train_timesteps"]),
+        beta_schedule=sched_cfg.get("beta_schedule", "linear"),
+        beta_start=sched_cfg.get("beta_start", 0.0001),
+        beta_end=sched_cfg.get("beta_end", 0.02),
+        prediction_type=sched_cfg.get("prediction_type", "epsilon"),
+    )
+
+
 def _save_snapshot(net, cfg: DiffusersTrainConfig, sched_cfg: dict, out_dir: Path,
                    milestone: int) -> Path:
     """Write ``model-N/`` as a self-contained, loadable model directory."""
@@ -420,7 +433,6 @@ def _run(job: Job, cfg: DiffusersTrainConfig):
 
     try:
         from accelerate import Accelerator
-        from diffusers import DDPMScheduler
 
         accel = Accelerator(mixed_precision=cfg.precision,
                             gradient_accumulation_steps=cfg.accum)
@@ -447,13 +459,7 @@ def _run(job: Job, cfg: DiffusersTrainConfig):
             except Exception as e:  # noqa: BLE001
                 emit(f"torch.compile unavailable, continuing without it: {e}")
 
-        noise_sched = DDPMScheduler(
-            num_train_timesteps=int(sched_cfg["num_train_timesteps"]),
-            beta_schedule=sched_cfg.get("beta_schedule", "linear"),
-            beta_start=sched_cfg.get("beta_start", 0.0001),
-            beta_end=sched_cfg.get("beta_end", 0.02),
-            prediction_type=sched_cfg.get("prediction_type", "epsilon"),
-        )
+        noise_sched = _noise_scheduler(sched_cfg)
 
         if cfg.manifest:
             from app.core.engine.train_data import ManifestDataset
