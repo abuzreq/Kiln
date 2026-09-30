@@ -871,6 +871,35 @@ body {
 @media (max-width: 1100px) {
   .studio-split, .work-split { grid-template-columns: 1fr; }
 }
+@media (min-width: 1101px) {
+  /* Train's "new run" is a form, not a list to browse. The default split puts
+     the narrow sidebar first, which squeezed the whole form -- presets, Advanced,
+     everything -- into 320px and ran it two screens tall beside 1200px of empty
+     column. Here the form takes the wide side and the read-only summary becomes
+     the sidebar, pinned so it stays in view while the form is scrolled: it is a
+     readout of the fields being edited, so it is only useful next to them. */
+  .work-split.form-first { grid-template-columns: minmax(0, 1fr) minmax(280px, 340px); }
+  .work-split.form-first > :last-child { position: sticky; top: var(--s-3); }
+}
+
+/* Form fields side by side while there is room, stacked when there is not. A
+   plain flex row would squash three selects to 100px instead of wrapping. */
+.field-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--s-2);
+  align-items: start;
+}
+
+/* Advanced is two independent groups -- how big the run is, and what the network
+   is. Side by side they fit one screen instead of running to twice one. Plain
+   blocks, so every control keeps the spacing it has inside a card. */
+.adv-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: var(--s-3);
+  align-items: start;
+}
 
 /* ---------- Generic ---------- */
 .row { display: flex; gap: 10px; }

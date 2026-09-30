@@ -706,7 +706,7 @@ export default function Train() {
       </div>
 
       {mode === "new" && (
-        <div className="work-split">
+        <div className="work-split form-first">
           <div className="col">
             {!device?.cuda && canStart && (
               <div className="card">
@@ -720,35 +720,46 @@ export default function Train() {
               <p className="hint">
                 Configure the run, then start. The run folder is created when training begins.
               </p>
-              <Select label="Dataset" value={form.dataset} onChange={(v) => set("dataset", v)} disabled={running}
-                options={(info?.datasets || []).map((d) => ({ value: d.name, label: `${d.name} (${d.count})` }))}
-                tip="A prepared image folder from Data. The same dataset can feed many runs." />
-              {datasetInfo && (
-                <p className="hint">
-                  {datasetInfo.total > datasetInfo.count
-                    ? `${datasetInfo.total.toLocaleString()} images per pass: `
-                      + `${datasetInfo.count.toLocaleString()} × ${Math.round(datasetInfo.total / datasetInfo.count)} `
-                      + "versions from its recipe."
-                    : `${datasetInfo.count.toLocaleString()} images per pass.`}
-                </p>
-              )}
-              <Text label="Run name" value={form.run_name} onChange={(v) => set("run_name", v)} disabled={running}
-                tip="Folder name for this run’s snapshots. Must be unique." />
-              <p className={`hint ${!nameAvailable ? "warn-text" : ""}`}>
-                {trimmedRunName && !nameAvailable && "Name already taken"}
-                {trimmedRunName && nameAvailable && "Name available"}
-              </p>
-              <Select
-                label="Start from"
-                value={fromMode}
-                onChange={(v) => { if (v === "scratch") applyLibraryStart(""); else setFromMode(v); }}
-                disabled={running}
-                options={[
-                  { value: "scratch", label: "Scratch (new weights)" },
-                  { value: "library", label: "Library model (continue / fine-tune)" },
-                ]}
-                tip="Scratch builds a new model. Library loads a named model you saved or downloaded."
-              />
+              {/* The three things every run needs, on one line. Each keeps its own
+                  note underneath, so the row stays readable when one of them has
+                  something to say. */}
+              <div className="field-row">
+                <div>
+                  <Select label="Dataset" value={form.dataset} onChange={(v) => set("dataset", v)} disabled={running}
+                    options={(info?.datasets || []).map((d) => ({ value: d.name, label: `${d.name} (${d.count})` }))}
+                    tip="A prepared image folder from Data. The same dataset can feed many runs." />
+                  {datasetInfo && (
+                    <p className="hint mb-0">
+                      {datasetInfo.total > datasetInfo.count
+                        ? `${datasetInfo.total.toLocaleString()} images per pass: `
+                          + `${datasetInfo.count.toLocaleString()} × ${Math.round(datasetInfo.total / datasetInfo.count)} `
+                          + "versions from its recipe."
+                        : `${datasetInfo.count.toLocaleString()} images per pass.`}
+                    </p>
+                  )}
+                </div>
+                <div>
+                  <Text label="Run name" value={form.run_name} onChange={(v) => set("run_name", v)} disabled={running}
+                    tip="Folder name for this run’s snapshots. Must be unique." />
+                  <p className={`hint mb-0 ${!nameAvailable ? "warn-text" : ""}`}>
+                    {trimmedRunName && !nameAvailable && "Name already taken"}
+                    {trimmedRunName && nameAvailable && "Name available"}
+                  </p>
+                </div>
+                <div>
+                  <Select
+                    label="Start from"
+                    value={fromMode}
+                    onChange={(v) => { if (v === "scratch") applyLibraryStart(""); else setFromMode(v); }}
+                    disabled={running}
+                    options={[
+                      { value: "scratch", label: "Scratch (new weights)" },
+                      { value: "library", label: "Library model (continue / fine-tune)" },
+                    ]}
+                    tip="Scratch builds a new model. Library loads a named model you saved or downloaded."
+                  />
+                </div>
+              </div>
               {fromMode === "library" && (
                 <>
                   <Select
@@ -850,6 +861,8 @@ export default function Train() {
             {canStart && (
               <Disclose title="Advanced"
                 tip="How the network is built and how it learns. The defaults are the ones Kiln's presets are measured against — change these only when you want a different kind of model, not to fix a slow or poor run.">
+                <div className="adv-grid">
+                <div>
                 <div className="section-title">Run size</div>
                 <div className="row gap-2">
                   <div className="grow"><Num label="Image size" value={form.image_size} onChange={(v) => set("image_size", v)} step={32} disabled={running} tip="Training resolution. Higher uses much more VRAM." /></div>
@@ -870,7 +883,9 @@ export default function Train() {
                   onEdit={() => setLrEditor("form")}
                   disabled={running}
                 />
-                <div className="section-title mt-2">Architecture & loss</div>
+                </div>
+                <div>
+                <div className="section-title">Architecture & loss</div>
                 {engines.length > 1 && (
                   <Select label="Engine" value={form.backend} onChange={(v) => {
                     setForm((f) => ({ ...f, backend: v, edge_loss: edgeLossDefault(v) }));
@@ -958,6 +973,8 @@ export default function Train() {
                     </label>
                   </Tooltip>
                 )}
+                </div>
+                </div>
               </Disclose>
             )}
 
