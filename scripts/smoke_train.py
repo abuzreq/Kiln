@@ -291,6 +291,26 @@ def check_vram_estimate_amp():
           % (on, off, ratio))
 
 
+def check_amp_default():
+    """A new run trains in mixed precision; a resumed one keeps what it had.
+
+    AMP roughly halves the activation term, and without it the standard 512
+    preset does not fit a 6 GB card at all. But a run that started without it
+    has to carry on without it, or continuing a run silently changes its
+    numerics partway through the loss curve.
+    """
+    from app.core.engine.trainer import TrainConfig
+
+    assert TrainConfig(dataset="d", out_dir="o", name="n").amp is True
+
+    b = backends.get("xurdif")
+    body = {"image_size": 64, "batch_size": 1, "train_steps": 100, "save_every": 50}
+    assert b.training_config(dict(body), "d", "o").amp is True
+    assert b.training_config(dict(body, amp=False), "d", "o").amp is False, \
+        "the Advanced checkbox must still be able to turn it off"
+    print("  AMP defaults on for a new run, and stays off when asked")
+
+
 def check_child_stream_decoding():
     """A tqdm progress bar must not be able to kill the log reader.
 
@@ -441,6 +461,8 @@ def check_xurdif(run_name: str = "xur", **over):
     assert rcfg.mtype == cfg.mtype and rcfg.attn == cfg.attn, (rcfg.mtype, rcfg.attn)
     # the plan comes back from its own file, without the caller passing it again
     assert rcfg.lr_plan == cfg.lr_plan, (rcfg.lr_plan, cfg.lr_plan)
+    # A continue repeats the run's own precision rather than today's default.
+    assert rcfg.amp == cfg.amp, (rcfg.amp, cfg.amp)
     rjob = wait(backend.start_training(rcfg), timeout=900)
     if rjob.status != "done":
         print("  log tail:", (rjob.detail.get("log") or [])[-8:])
@@ -628,6 +650,7 @@ def main():
         check_lr_log_merge()
         check_vram_estimate()
         check_vram_estimate_amp()
+        check_amp_default()
         check_child_stream_decoding()
         print("training runs:")
         if not diffusers_only:

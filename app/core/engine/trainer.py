@@ -137,7 +137,11 @@ class TrainConfig:
     nsamples: int = 1
     sample_seed: int = 42
     save_every: int = 1000
-    amp: bool = False
+    # On by default. Measured on an RTX 3060: 733 MiB of activations per 512px
+    # image with it against 1436 without, so it roughly halves the term that
+    # scales with batch size, and it is faster. Without it the standard 512
+    # preset at batch 4 wants 6658 MiB and does not fit a 6 GB card at all.
+    amp: bool = True
     # The edge-weighted L1 the vendored engine trains with. On by default, and
     # read back as True for runs written before it was switchable -- every one
     # of those was edge-trained, so True is what they actually did.
@@ -255,6 +259,9 @@ def config_from_run(run_dir: str | Path, train_steps: int, checkpoint: str | Non
         nsamples=int(meta.get("nsamples", 1)),
         sample_seed=int(meta.get("sample_seed", 42)),
         save_every=int(save_every or 1000),
+        # Deliberately not the TrainConfig default: continuing a run has to
+        # repeat what that run did, and a run.json with no amp key was written
+        # before the field existed, which was necessarily without it.
         amp=bool(meta.get("amp", False)),
         edge_loss=bool(meta.get("edge_loss", True)),
         resume=ckpt["path"],
@@ -408,12 +415,14 @@ def estimate_peak_mib(image_size: int, batch_size: int, mults=None,
     actually costs, since its extra activations sit at the spatially smallest
     levels.
 
-    ``amp`` defaults to False because that is what ``TrainConfig`` and a fresh
-    form both default to, and because the fit only ever covered the AMP case:
-    a 256px batch-8 run estimated at 2327 MiB really used about 4.2 GB, so
-    nothing warned before it exhausted a 6 GB card. Guessing high is the safe
-    direction -- the failure it prevents is a silent fall into the Windows
-    shared-memory fallback, which does not raise, it just stops.
+    ``amp`` defaults to False even though training now switches it on, because
+    a caller that forgets to pass it should get the larger of the two numbers:
+    guessing high costs a warning, guessing low costs the run. Every call site
+    passes the real value. The fit originally covered only the AMP case while
+    training defaulted it off, which is how a 256px batch-8 run came to be
+    estimated at 2327 MiB while really using about 4.2 GB -- nothing warned
+    before it exhausted a 6 GB card, and it failed silently, because CUDA falls
+    into the Windows shared-memory fallback rather than raising.
     """
     per_img = _per_img_mib(image_size, mults, amp)
     return int(per_img * max(batch_size, 1) + _FIXED_MIB + _weights_mib(mults, mtype, attn))

@@ -125,10 +125,10 @@ def presets_view() -> dict:
     total = _gpu_total_mib()
     out = {}
     for rank, (pid, p) in enumerate(CONFIG_PRESETS.items()):
-        # No preset sets AMP, so these are costed the way a fresh form would run
-        # them -- EMPTY_FORM.amp is false. Costing them with AMP would badge a
-        # preset as fitting that then does not.
-        est = estimate_peak_mib(p["image_size"], p["batch_size"], p["mults"], amp=False)
+        # No preset sets AMP, so these are costed the way a fresh form will run
+        # them -- EMPTY_FORM.amp is true, matching TrainConfig. Costing them the
+        # other way would badge a preset as too big when it fits.
+        est = estimate_peak_mib(p["image_size"], p["batch_size"], p["mults"], amp=True)
         # ``order`` because Flask sorts JSON keys alphabetically, which would
         # hand the picker "Detailed, Quick, Standard" -- declaration order here
         # runs cheapest to richest and is what the list should show.

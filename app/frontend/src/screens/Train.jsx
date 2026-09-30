@@ -63,7 +63,7 @@ const EMPTY_FORM = {
   // The attention layout only means something to the configurable architecture.
   // It is the vendor's spec string; the pickers under "custom" are a view of it.
   mtype: "tinyunet_conf_attention", attn: "-1:linear,mid:full", mults: "1,2,2,4", save_every: 1000,
-  nsamples: 1, sample_seed: 42, fit: "resize", amp: false, resume: "", nostrict: false,
+  nsamples: 1, sample_seed: 42, fit: "resize", amp: true, resume: "", nostrict: false,
   // A named schedule, or "custom" with lr_plan holding the segments. Either way
   // the server compiles it to absolute steps before the run starts.
   lr_schedule: SCRATCH_LR_SCHEDULE, lr_plan: null,

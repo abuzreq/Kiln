@@ -247,7 +247,7 @@ class XurdifBackend(Backend):
             nsamples=as_int(body.get("nsamples", 1), "nsamples", 1, 16),
             sample_seed=as_int(body.get("sample_seed", 42), "sample_seed", -1, 2 ** 31 - 1),
             save_every=save_every,
-            amp=bool(body.get("amp", False)),
+            amp=bool(body.get("amp", True)),
             resume=resume,
             nostrict=bool(body.get("nostrict", False)),
             edge_loss=bool(body.get("edge_loss", True)),
