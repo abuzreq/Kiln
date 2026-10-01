@@ -649,6 +649,37 @@ body {
 
 /* Group quick-select sits with the map, so every way of picking layers is together. */
 .bend-map-chips { margin-bottom: var(--s-2); }
+/* The signal path: the model as three stages you can bend whole, with the
+   layers inside one of them on demand. Plain DOM, no geometry. */
+.bend-pipe { display: flex; align-items: stretch; flex-wrap: wrap; gap: var(--s-2); }
+.bend-pipe-end { align-self: center; font-size: 12px; color: var(--text-dim); }
+.bend-pipe-arrow { align-self: center; color: var(--text-dim); opacity: 0.6; }
+.bend-pipe-stage { display: flex; align-items: stretch; gap: 2px; flex: 1 1 150px; min-width: 0; }
+.bend-pipe-pill {
+  flex: 1 1 auto; min-width: 0; text-align: left; cursor: pointer;
+  display: flex; flex-direction: column; gap: 2px;
+  padding: var(--s-2); border-radius: var(--r-2);
+  border: 1px solid var(--line); background: var(--bg-3); color: var(--text);
+}
+.bend-pipe-pill b { font-size: 13px; }
+.bend-pipe-pill .sub { font-size: 11px; line-height: 1.25; }
+.bend-pipe-count { font-size: 11px; color: var(--text-dim); }
+.bend-pipe-count i { font-style: normal; opacity: 0.7; }
+.bend-pipe-pill:hover { border-color: var(--accent); }
+.bend-pipe-stage.some .bend-pipe-pill { border-color: var(--accent); }
+.bend-pipe-stage.on .bend-pipe-pill {
+  border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent);
+}
+.bend-pipe-stage.on .bend-pipe-count { color: var(--accent); }
+.bend-pipe-open {
+  width: 24px; cursor: pointer; border-radius: var(--r-2);
+  border: 1px solid var(--line); background: var(--bg-3); color: var(--text-dim);
+}
+.bend-pipe-open:hover { color: var(--accent); border-color: var(--accent); }
+.bend-pipe-layers { margin-top: var(--s-3); }
+.pill.chip.num { min-width: 34px; justify-content: center; }
+.pill.chip.other { border-style: dashed; }
+
 /* The map draws itself at its own size and scales into the column; the
    min-width floor is what makes a very narrow column scroll instead of
    shrinking the layers into illegibility. */

@@ -12,9 +12,8 @@ import { scaleSqrt } from "d3";
 // the widest band instead of the layer count, so a 21-layer xurdif model and a
 // 50-layer Diffusers one both fit the column they are drawn in.
 //
-// `collapseBands` and `regionsOf` are coarser readings of that same geometry
-// (one capsule per band side; three named regions), so the map can change
-// density without anything moving.
+// `collapseBands` is a coarser reading of that same geometry -- one capsule per
+// band side -- so the map can change density without anything moving.
 const DEFAULTS = { colW: 62, rowH: 66, marginX: 40, top: 40, bottom: 60, rMin: 9, rMax: 26 };
 
 export const STRUCT = {
@@ -180,66 +179,6 @@ export function collapseBands(layout) {
       deepest: c.depth === maxDepth,
     };
   }).sort((a, b) => a.depth - b.depth);
-}
-
-/** Encoder, bottleneck and decoder as three shapes over the same bands. */
-export function regionsOf(layout) {
-  if (!layout) return [];
-  const { bands, width, o, maxDepth } = layout;
-  const has = (side) => bands.some((b) => b.sides[side] > 0);
-  const top = bands[0].y;
-  const bottom = bands[bands.length - 1].y;
-  const contentW = width - o.gutter - o.marginR;
-  // Width tapers with depth, the way the feature maps do.
-  const wide = contentW * 0.40;
-  const narrow = contentW * 0.16;
-  const at = (d) => (maxDepth ? wide + (narrow - wide) * (d / maxDepth) : wide);
-  const pad = 14;
-
-  const out = [];
-  if (has("L")) {
-    const down = bands.map((b) => `${o.gutter + b.depth * o.indent},${b.y - pad}`);
-    const up = [...bands].reverse().map((b) => `${o.gutter + b.depth * o.indent + at(b.depth)},${b.y + pad}`);
-    out.push({
-      group: "encoder",
-      path: `M${down.join(" L")} L${up.join(" L")} Z`,
-      label: "encoder",
-      lead: "reads the image, detail first",
-      x: o.gutter + 10,
-      y: top + (bottom - top) * 0.3,
-      hasAttention: layout.placed.some((n) => n.side === "L" && n.type === "attention"),
-    });
-  }
-  if (has("mid")) {
-    const w = contentW * 0.30;
-    const cx = (o.gutter + width - o.marginR) / 2;
-    out.push({
-      group: "mid",
-      path: `M${cx - w / 2},${bottom - pad} L${cx + w / 2},${bottom - pad} `
-        + `L${cx + w / 2},${bottom + pad} L${cx - w / 2},${bottom + pad} Z`,
-      label: "bottleneck",
-      lead: "the whole image at its coarsest",
-      x: cx,
-      y: bottom + 4,
-      hasAttention: layout.placed.some((n) => n.side === "mid" && n.type === "attention"),
-    });
-  }
-  if (has("R")) {
-    const edge = (d) => width - o.marginR - d * o.indent;
-    const down = bands.map((b) => `${edge(b.depth)},${b.y - pad}`);
-    const up = [...bands].reverse().map((b) => `${edge(b.depth) - at(b.depth)},${b.y + pad}`);
-    out.push({
-      group: "decoder",
-      path: `M${down.join(" L")} L${up.join(" L")} Z`,
-      label: "decoder",
-      lead: "paints it back, detail last",
-      x: width - o.marginR - 10,
-      y: top + (bottom - top) * 0.3,
-      anchor: "end",
-      hasAttention: layout.placed.some((n) => n.side === "R" && n.type === "attention"),
-    });
-  }
-  return out;
 }
 
 /** "M x,y L x,y ..." spine through the placed nodes. */

@@ -1,14 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { tokens } from "../theme.js";
 import {
-  layoutStructured, collapseBands, regionsOf, runPaths, skipPaths, resLabel,
+  layoutStructured, collapseBands, runPaths, skipPaths, resLabel,
 } from "./unetLayout.js";
 
 // The UNet as a U -- bands by resolution, encoder down the left, bottleneck at
-// the bottom, decoder up the right -- and the primary way you pick layers to
-// bend. The same geometry is drawn at three densities so the picture can match
-// what you are doing: "regions" names the three parts of the network, "overview"
-// gives one capsule per band side, and "layers" shows every bend point.
+// the bottom, decoder up the right -- for when the structure itself is the
+// point. Two densities of the same geometry: "overview" gives one capsule per
+// band side, "layers" shows every bend point. (The plain-language way in is
+// BendPipeline, which draws no geometry at all.)
 //
 // In layers, clicking a node toggles it in the FOCUSED bend's targets,
 // shift+click takes a range through the network and dragging the background
@@ -27,8 +27,8 @@ const DRAG_SLOP = 4;
 const MIN_SCALE = 0.72;
 
 export default function UnetVisualizer({
-  graph, focusTargets, otherTargets, hasFocus, density = "overview", activeGroups,
-  onToggle, onToggleGroup, onCreateFromNode,
+  graph, focusTargets, otherTargets, hasFocus, density = "overview",
+  onToggle, onCreateFromNode,
 }) {
   const [hover, setHover] = useState(null);
   const [drag, setDrag] = useState(null);
@@ -46,7 +46,6 @@ export default function UnetVisualizer({
   );
   const layout = useMemo(() => layoutStructured(graph?.nodes), [graph]);
   const capsules = useMemo(() => (density === "overview" ? collapseBands(layout) : []), [layout, density]);
-  const regions = useMemo(() => (density === "regions" ? regionsOf(layout) : []), [layout, density]);
   const spine = useMemo(() => (density === "layers" ? runPaths(layout?.placed || []) : null), [layout, density]);
   const skips = useMemo(() => skipPaths(layout), [layout]);
 
@@ -262,39 +261,6 @@ export default function UnetVisualizer({
     );
   };
 
-  const region = (reg) => {
-    const { all, some } = state(layout.placed.filter((n) => SIDE_STAGE[n.side] === reg.group).map((n) => n.id));
-    const held = activeGroups?.includes(reg.group);
-    const on = held || all;
-    return (
-      <g
-        key={reg.group}
-        className="unet-region"
-        role="button"
-        tabIndex={0}
-        aria-pressed={on}
-        aria-label={`${reg.label} — ${on ? "targeted" : some ? "partly targeted" : "not targeted"}`}
-        onClick={() => onToggleGroup?.(reg.group)}
-        onKeyDown={keyActivate(() => onToggleGroup?.(reg.group))}
-      >
-        <path
-          d={reg.path}
-          fill={c[reg.group] || c.other}
-          opacity={on ? 0.85 : some ? 0.55 : 0.32}
-          stroke={on || some ? "var(--accent)" : "transparent"}
-          strokeWidth={on ? 2.5 : 1.5}
-          strokeDasharray={some && !on ? "4 4" : undefined}
-        />
-        <text x={reg.x} y={reg.y} textAnchor={reg.anchor || "start"} fontSize="12" fill={c.text}>
-          {reg.label}{reg.hasAttention ? " ◆" : ""}
-        </text>
-        <text x={reg.x} y={reg.y + 14} textAnchor={reg.anchor || "start"} fontSize="10.5" fill={c.dim}>
-          {reg.lead}
-        </text>
-      </g>
-    );
-  };
-
   const expandedNodes = density === "overview"
     ? placed.filter((n) => expanded.has(`${n.depth}:${n.side}`))
     : [];
@@ -317,18 +283,17 @@ export default function UnetVisualizer({
       >
         {bands.map((b) => {
           const rowState = state(b.ids);
-          const clickable = density !== "regions";
           return (
             <g key={b.depth} className="unet-band">
               <line x1={o.gutter - 8} x2={width - 4} y1={b.y} y2={b.y} stroke={c.line} strokeWidth="1" opacity="0.35" />
               <g
-                className={clickable ? "unet-gutter" : ""}
-                role={clickable ? "button" : undefined}
-                tabIndex={clickable ? 0 : undefined}
-                aria-pressed={clickable ? rowState.all : undefined}
-                aria-label={clickable ? `${b.label} layers — ${rowState.all ? "targeted" : "not targeted"}` : undefined}
-                onClick={clickable ? () => pick(b.ids, { force: !rowState.all }) : undefined}
-                onKeyDown={clickable ? keyActivate(() => pick(b.ids, { force: !rowState.all })) : undefined}
+                className="unet-gutter"
+                role="button"
+                tabIndex={0}
+                aria-pressed={rowState.all}
+                aria-label={`${b.label} layers — ${rowState.all ? "targeted" : "not targeted"}`}
+                onClick={() => pick(b.ids, { force: !rowState.all })}
+                onKeyDown={keyActivate(() => pick(b.ids, { force: !rowState.all }))}
               >
                 <rect x="0" y={b.y - 12} width={o.gutter - 10} height="24" fill="transparent" />
                 <text x="4" y={b.y - 1} fontSize="10.5" fill={rowState.hit ? "var(--accent)" : c.dim}>
@@ -363,12 +328,11 @@ export default function UnetVisualizer({
           <rect className="unet-marquee" x={marquee.x} y={marquee.y} width={marquee.w} height={marquee.h} />
         )}
 
-        {density === "regions" && regions.map(region)}
         {density === "overview" && capsules.filter((cap) => !expanded.has(cap.key)).map(capsule)}
         {density === "overview" && expandedKeys.map((key) => collapser(key, expandedNodes.filter((n) => `${n.depth}:${n.side}` === key)))}
         {(density === "layers" ? placed : expandedNodes).map(node)}
 
-        {hover && density !== "regions" && (
+        {hover && (
           <g
             transform={`translate(${Math.max(4, Math.min(hover.x - 85, width - 174))},${hover.y - 48 < 4 ? hover.y + hover.r + 8 : hover.y - 48})`}
             pointerEvents="none"
@@ -387,9 +351,7 @@ export default function UnetVisualizer({
             <span style={{ width: 10, height: 10, borderRadius: 3, background: c[k] }} /> {k}
           </span>
         ))}
-        {density !== "regions" && (
-          <span className="row center" style={{ gap: 6, fontSize: 12, color: "var(--text-dim)" }}>◆ attention</span>
-        )}
+        <span className="row center" style={{ gap: 6, fontSize: 12, color: "var(--text-dim)" }}>◆ attention</span>
       </div>
     </div>
   );

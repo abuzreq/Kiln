@@ -4,6 +4,7 @@ import { useApp } from "../state.jsx";
 import { usePlay, usePlayState } from "./playContext.jsx";
 import { Select, Num, Text, Disclose, Progress, Modal, Seg } from "../components/ui.jsx";
 import UnetVisualizer from "../components/UnetVisualizer.jsx";
+import BendPipeline from "../components/BendPipeline.jsx";
 import BendEditor from "../components/BendEditor.jsx";
 import BendPresetList from "../components/BendPresetList.jsx";
 import { buildSamplePayload } from "../sampleSettings.jsx";
@@ -13,26 +14,31 @@ import {
 
 const newBendId = () => Math.random().toString(36).slice(2);
 
-// How much of the network the map draws. The geometry is the same at every
-// density, so switching does not move anything you were looking at.
-const DENSITIES = [
-  { id: "regions", label: "Regions", tip: "The three parts of the network, and what each one does" },
+// How the model is shown while you pick what to bend. Simple is the signal
+// path in words; Structure is the map, at two grains. The geometry under the
+// two map grains is the same, so switching does not move anything.
+const VIEWS = [
+  { id: "simple", label: "Simple", tip: "The model as a signal path: encoder, bottleneck, decoder" },
+  { id: "structure", label: "Structure", tip: "The map of the network itself" },
+];
+const GRAINS = [
   { id: "overview", label: "Overview", tip: "One capsule per resolution level" },
   { id: "layers", label: "Layers", tip: "Every layer you can bend" },
 ];
-const DENSITY_KEY = "kiln.bendMapDensity";
+const VIEW_KEY = "kiln.bendMapView";
+const GRAIN_KEY = "kiln.bendMapDensity";
 
-function loadDensity() {
+function loadPref(key, list, fallback) {
   try {
-    const v = localStorage.getItem(DENSITY_KEY);
-    return DENSITIES.some((d) => d.id === v) ? v : "overview";
-  } catch { return "overview"; }
+    const v = localStorage.getItem(key);
+    return list.some((d) => d.id === v) ? v : fallback;
+  } catch { return fallback; }
 }
 
 const MAP_HINT = {
-  regions: {
-    focus: "Click a part of the network to bend all of it. The chips above do the same in words.",
-    empty: "Click a part of the network to start a bend there.",
+  simple: {
+    focus: "Click a stage to bend all of it, or + to pick single layers inside it.",
+    empty: "Click a stage to start a bend on it.",
   },
   overview: {
     focus: "Click a level to target its layers, + to open it up. Solid rings: this bend. Dashed: the rest.",
@@ -96,7 +102,8 @@ export function BendWorkspace({ stack, setStack }) {
   // invalidate one without the other.
   const [cachedPlainKey, setCachedPlainKey] = usePlayState("bend.plainKey", null);
   const [compareOpen, setCompareOpen] = useState(false);
-  const [density, setDensityState] = useState(loadDensity);
+  const [view, setViewState] = useState(() => loadPref(VIEW_KEY, VIEWS, "simple"));
+  const [grain, setGrainState] = useState(() => loadPref(GRAIN_KEY, GRAINS, "overview"));
   const [gifBusy, setGifBusy] = useState(false);
 
   useEffect(() => {
@@ -105,10 +112,12 @@ export function BendWorkspace({ stack, setStack }) {
     api.get("/craft/bends").then(setPresets).catch(() => {});
   }, []);
 
-  const setDensity = (d) => {
-    setDensityState(d);
-    try { localStorage.setItem(DENSITY_KEY, d); } catch { /* private window: the session keeps it */ }
+  const remember = (key, value) => {
+    try { localStorage.setItem(key, value); } catch { /* private window: the session keeps it */ }
   };
+  const setView = (v) => { setViewState(v); remember(VIEW_KEY, v); };
+  const setGrain = (g) => { setGrainState(g); remember(GRAIN_KEY, g); };
+  const shown = view === "simple" ? "simple" : grain;
 
   const ops = sharedOps || [];
   // Kiln's own recipes are listed apart from the user's: they are the answer to
@@ -492,10 +501,16 @@ export function BendWorkspace({ stack, setStack }) {
           </div>
           <div className="row between center wrap gap-2 mt-1">
             <p className="hint mb-0 grow">
-              {MAP_HINT[density][focusedBend ? "focus" : "empty"]}
+              {MAP_HINT[shown][focusedBend ? "focus" : "empty"]}
             </p>
-            <Seg ariaLabel="How much of the model to show" tabs={DENSITIES} value={density}
-                 onChange={setDensity} size="sm" />
+            <div className="row center gap-2">
+              {view === "structure" && (
+                <Seg ariaLabel="How much detail the map shows" tabs={GRAINS} value={grain}
+                     onChange={setGrain} size="sm" />
+              )}
+              <Seg ariaLabel="How to show the model" tabs={VIEWS} value={view}
+                   onChange={setView} size="sm" />
+            </div>
           </div>
           <div className="row wrap gap-2 bend-map-chips">
             {groups.map((g) => (
@@ -504,17 +519,28 @@ export function BendWorkspace({ stack, setStack }) {
                 onClick={() => toggleGroup(g)}>{g}</button>
             ))}
           </div>
-          <UnetVisualizer
-            graph={graph}
-            focusTargets={focusTargets}
-            otherTargets={otherTargets}
-            hasFocus={!!focusedBend}
-            density={density}
-            activeGroups={(focusedBend?.targets || []).filter(isGroup)}
-            onToggle={onMapToggle}
-            onToggleGroup={toggleGroup}
-            onCreateFromNode={onCreateFromNode}
-          />
+          {view === "simple" ? (
+            <BendPipeline
+              graph={graph}
+              focusTargets={focusTargets}
+              otherTargets={otherTargets}
+              hasFocus={!!focusedBend}
+              activeGroups={(focusedBend?.targets || []).filter(isGroup)}
+              onToggle={onMapToggle}
+              onToggleGroup={toggleGroup}
+              onCreateFromNode={onCreateFromNode}
+            />
+          ) : (
+            <UnetVisualizer
+              graph={graph}
+              focusTargets={focusTargets}
+              otherTargets={otherTargets}
+              hasFocus={!!focusedBend}
+              density={grain}
+              onToggle={onMapToggle}
+              onCreateFromNode={onCreateFromNode}
+            />
+          )}
         </div>
         <div className="bend-compare-col">
           <div className="card bend-compare-card">
