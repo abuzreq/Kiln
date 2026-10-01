@@ -18,10 +18,11 @@ Threaded cases run twice: as Kiln's threads do today, all on the device's
 default CUDA stream, and with a stream per thread (see ``_case``).
 
 Only plain runs are timed (no guidance, no bends); one CLIP-guided pair is added
-for its peak VRAM. The sampler is not re-entrant yet -- concurrent runs share the
-global RNG -- which changes which images come out, not how long they take.
+for its peak VRAM. Two runs on one model are timed back to back, on two copies of
+the model at once, and as a batch of 2 (``--same-only`` runs just those).
 
     python scripts/bench_concurrency.py
+    python scripts/bench_concurrency.py --models a.pt b.pt --sizes 128 256 512 --same-only
     python scripts/bench_concurrency.py --models a.pt b.pt c.pt --sizes 256 --steps 20
     python scripts/bench_concurrency.py --json bench.json
 """
@@ -31,6 +32,7 @@ import statistics
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +53,44 @@ DEFAULT_MODELS = [
 ]
 
 RENDER_MODES = ("every", "10hz", "none")
+
+
+# --- second copies of a model -----------------------------------------------------
+# Kiln never runs two jobs on one model at once. The two-copy case asks whether
+# a second copy of the net, on its own stream, would make that worth doing; it
+# measured 1.03-1.14x (docs/generation-queue-design.md), so the app has no such
+# thing and the benchmark brings its own. A thread inside using_copy(i > 0) gets
+# its own copy, loaded from the file, when the sampler asks the manager.
+_copy = threading.local()
+_copies: dict = {}
+_shared_load = manager.load
+
+
+def _load(path, device="cpu", ema=True):
+    i = getattr(_copy, "i", 0)
+    if not i:
+        return _shared_load(path, device=device, ema=ema)
+    key = (str(path), device, ema, i)
+    if key not in _copies:
+        from app.core import backends
+
+        backend, ref = backends.resolve(str(path))
+        model, meta = backend.load(ref, device=device, ema=ema)
+        _copies[key] = {"model": model, "meta": meta, "backend": backend, "ref": ref}
+    return _copies[key]
+
+
+manager.load = _load
+
+
+@contextmanager
+def using_copy(i: int):
+    prev = getattr(_copy, "i", 0)
+    _copy.i = i
+    try:
+        yield
+    finally:
+        _copy.i = prev
 PREVIEW_INTERVAL = 0.1  # matches app/backend/routes/perform.py
 
 
@@ -104,13 +144,14 @@ def _stream(i: int):
     return _streams[i]
 
 
-def _case(param_sets, parallel: bool, streams: bool = False) -> dict:
+def _case(param_sets, parallel: bool, streams: bool = False, copies: bool = False) -> dict:
     """Wall time and peak VRAM for a set of runs, back to back or one thread each.
 
     Threads in one process share the device's default CUDA stream unless told
     otherwise, so their kernels queue behind each other whatever the Python
     side does. ``streams`` gives each thread its own, which is the only way the
-    GPU can actually run two models' kernels at once.
+    GPU can actually run two models' kernels at once. ``copies`` gives run i
+    copy i of its model, as a generation lane does for two runs on one model.
     """
     torch.cuda.synchronize()
     torch.cuda.empty_cache()
@@ -120,11 +161,12 @@ def _case(param_sets, parallel: bool, streams: bool = False) -> dict:
 
     def work(i, p):
         try:
-            if streams:
-                with torch.cuda.stream(_stream(i)):
+            with using_copy(i if copies else 0):
+                if streams:
+                    with torch.cuda.stream(_stream(i)):
+                        per_run[i] = _run(p)
+                else:
                     per_run[i] = _run(p)
-            else:
-                per_run[i] = _run(p)
         except Exception as e:  # noqa: BLE001
             errors.append(f"{type(e).__name__}: {e}")
 
@@ -149,8 +191,8 @@ def _case(param_sets, parallel: bool, streams: bool = False) -> dict:
     }
 
 
-def _median_case(param_sets, parallel, repeats, streams=False) -> dict:
-    runs = [_case(param_sets, parallel, streams) for _ in range(repeats)]
+def _median_case(param_sets, parallel, repeats, streams=False, copies=False) -> dict:
+    runs = [_case(param_sets, parallel, streams, copies) for _ in range(repeats)]
     bad = next((r for r in runs if r["error"]), None)
     if bad:
         return bad
@@ -174,6 +216,8 @@ def main() -> int:
     ap.add_argument("--repeats", type=int, default=2)
     ap.add_argument("--modes", nargs="+", default=list(RENDER_MODES), choices=RENDER_MODES)
     ap.add_argument("--no-guided", action="store_true", help="skip the CLIP-guided pair")
+    ap.add_argument("--same-only", action="store_true",
+                    help="only the same-model cases: sequential, two copies, batch of 2")
     ap.add_argument("--json", help="also write the raw results here")
     args = ap.parse_args()
 
@@ -193,6 +237,8 @@ def main() -> int:
     manager.MAX_LOADED = 16
     for m in models:
         manager.load(str(m), device="cuda")
+    with using_copy(1):                    # A's second copy, for the two-copy case
+        manager.load(str(models[0]), device="cuda")
 
     free, total = torch.cuda.mem_get_info()
     print(f"GPU: {torch.cuda.get_device_name(0)}  "
@@ -211,6 +257,8 @@ def main() -> int:
             for mode in args.modes:
                 set_render_mode(mode)
                 _run(_params(m, size, 3, args.sampler, 1))
+            with using_copy(1):
+                _run(_params(models[0], size, 3, args.sampler, 1))
 
     results = []
     header = (f"| size | render | case | wall s | speedup | per-run s | peak MiB | reserved MiB |\n"
@@ -230,9 +278,28 @@ def main() -> int:
         print(f"| {size} | {mode} | {name} | {res['wall']:.2f} | {sp} | {per} "
               f"| {res['peak_mib']:.0f} | {res['reserved_mib']:.0f} |", flush=True)
 
+    def same_model_cases(size, mode):
+        """Two runs on one model: back to back, on two copies at once, and batched.
+
+        Two copies on their own streams is what a lane can do for queued runs
+        whose settings differ; a batch needs identical settings but no copy.
+        """
+        a = _params(models[0], size, args.steps, args.sampler, 7)
+        b = _params(models[0], size, args.steps, args.sampler, 8)
+        seq_same = _median_case([a, b], False, args.repeats)
+        report(size, mode, "A,A sequential", seq_same)
+        report(size, mode, "A|A' two copies+streams",
+               _median_case([a, b], True, args.repeats, streams=True, copies=True), seq_same)
+        batch = _params(models[0], size, args.steps, args.sampler, 7, batch=2)
+        report(size, mode, "A batch of 2", _median_case([batch], False, args.repeats),
+               seq_same)
+
     for size in args.sizes:
         for mode in args.modes:
             set_render_mode(mode)
+            if args.same_only:
+                same_model_cases(size, mode)
+                continue
             two = [_params(m, size, args.steps, args.sampler, 7) for m in models[:2]]
             seq2 = _median_case(two, False, args.repeats)
             report(size, mode, "A,B sequential", seq2)
@@ -248,13 +315,7 @@ def main() -> int:
                 report(size, mode, "A|B|C threads+streams",
                        _median_case(three, True, args.repeats, streams=True), seq3)
 
-            # Same model, for reference: what batching already buys.
-            a = _params(models[0], size, args.steps, args.sampler, 7)
-            seq_same = _median_case([a, a], False, args.repeats)
-            report(size, mode, "A,A sequential", seq_same)
-            batch = _params(models[0], size, args.steps, args.sampler, 7, batch=2)
-            report(size, mode, "A batch of 2", _median_case([batch], False, args.repeats),
-                   seq_same)
+            same_model_cases(size, mode)
 
     if not args.no_guided:
         set_render_mode("every")
