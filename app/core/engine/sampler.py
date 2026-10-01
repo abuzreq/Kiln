@@ -710,6 +710,10 @@ class Sampler:
             bend_runtime.attach(model)
             bend_runtime.set_total(total)
 
+        # Marks each forward pass as this run's, so bend hooks on the shared
+        # cached model fire for the run that attached them and no other.
+        from app.core.craft.bending import forward_of
+
         pprocess = _postproc_fn()
         tensor_to_pil = __import__("torchvision").transforms.ToPILImage()
 
@@ -809,7 +813,7 @@ class Sampler:
                         if device == "cuda"
                         else _nullcontext()
                     )
-                    with autocast:
+                    with autocast, forward_of(bend_runtime):
                         out = model(x, t_batch)
                     eps, x0 = split_prediction(
                         out, x, sched.alphas_cumprod, t_batch, pred, device)
