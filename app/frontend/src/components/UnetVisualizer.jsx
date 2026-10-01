@@ -23,8 +23,10 @@ const STAGE_VARS = {
 
 const SIDE_STAGE = { L: "encoder", R: "decoder", mid: "mid" };
 const DRAG_SLOP = 4;
-// Below this fraction of its drawn width the map scrolls instead of shrinking.
-const MIN_SCALE = 0.72;
+// The layout spreads into the width it is given; past that the whole drawing
+// may scale up this far to finish filling the card, and no further -- beyond
+// it the labels start to look like a different typeface from the rest of Kiln.
+const MAX_SCALE = 1.4;
 
 export default function UnetVisualizer({
   graph, focusTargets, otherTargets, hasFocus, density = "overview",
@@ -33,8 +35,10 @@ export default function UnetVisualizer({
   const [hover, setHover] = useState(null);
   const [drag, setDrag] = useState(null);
   const [expanded, setExpanded] = useState(() => new Set());
+  const [avail, setAvail] = useState(0);
   const anchor = useRef(null);
   const svgRef = useRef(null);
+  const boxRef = useRef(null);
   // Live drag geometry and the current handler live in refs so the window
   // listeners are attached once per drag instead of re-bound on every mousemove.
   const dragRef = useRef(null);
@@ -44,7 +48,27 @@ export default function UnetVisualizer({
     () => tokens({ ...STAGE_VARS, line: "--line", panel: "--bg-3", text: "--text", dim: "--text-dim" }),
     [],
   );
-  const layout = useMemo(() => layoutStructured(graph?.nodes), [graph]);
+  // The map is laid out for the box it is drawn in, so a wider card spreads the
+  // bands rather than leaving half of itself empty. Changes under 8px are
+  // ignored: re-laying out on every pixel would feed the observer its own
+  // output.
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return undefined;
+    const measure = () => {
+      const w = el.clientWidth;
+      setAvail((prev) => (Math.abs(w - prev) >= 8 ? w : prev));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const layout = useMemo(
+    () => layoutStructured(graph?.nodes, avail ? { available: avail } : undefined),
+    [graph, avail],
+  );
   const capsules = useMemo(() => (density === "overview" ? collapseBands(layout) : []), [layout, density]);
   const spine = useMemo(() => (density === "layers" ? runPaths(layout?.placed || []) : null), [layout, density]);
   const skips = useMemo(() => skipPaths(layout), [layout]);
@@ -208,11 +232,11 @@ export default function UnetVisualizer({
             strokeWidth={all ? 2.5 : 1.5}
             strokeDasharray={some && !all ? "3 3" : undefined}
           />
-          <text x={cap.x + 10} y={cap.y + cap.h / 2 + 4} fontSize="11" fill={c.text}>
+          <text x={cap.x + 10} y={cap.y + cap.h / 2 + 3.5} fontSize="11" fill={c.text}>
             {cap.label}{cap.hasAttention ? " ◆" : ""}
           </text>
           {some && !all && (
-            <text x={cap.x + cap.w - 8} y={cap.y + cap.h / 2 + 4} fontSize="10" textAnchor="end" fill={c.text}>
+            <text x={cap.x + cap.w - 8} y={cap.y + cap.h / 2 + 3.5} fontSize="10" textAnchor="end" fill={c.text}>
               {hit}/{cap.count}
             </text>
           )}
@@ -267,13 +291,13 @@ export default function UnetVisualizer({
   const expandedKeys = [...new Set(expandedNodes.map((n) => `${n.depth}:${n.side}`))];
 
   return (
-    <div className="scroll-x">
+    <div className="scroll-x" ref={boxRef}>
       <svg
         ref={svgRef}
         viewBox={`0 0 ${width} ${height}`}
         preserveAspectRatio="xMidYMin meet"
         className={`unet-map ${drag ? "dragging" : ""}`}
-        style={{ minWidth: Math.round(width * MIN_SCALE), maxWidth: width }}
+        style={{ maxWidth: Math.round(width * MAX_SCALE) }}
         onMouseDown={(e) => {
           if (density !== "layers" || !hasFocus || e.button !== 0) return;
           const p = localPt(e);
@@ -295,11 +319,11 @@ export default function UnetVisualizer({
                 onClick={() => pick(b.ids, { force: !rowState.all })}
                 onKeyDown={keyActivate(() => pick(b.ids, { force: !rowState.all }))}
               >
-                <rect x="0" y={b.y - 12} width={o.gutter - 10} height="24" fill="transparent" />
-                <text x="4" y={b.y - 1} fontSize="10.5" fill={rowState.hit ? "var(--accent)" : c.dim}>
+                <rect x="0" y={b.y - 11} width={o.gutter - 8} height="22" fill="transparent" />
+                <text x="2" y={b.y - 2} fontSize="10.5" fill={rowState.hit ? "var(--accent)" : c.dim}>
                   {b.label}
                 </text>
-                <text x="4" y={b.y + 11} fontSize="10" fill={c.dim}>
+                <text x="2" y={b.y + 9} fontSize="10" fill={c.dim}>
                   {b.role || `${b.channels}ch`}
                 </text>
               </g>

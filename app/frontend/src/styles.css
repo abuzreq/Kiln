@@ -572,34 +572,36 @@ body {
 .merge-shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .merge-result-mark { display: flex; flex-direction: column; align-items: center; gap: var(--s-1); padding: var(--s-4); text-align: center; }
 .empty-shot { border-style: dashed; }
-.bend-layout {
+/* The work area: the map and the stack it drives in one card on the left, the
+   two samples beside them on the right where they have room to be looked at. */
+.bend-work {
   display: grid;
-  /* Compare | map | stack. The comparison is the point of the screen -- it is
-     the only thing that says what a bend did -- so it gets a real column and the
-     map gives up the width for it. */
-  /* Save | map | compare. Compare is wider than the save column: it is the
-     only thing on the screen that shows what a bend actually did. */
-  grid-template-columns: minmax(260px, 330px) minmax(0, 1fr) minmax(330px, 440px);
+  grid-template-columns: minmax(0, 1.6fr) minmax(340px, 1fr);
   gap: var(--s-3);
   align-items: start;
 }
 @media (max-width: 1100px) {
-  /* Below this the map would be narrower than the picture it draws, so compare
-     goes full width on top and the other two share the row. */
-  .bend-layout { grid-template-columns: minmax(260px, 330px) minmax(0, 1fr); }
-  .bend-compare-col { grid-column: 1 / -1; order: -1; }
+  .bend-work { grid-template-columns: 1fr; }
 }
-.bend-side { display: flex; flex-direction: column; gap: var(--s-3); min-width: 0; }
-.bend-compare-col { min-width: 0; }
-/* The enlarged pair fills the modal: samples are small (128-512px), and a
-   lightbox that showed them at natural size would not be an enlargement. */
-.compare-large .preview-box { max-height: min(62vh, 560px); }
-.compare-large .preview-box img { width: 100%; height: 100%; }
-.preview-box img.clickable { cursor: zoom-in; }
-@media (max-width: 900px) {
-  .bend-layout { grid-template-columns: 1fr; }
+@media (min-width: 1101px) {
+  .bend-work > :last-child { position: sticky; top: var(--s-3); }
 }
-.bend-stack-card { min-height: 0; }
+.bend-work-sep { border-top: 1px solid var(--line); margin: var(--s-3) 0 0; }
+.bend-presets-panel {
+  margin-top: var(--s-2);
+  padding: var(--s-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-3);
+}
+.bend-presets-panel .bend-preset-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--s-3);
+  align-items: start;
+}
+/* Two samples, one above the other, each as wide as the column. */
+.bend-compare-card .preview-box { max-height: min(34vh, 330px); }
 .bend-editor { min-height: 0; }
 /* The stack reads left to right across the full width: a bend is a step in a
    chain, and stacked vertically in a narrow column it could show two at a time
@@ -658,7 +660,7 @@ body {
 .bend-pipe-pill {
   flex: 1 1 auto; min-width: 0; text-align: left; cursor: pointer;
   display: flex; flex-direction: column; gap: 2px;
-  padding: var(--s-2); border-radius: var(--r-2);
+  padding: var(--s-2); border-radius: var(--radius-sm);
   border: 1px solid var(--line); background: var(--bg-3); color: var(--text);
 }
 .bend-pipe-pill b { font-size: 13px; }
@@ -672,7 +674,7 @@ body {
 }
 .bend-pipe-stage.on .bend-pipe-count { color: var(--accent); }
 .bend-pipe-open {
-  width: 24px; cursor: pointer; border-radius: var(--r-2);
+  width: 24px; cursor: pointer; border-radius: var(--radius-sm);
   border: 1px solid var(--line); background: var(--bg-3); color: var(--text-dim);
 }
 .bend-pipe-open:hover { color: var(--accent); border-color: var(--accent); }
@@ -955,7 +957,6 @@ body {
 .seed-random svg { display: block; }
 .sample-steps-seed { align-items: flex-end; }
 
-.bend-save-card { min-width: 0; }
 
 .studio-split, .work-split {
   display: grid;
@@ -1207,7 +1208,7 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
   padding: 0;
   /* Two rows, then scroll. Nine presets listed in full pushed the bend editor
      off the bottom of the card, which is the thing you are actually editing. */
-  max-height: 82px;
+  max-height: min(40vh, 360px);
   overflow-y: auto;
 }
 .bend-preset-row {

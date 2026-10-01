@@ -192,6 +192,7 @@ function BendCard({
 
 export default function BendEditor({
   ops, nodes, stack, setStack, focusedId, setFocusedId, addBend, updateBend, note,
+  headExtra, beforeStack,
 }) {
   const opMap = Object.fromEntries(ops.map((o) => [o.name, o]));
   const labels = Object.fromEntries((nodes || []).map((n) => [n.id, n.label || n.id]));
@@ -219,11 +220,16 @@ export default function BendEditor({
         <div className="section-title mb-0">
           Bend stack ({stack.length})
         </div>
-        <button type="button" className="btn sm primary" onClick={addBend} disabled={!ops.length}>+ Add bend</button>
+        <div className="row center gap-2">
+          {headExtra}
+          <button type="button" className="btn sm primary" onClick={addBend} disabled={!ops.length}>+ Add bend</button>
+        </div>
       </div>
       <p className="hint mb-0">
-        Pick a bend to edit it; the map then shows and sets its layers.
+        Pick a bend to edit it; the map above then shows and sets its layers.
       </p>
+
+      {beforeStack || null}
 
       {stack.length === 0 && <div className="empty">No bends yet. Click a layer on the map, or add one here.</div>}
 

@@ -17,9 +17,12 @@ import { scaleSqrt } from "d3";
 const DEFAULTS = { colW: 62, rowH: 66, marginX: 40, top: 40, bottom: 60, rMin: 9, rMax: 26 };
 
 export const STRUCT = {
-  colW: 34, rowH: 46, wrapStep: 34, indent: 18, gutter: 74, marginR: 12,
-  top: 26, bottom: 34, minContent: 240, maxContent: 440, rMin: 6, rMax: 15,
-  capW: 86, capH: 24,
+  // colW is the tightest a row is ever packed; maxStep is how far apart the
+  // same row spreads when there is width to spend. The stair indent between
+  // levels spreads the same way, between indentMin and indentMax.
+  colW: 34, maxStep: 80, indentMin: 18, indentMax: 56,
+  rowH: 40, wrapStep: 30, gutter: 70, marginR: 10, top: 18, bottom: 20,
+  minContent: 240, maxContent: 440, rMin: 6, rMax: 13, capW: 86, capH: 20,
 };
 
 /** Resolution level of a node: 0 at full res, 1 at a half, 2 at a quarter... */
@@ -88,23 +91,48 @@ export function layoutStructured(nodes, opts = {}) {
   for (let d = 0; d <= lastRow; d += 1) rows[d] = { L: [], R: [], mid: [] };
   list.forEach((n) => rows[n.depth][n.side].push(n));
 
-  // Width is settled before anything is placed, from the widest band rather
-  // than from the layer count, and then clamped. That is the whole point: the
-  // map can no longer grow sideways without bound.
-  const need = rows.map((b, d) => 2 * d * o.indent + (b.L.length + b.R.length) * o.colW + 1.5 * o.colW);
-  const midNeed = Math.max(...rows.map((b) => b.mid.length)) * o.colW;
-  const contentW = Math.max(o.minContent, Math.min(o.maxContent, Math.max(...need, midNeed)));
-  const width = o.gutter + contentW + o.marginR;
+  // How much room one side of the U has. `available` is the width of the box
+  // the map is drawn in, measured by the caller; without it the map falls back
+  // to the width it would have taken before anything measured anything.
+  const avail = Math.max(
+    o.minContent + o.gutter + o.marginR,
+    o.available || o.maxContent + o.gutter + o.marginR,
+  );
+  const half = (avail - o.gutter - o.marginR) / 2 - 0.75 * o.colW;
+  const indent = Math.max(o.indentMin, Math.min(o.indentMax, (0.4 * half) / Math.max(1, lastRow)));
 
-  // Anything that does not fit a band wraps inside it instead of widening it.
-  const capSide = (d) => Math.max(1, Math.floor((contentW / 2 - d * o.indent - 0.75 * o.colW) / o.colW));
-  const capMid = Math.max(1, Math.floor(contentW / o.colW));
+  // Wrapping is decided at the tightest packing, so the height of the map does
+  // not jump about as the column is resized; the rows that survive then spread
+  // into whatever room is left.
+  const capSide = (d) => Math.max(1, Math.floor((half - d * indent) / o.colW) + 1);
+  const capMid = Math.max(1, Math.floor((avail - o.gutter - o.marginR) / o.colW));
   const wrapRows = rows.map((b, d) => Math.max(
     Math.ceil(b.L.length / capSide(d)),
     Math.ceil(b.R.length / capSide(d)),
     Math.ceil(b.mid.length / capMid),
     1,
   ));
+  const rowLen = rows.map((b, d) => Math.max(
+    1, Math.min(capSide(d), Math.max(b.L.length, b.R.length)),
+  ));
+  const step = rows.map((b, d) => (rowLen[d] > 1
+    ? Math.min(o.maxStep, Math.max(o.colW, (half - d * indent) / (rowLen[d] - 1)))
+    : o.colW));
+  const midLen = Math.max(1, Math.min(capMid, Math.max(...rows.map((b) => b.mid.length), 1)));
+  const stepMid = midLen > 1
+    ? Math.min(o.maxStep, Math.max(o.colW, half / (midLen - 1)))
+    : o.colW;
+
+  // The drawing is as wide as the rows actually use -- no wider, so it never
+  // leaves a hole in the middle of a wide card.
+  const extent = rows.map((b, d) => d * indent + (rowLen[d] - 1) * step[d]);
+  const contentW = Math.max(
+    o.minContent,
+    Math.max(...extent) * 2 + 1.5 * o.colW,
+    (midLen - 1) * stepMid + o.colW,
+  );
+  const width = o.gutter + contentW + o.marginR;
+
   const bandTop = [];
   rows.forEach((_, d) => {
     bandTop[d] = d === 0 ? o.top : bandTop[d - 1] + o.rowH + (wrapRows[d - 1] - 1) * o.wrapStep;
@@ -119,16 +147,16 @@ export function layoutStructured(nodes, opts = {}) {
     const put = (n, w, x) => placed.push({
       ...n, wrapRow: w, x, y: bandTop[d] + w * o.wrapStep, r: r(n.channels || 1),
     });
-    b.L.forEach((n, idx) => put(n, Math.floor(idx / cap), o.gutter + d * o.indent + (idx % cap) * o.colW));
+    b.L.forEach((n, idx) => put(n, Math.floor(idx / cap), o.gutter + d * indent + (idx % cap) * step[d]));
     b.R.forEach((n, idx) => {
       const w = Math.floor(idx / cap);
       const len = Math.min(cap, b.R.length - w * cap);
-      put(n, w, (width - o.marginR - d * o.indent) - (len - 1 - (idx % cap)) * o.colW);
+      put(n, w, (width - o.marginR - d * indent) - (len - 1 - (idx % cap)) * step[d]);
     });
     b.mid.forEach((n, idx) => {
       const w = Math.floor(idx / capMid);
       const len = Math.min(capMid, b.mid.length - w * capMid);
-      put(n, w, cx + ((idx % capMid) - (len - 1) / 2) * o.colW);
+      put(n, w, cx + ((idx % capMid) - (len - 1) / 2) * stepMid);
     });
   });
   placed.sort((a, b) => a.i - b.i);
@@ -148,7 +176,9 @@ export function layoutStructured(nodes, opts = {}) {
     };
   }).filter((b) => b.ids.length);
 
-  return { placed, bands, width, height, maxDepth: lastRow, o };
+  // The computed spread travels with the layout so the capsules land on the
+  // same stair as the nodes.
+  return { placed, bands, width, height, maxDepth: lastRow, o: { ...o, indent, step, stepMid } };
 }
 
 /** One capsule per band side: the map at arm's length. */
@@ -164,16 +194,17 @@ export function collapseBands(layout) {
   });
   const bandY = new Map(bands.map((b) => [b.depth, b.y]));
   const cx = (o.gutter + width - o.marginR) / 2;
+  const capW = Math.min(130, Math.max(o.capW, (width - o.gutter - o.marginR) * 0.22));
   return [...byKey.values()].map((c) => {
     const x = c.side === "L" ? o.gutter + c.depth * o.indent
-      : c.side === "R" ? width - o.marginR - o.capW - c.depth * o.indent
-        : cx - o.capW / 2;
+      : c.side === "R" ? width - o.marginR - capW - c.depth * o.indent
+        : cx - capW / 2;
     const name = c.side === "mid" ? "bottleneck" : `${c.side === "L" ? "enc" : "dec"} ${c.depth}`;
     return {
       ...c,
       x,
       y: (bandY.get(c.depth) ?? o.top) - o.capH / 2,
-      w: o.capW,
+      w: capW,
       h: o.capH,
       label: `${name} · ${c.count}`,
       deepest: c.depth === maxDepth,

@@ -55,13 +55,14 @@ const BEND_SWEEP_EMPTY = {
   frames: null, busy: false, job: null, fps: 8, pingpong: true,
 };
 
-/** The two samples side by side. Same markup inline and in the modal, so the
- *  enlarged view cannot drift from the one in the column. */
-function ComparePair({ plain, bent, large = false, onEnlarge }) {
+/** The two samples, side by side in the modal and stacked in the column, where
+ *  one above the other is what gives each of them the full width. Same markup
+ *  either way, so the enlarged view cannot drift from the inline one. */
+function ComparePair({ plain, bent, large = false, stacked = false, onEnlarge }) {
   const box = (src, label, alt) => (
     <div className="grow">
       <div className="section-title">{label}</div>
-      <div className={`preview-box preview-square ${large ? "" : "preview-max"}`}>
+      <div className={`preview-box preview-square ${large || stacked ? "" : "preview-max"}`}>
         {src ? (
           onEnlarge
             ? <img src={src} alt={alt} onClick={onEnlarge} className="clickable" />
@@ -71,7 +72,7 @@ function ComparePair({ plain, bent, large = false, onEnlarge }) {
     </div>
   );
   return (
-    <div className={`row gap-2 mt-2 ${large ? "compare-large" : ""}`}>
+    <div className={`${stacked ? "col" : "row"} gap-2 mt-2 ${large ? "compare-large" : ""}`}>
       {box(plain, "Without bends", "without bends")}
       {box(bent, "With bends", "with bends")}
     </div>
@@ -102,6 +103,7 @@ export function BendWorkspace({ stack, setStack }) {
   // invalidate one without the other.
   const [cachedPlainKey, setCachedPlainKey] = usePlayState("bend.plainKey", null);
   const [compareOpen, setCompareOpen] = useState(false);
+  const [presetsOpen, setPresetsOpen] = useState(false);
   const [view, setViewState] = useState(() => loadPref(VIEW_KEY, VIEWS, "simple"));
   const [grain, setGrainState] = useState(() => loadPref(GRAIN_KEY, GRAINS, "overview"));
   const [gifBusy, setGifBusy] = useState(false);
@@ -233,6 +235,7 @@ export function BendWorkspace({ stack, setStack }) {
       await api.post("/craft/bends", { name, bends: stack, model_hint: modelPath });
       toast(`Saved “${name}” — it will show up in Create`, "success");
       setSaveName("");
+      setPresetsOpen(false);
       api.get("/craft/bends").then(setPresets);
     } catch (e) { toast(e.message, "error"); }
   };
@@ -244,6 +247,7 @@ export function BendWorkspace({ stack, setStack }) {
       setStack(loaded);
       setFocusedBendId(loaded[0]?.id || null);
       setNote(null);
+      setPresetsOpen(false);
       toast(`Loaded “${name}”`, "success");
     }
   };
@@ -444,65 +448,19 @@ export function BendWorkspace({ stack, setStack }) {
         </p>
       </div>
 
-      <div className="bend-layout">
-        <div className="bend-side">
-          <div className="card bend-save-card">
-            <h3>Save this setup</h3>
-            <p className="hint mb-2">Name it to reuse in Create.</p>
-            <div className="row center wrap gap-2">
-              <div className="grow">
-                <Text label="" value={saveName} onChange={setSaveName} placeholder="e.g. melt-decoder" />
-              </div>
-              <button type="button" className="btn primary" onClick={savePreset} disabled={!stack.length}>Save bend</button>
-            </div>
-            <p className="hint mb-0 mt-2">
-              Each starter changes one thing. Load one, Compare, then edit it. Hover for details.
-            </p>
-            <BendPresetList
-              groups={[
-                { label: "Starters", presets: starterPresets },
-                { label: "Saved", presets: savedPresets },
-              ]}
-              onLoad={loadPreset}
-              ops={ops}
-            />
-            <div className="section-title mt-2">Share with other tools</div>
-            <p className="hint mb-2">
-              The shared network-bending JSON. Layer paths are per-architecture, so an imported
-              file usually needs retargeting.
-            </p>
-            <div className="row center wrap gap-2">
-              <button type="button" className="btn sm" onClick={exportBends} disabled={!stack.length}>
-                Export JSON
-              </button>
-              <button type="button" className="btn sm" onClick={() => importRef.current?.click()}>
-                Import JSON
-              </button>
-              <input
-                ref={importRef}
-                type="file"
-                accept="application/json,.json"
-                className="hidden-file"
-                onChange={(e) => { importBends(e.target.files?.[0]); e.target.value = ""; }}
-              />
-            </div>
-          </div>
-        </div>
+      <div className="bend-work">
         <div className="card">
           <div className="row between center wrap gap-2">
-            <h3 className="mb-0">Model map</h3>
-            {focusedBend ? (
-              <span className="pill accent">
-                Editing #{focusIndex + 1} {opMap[focusedBend.op]?.label || focusedBend.op}
-              </span>
-            ) : (
-              <span className="pill">No bend selected</span>
-            )}
-          </div>
-          <div className="row between center wrap gap-2 mt-1">
-            <p className="hint mb-0 grow">
-              {MAP_HINT[shown][focusedBend ? "focus" : "empty"]}
-            </p>
+            <div className="row center wrap gap-2">
+              <h3 className="mb-0">Model map</h3>
+              {focusedBend ? (
+                <span className="pill accent">
+                  Editing #{focusIndex + 1} {opMap[focusedBend.op]?.label || focusedBend.op}
+                </span>
+              ) : (
+                <span className="pill">No bend selected</span>
+              )}
+            </div>
             <div className="row center gap-2">
               {view === "structure" && (
                 <Seg ariaLabel="How much detail the map shows" tabs={GRAINS} value={grain}
@@ -512,6 +470,7 @@ export function BendWorkspace({ stack, setStack }) {
                    onChange={setView} size="sm" />
             </div>
           </div>
+          {!focusedBend && <p className="hint mt-1 mb-0">{MAP_HINT[shown].empty}</p>}
           <div className="row wrap gap-2 bend-map-chips">
             {groups.map((g) => (
               <button type="button" key={g}
@@ -541,49 +500,78 @@ export function BendWorkspace({ stack, setStack }) {
               onCreateFromNode={onCreateFromNode}
             />
           )}
+
+          {/* The stack lives in the same card as the map: the map is how you set
+              the layers of whichever card below is focused. */}
+          <div className="bend-work-sep" />
+          <BendEditor
+            ops={ops}
+            nodes={nodes}
+            stack={stack}
+            setStack={setStack}
+            focusedId={focusedBendId}
+            setFocusedId={(id) => { setFocusedBendId(id); setNote(null); }}
+            addBend={() => addBend()}
+            updateBend={updateBend}
+            note={note}
+            headExtra={(
+              <button type="button" className="btn sm" aria-expanded={presetsOpen}
+                onClick={() => setPresetsOpen((v) => !v)}>
+                Presets{presetsOpen ? " ▴" : " ▾"}
+              </button>
+            )}
+            beforeStack={presetsOpen && (
+              <div className="bend-presets-panel">
+                <div className="row center wrap gap-2">
+                  <div className="grow">
+                    <Text label="" value={saveName} onChange={setSaveName} placeholder="Name this setup, e.g. melt-decoder" />
+                  </div>
+                  <button type="button" className="btn primary" onClick={savePreset} disabled={!stack.length}>
+                    Save bend
+                  </button>
+                </div>
+                <p className="hint mt-1 mb-2">
+                  Each starter changes one thing. Load one, Compare, then edit it. Hover for details.
+                </p>
+                <BendPresetList
+                  groups={[
+                    { label: "Starters", presets: starterPresets },
+                    { label: "Saved", presets: savedPresets },
+                  ]}
+                  onLoad={loadPreset}
+                  ops={ops}
+                />
+              </div>
+            )}
+          />
         </div>
-        <div className="bend-compare-col">
-          <div className="card bend-compare-card">
-            <div className="row between center wrap gap-2">
-              <h3 className="mb-0">Compare</h3>
-              {(genPlain || genBent) && (
-                <button type="button" className="btn ghost sm" onClick={() => setCompareOpen(true)}>
-                  Enlarge
-                </button>
-              )}
-            </div>
-            <p className="hint mb-2">
-              Same seed, plain then bent. The plain side is reused until the model, settings or seed change.
-            </p>
-            <div className="row center wrap gap-2">
-              {genBusy ? (
-                <button type="button" className="btn danger" onClick={async () => { if (genJob) await api.post(`/jobs/${genJob.id}/cancel`); }}>Stop</button>
-              ) : (
-                <button type="button" className="btn primary" onClick={generateCompare} disabled={!modelPath || !stack.length}>
-                  Compare samples
-                </button>
-              )}
-              {genBusy && genJob && <span className="sub">{genJob.message || "Generating…"}</span>}
-            </div>
+
+        <div className="card bend-compare-card">
+          <div className="row between center wrap gap-2">
+            <h3 className="mb-0">Compare</h3>
             {(genPlain || genBent) && (
-              <ComparePair plain={genPlain} bent={genBent} onEnlarge={() => setCompareOpen(true)} />
+              <button type="button" className="btn ghost sm" onClick={() => setCompareOpen(true)}>
+                Enlarge
+              </button>
             )}
           </div>
+          <p className="hint mb-2">
+            Same seed, plain then bent. The plain side is reused until the model, settings or seed change.
+          </p>
+          <div className="row center wrap gap-2">
+            {genBusy ? (
+              <button type="button" className="btn danger" onClick={async () => { if (genJob) await api.post(`/jobs/${genJob.id}/cancel`); }}>Stop</button>
+            ) : (
+              <button type="button" className="btn primary" onClick={generateCompare} disabled={!modelPath || !stack.length}>
+                Compare samples
+              </button>
+            )}
+            {genBusy && genJob && <span className="sub">{genJob.message || "Generating…"}</span>}
+          </div>
+          {(genPlain || genBent) && (
+            <ComparePair plain={genPlain} bent={genBent} stacked onEnlarge={() => setCompareOpen(true)} />
+          )}
         </div>
-      </div>
-
-      <div className="card bend-stack-card">
-        <BendEditor
-          ops={ops}
-          nodes={nodes}
-          stack={stack}
-          setStack={setStack}
-          focusedId={focusedBendId}
-          setFocusedId={(id) => { setFocusedBendId(id); setNote(null); }}
-          addBend={() => addBend()}
-          updateBend={updateBend}
-          note={note}
-        />
       </div>
 
       {compareOpen && (
@@ -596,6 +584,31 @@ export function BendWorkspace({ stack, setStack }) {
           <ComparePair plain={genPlain} bent={genBent} large />
         </Modal>
       )}
+
+      <Disclose
+        title="Share with other tools"
+        tip="The shared network-bending JSON, as other bending tools write it."
+      >
+        <p className="hint mb-2">
+          Layer paths are per-architecture, so a file imported from elsewhere usually needs
+          retargeting before it does what it did there.
+        </p>
+        <div className="row center wrap gap-2">
+          <button type="button" className="btn sm" onClick={exportBends} disabled={!stack.length}>
+            Export JSON
+          </button>
+          <button type="button" className="btn sm" onClick={() => importRef.current?.click()}>
+            Import JSON
+          </button>
+          <input
+            ref={importRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden-file"
+            onChange={(e) => { importBends(e.target.files?.[0]); e.target.value = ""; }}
+          />
+        </div>
+      </Disclose>
 
       <Disclose
         title="Sweep a bend parameter"
