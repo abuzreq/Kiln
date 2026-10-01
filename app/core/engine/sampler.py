@@ -824,9 +824,9 @@ class Sampler:
 
                 done += 1
                 yield Frame(
-                    step=done, total=max(total, done), batch=bs,
-                    render=partial(self._to_images, x_s, params, pprocess,
-                                   tensor_to_pil, backend, meta),
+                    step=done, total=max(total, done), batch=bs, x=x_s,
+                    render=partial(self._to_images, params=params, pprocess=pprocess,
+                                   tensor_to_pil=tensor_to_pil, backend=backend, meta=meta),
                 )
         finally:
             if bend_runtime is not None:
@@ -872,9 +872,12 @@ class Frame(Mapping):
     while the routes publish a preview at most ten times a second and every
     other caller reads only the last frame. Measured with
     scripts/bench_concurrency.py, the discarded renders were 12-35% of a 256px
-    run. A frame now holds the step's x0 and renders when someone reads
-    ``image`` / ``image_pp`` / ``images`` / ``images_pp``, once; ``step``,
-    ``total`` and ``batch`` cost nothing.
+    run. A frame now holds the step's x0 and renders when someone reads an
+    image, once; ``step``, ``total`` and ``batch`` cost nothing. Reading
+    ``image`` / ``image_pp`` renders only the first batch item -- all a live
+    preview shows -- and ``images`` / ``images_pp`` render the rest. The display
+    mapping and post-processing are per item, so item 0 comes out the same
+    either way.
 
     It is a read-only mapping so every ``frame["image"]`` / ``frame.get(...)``
     caller works unchanged. A caller that wants to transform the images -- region
@@ -889,45 +892,57 @@ class Frame(Mapping):
     _SINGLE = ("image", "image_pp")
     _BATCH = ("images", "images_pp")
 
-    def __init__(self, *, step: int, total: int, batch: int, render):
+    def __init__(self, *, step: int, total: int, batch: int, x, render):
         self._meta = {"step": step, "total": total, "batch": batch}
-        self._render = render          # () -> (raws, pps); dropped once used
+        self._x = x                    # the step's x0, (B,3,H,W); dropped once rendered
+        self._render = render          # x -> (raws, pps)
         self._maps = []
-        self._images = None
+        self._first = None             # (raw, pp) of item 0
+        self._all = None               # (raws, pps) of every item
 
     def map_images(self, fn) -> "Frame":
         """Apply ``fn`` to every image this frame yields, raw and processed alike."""
-        if self._images is None:
-            self._maps.append(fn)
-        else:
-            self._images = {k: ([fn(im) for im in v] if isinstance(v, list) else fn(v))
-                            for k, v in self._images.items()}
+        self._maps.append(fn)
+        if self._first is not None:
+            self._first = tuple(fn(im) for im in self._first)
+        if self._all is not None:
+            self._all = tuple([fn(im) for im in ims] for ims in self._all)
         return self
 
     def _image_keys(self):
         return self._SINGLE + (self._BATCH if self._meta["batch"] > 1 else ())
 
-    def _ensure(self):
-        if self._images is not None:
-            return
-        raws, pps = self._render()
+    def _rendered(self, x):
+        raws, pps = self._render(x)
         for fn in self._maps:
             raws = [fn(im) for im in raws]
             pps = [fn(im) for im in pps]
-        self._images = {"image": raws[0], "image_pp": pps[0]}
-        if self._meta["batch"] > 1:
-            self._images["images"] = raws
-            self._images["images_pp"] = pps
-        # The closure holds the step's x0 on the device; let it go.
-        self._render = None
-        self._maps = []
+        return raws, pps
+
+    def _ensure(self, every: bool):
+        if self._all is not None or (not every and self._first is not None):
+            return
+        if every or self._meta["batch"] == 1:
+            self._all = self._rendered(self._x)
+            self._first = (self._all[0][0], self._all[1][0])
+            # The step's x0 lives on the device; nothing needs it any more.
+            self._x = None
+        else:
+            # The live preview shows the first variation only. Rendering and
+            # post-processing the other three for it was the bulk of a 4-variation
+            # preview's cost.
+            raws, pps = self._rendered(self._x[:1])
+            self._first = (raws[0], pps[0])
 
     def __getitem__(self, key):
         if key in self._meta:
             return self._meta[key]
+        if key in self._SINGLE:
+            self._ensure(every=False)
+            return self._first[self._SINGLE.index(key)]
         if key in self._image_keys():
-            self._ensure()
-            return self._images[key]
+            self._ensure(every=True)
+            return self._all[self._BATCH.index(key)]
         raise KeyError(key)
 
     def __iter__(self):
