@@ -39,7 +39,7 @@ from app.core.engine.sampler import SampleParams, _Clip, pick_device, sampler
 from app.core.model_manager import manager
 from utils.imaging import build_card, save_with_params
 from utils.logger import get_logger
-from utils.process_control import registry
+from utils.process_control import LIVE, registry
 
 log = get_logger("explore")
 
@@ -632,7 +632,7 @@ class Explorer:
 
     def _yield_to(self) -> str | None:
         for j in registry.list():
-            if j.get("status") == "running" and j.get("kind") in YIELD_KINDS:
+            if j.get("status") in LIVE and j.get("kind") in YIELD_KINDS:
                 return j["kind"]
         return None
 

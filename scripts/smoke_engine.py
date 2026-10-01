@@ -36,8 +36,199 @@ def main():
     frames = list(sampler.run(params))
     print(f"sampled {len(frames)} frames; last image size = {frames[-1]['image'].size}")
 
+    check_lazy_frames(out)
+    check_interleaved_repro(out)
+    check_clip_device_switch(out)
+    check_single_load(out)
+    check_generation_loads_once(out)
+
     out.unlink(missing_ok=True)
     print("OK")
+
+
+def check_lazy_frames(ckpt: Path):
+    """Frames render only when read, once, and a deferred transform rides along.
+
+    The sampler used to render every step whether or not anyone looked; callers
+    that read only the last frame paid for all of them. Counting calls to
+    ``_to_images`` is the direct test that they no longer do.
+    """
+    from app.core.engine import sampler as sampler_mod
+
+    calls = []
+    real = sampler_mod.Sampler._to_images
+
+    def counting(self, x_s, *a, with_pp=True, **kw):
+        calls.append((x_s.shape[0], with_pp))
+        return real(self, x_s, *a, with_pp=with_pp, **kw)
+
+    sampler_mod.Sampler._to_images = counting
+    try:
+        params = SampleParams(model_path=str(ckpt), image_size=64, steps=6, device="cpu",
+                              batch_size=2, seed=7, postproc={"contrast": 1.2})
+        last = None
+        for frame in sampler.run(params):
+            assert frame["step"] >= 1 and frame["batch"] == 2   # free to read
+            last = frame
+        assert not calls, f"frames rendered before anyone read them: {len(calls)}"
+        # A live preview: the first variation, raw, with no post-processing.
+        last["image"]
+        assert calls == [(1, False)], f"a raw preview rendered {calls}"
+        pp = last["image_pp"]
+        assert calls[-1] == (1, True) and len(calls) == 2
+        # The preview renders the first variation alone; it has to be the same
+        # picture the full batch render gives for that item.
+        assert len(last["images_pp"]) == 2 and calls[-1] == (2, True)
+        assert last["images_pp"][0].tobytes() == pp.tobytes(), "preview differs from item 0"
+        n = len(calls)
+        last["images"], last["images_pp"], last["image"], last["image_pp"]
+        assert len(calls) == n, "a rendered frame rendered again"
+        assert set(last) == {"step", "total", "batch", "image", "image_pp",
+                             "images", "images_pp"}
+
+        # map_images is deferred too, and applies to every image the frame yields.
+        seen = []
+        frame = next(iter(sampler.run(SampleParams(
+            model_path=str(ckpt), image_size=64, steps=2, device="cpu", seed=7))))
+        frame.map_images(lambda im: seen.append(im) or im.transpose(0))
+        assert not seen, "map_images ran before the frame was read"
+        frame["image_pp"]
+        assert len(seen) == 2 and "images" not in frame
+    finally:
+        sampler_mod.Sampler._to_images = real
+    print("lazy frames: no render until read, raw item-0 preview skips postproc, "
+          "map_images deferred")
+
+
+def check_interleaved_repro(ckpt: Path):
+    """A run's image does not depend on what else is sampling at the same time.
+
+    Two runs stepped alternately in one thread interleave their random draws
+    exactly as two concurrent runs do: DDIM's eta noise, extra noise, and the
+    guidance cutouts. Each has to come out byte-identical to its solo render,
+    which is the promise every capture's recipe makes.
+    """
+    def params(seed, text=""):
+        return SampleParams(model_path=str(ckpt), image_size=64, steps=4, device="cpu",
+                            seed=seed, eta=0.5, noise_level=0.9, sampler="ddim",
+                            text=text, guidance_step=0.05, postproc={})
+
+    def alone(p):
+        last = None
+        for frame in sampler.run(p):
+            last = frame
+        return last["image"].tobytes()
+
+    guided, plain = params(5, "a red bird on a branch"), params(9)
+    want = [alone(guided), alone(plain)]
+
+    runs = [sampler.run(guided), sampler.run(plain)]
+    last = [None, None]
+    live = [True, True]
+    while any(live):
+        for i, run in enumerate(runs):
+            if live[i]:
+                try:
+                    last[i] = next(run)
+                except StopIteration:
+                    live[i] = False
+    got = [f["image"].tobytes() for f in last]
+    assert got[0] == want[0], "a guided run changed because another run sampled alongside it"
+    assert got[1] == want[1], "a plain run changed because another run sampled alongside it"
+    print("interleaved runs reproduce their solo renders (eta, extra noise, guidance)")
+
+
+def check_clip_device_switch(ckpt: Path):
+    """Guidance survives CLIP moving between devices within one process.
+
+    check_interleaved_repro has just loaded CLIP on the CPU. A guided CUDA run
+    after it used to cast that copy to fp16 in place, fail inside CLIP with
+    "expected scalar type Float but found Half", log "guidance disabled" and
+    come out unguided -- silently, as an ordinary-looking image.
+    """
+    if not torch.cuda.is_available():
+        print("clip device switch: skipped (no CUDA)")
+        return
+
+    def last_image(text):
+        last = None
+        for frame in sampler.run(SampleParams(
+                model_path=str(ckpt), image_size=64, steps=4, device="cuda", seed=5,
+                sampler="ddim", text=text, guidance_step=0.05, postproc={})):
+            last = frame
+        return last["image"].tobytes()
+
+    assert last_image("a red bird on a branch") != last_image(""),         "a CUDA run after a CPU one came out unguided"
+    print("clip device switch: a CUDA run after a CPU one is still guided")
+
+
+def check_single_load(ckpt: Path):
+    """Runs that miss the cache on the same model at once load it once."""
+    import threading
+    import time
+
+    from app.core import backends
+
+    backend, _ = backends.resolve(str(ckpt))
+    real = type(backend).load
+    loads = []
+
+    def slow_load(self, ref, device="cpu", ema=True):
+        loads.append(device)
+        time.sleep(0.3)                     # long enough for every thread to miss
+        return real(self, ref, device=device, ema=ema)
+
+    manager.evict(str(ckpt))
+    type(backend).load = slow_load
+    try:
+        got = [None] * 4
+
+        def work(i):
+            got[i] = manager.load(str(ckpt), device="cpu")
+
+        threads = [threading.Thread(target=work, args=(i,)) for i in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        type(backend).load = real
+    assert len(loads) == 1, f"one model loaded {len(loads)} times by concurrent runs"
+    assert all(b is got[0] for b in got), "concurrent loads handed back different copies"
+    print("model loads: four concurrent misses on one model load it once")
+
+
+def check_generation_loads_once(ckpt: Path):
+    """A GPU generation holds one cached copy of its model, not two.
+
+    The routes loaded the model on the CPU just to read its metadata, then the
+    sampler loaded it again on the GPU, so one generation filled both slots of
+    the two-model cache and the next model evicted the one in use.
+    """
+    if not torch.cuda.is_available():
+        print("generation loads once: skipped (no CUDA)")
+        return
+    import time
+
+    from app.backend.app import create_app
+    from app.core import backends
+
+    manager.clear_cache()
+    client = create_app().test_client()
+    r = client.post("/api/perform/sample", json={
+        "model_path": str(ckpt), "image_size": 64, "steps": 2, "device": "cuda",
+        "sampler": "ddim", "seed": 1})
+    job = r.get_json()["data"]["job"]
+    for _ in range(600):
+        job = client.get(f"/api/jobs/{job['id']}").get_json()["data"]
+        if job["status"] in ("done", "error", "cancelled"):
+            break
+        time.sleep(0.1)
+    assert job["status"] == "done", job.get("message")
+    ident = str(backends.parse_ref(str(ckpt)))
+    keys = [k for k in manager._cache if k.rsplit("|", 2)[0] == ident]
+    assert keys == [f"{ident}|cuda|ema"], f"one generation cached {keys}"
+    print("generation loads once: only the GPU copy is cached")
 
 
 if __name__ == "__main__":

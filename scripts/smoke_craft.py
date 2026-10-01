@@ -98,9 +98,52 @@ def main():
     frames = list(sampler.run(params, bend_runtime=rt))
     print(f"bended sampling produced {len(frames)} frames; last size {frames[-1]['image'].size}")
 
+    check_bend_isolation(out)
+
     out.unlink(missing_ok=True)
     (ROOT / "workspace_smoke_craft_conf.pt").unlink(missing_ok=True)
     print("OK")
+
+
+def check_bend_isolation(ckpt: Path):
+    """A bend changes only the run that applied it.
+
+    Bend hooks are registered on the model's modules, and every run on that
+    model shares one cached module. A bent run and a plain run on the same
+    model, stepped alternately in one thread, each have to come out exactly as
+    they do alone -- without isolation the plain run is bent from the moment
+    the other attaches its hooks.
+    """
+    stack = [{"op": "add", "params": {"value": 0.5}, "targets": ["encoder"],
+              "step_start": 0, "step_end": 1, "active": True}]
+
+    def params(seed):
+        return SampleParams(model_path=str(ckpt), image_size=64, steps=4, device="cpu",
+                            seed=seed, sampler="ddim", eta=0.0, postproc={})
+
+    def alone(p, rt=None):
+        last = None
+        for frame in sampler.run(p, bend_runtime=rt):
+            last = frame
+        return last["image"].tobytes()
+
+    plain_alone = alone(params(3))
+    bent_alone = alone(params(4), bending.build_runtime(stack))
+    assert alone(params(3), bending.build_runtime(stack)) != plain_alone, "the bend did nothing"
+
+    runs = [sampler.run(params(3)), sampler.run(params(4), bend_runtime=bending.build_runtime(stack))]
+    last = [None, None]
+    live = [True, True]
+    while any(live):
+        for i, run in enumerate(runs):
+            if live[i]:
+                try:
+                    last[i] = next(run)
+                except StopIteration:
+                    live[i] = False
+    assert last[0]["image"].tobytes() == plain_alone, "a plain run was bent by another run's stack"
+    assert last[1]["image"].tobytes() == bent_alone, "a bent run changed when run alongside another"
+    print("bends stay in their own run: plain and bent runs on one model, interleaved, match solo")
 
 
 if __name__ == "__main__":

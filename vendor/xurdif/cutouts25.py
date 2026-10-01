@@ -65,16 +65,17 @@ class GpuCutoutSampler:
         return torch.tensor(vals, dtype=torch.float32)
 
     def _sample_sizes(
-        self, low: int, high: int, s: float, n: int, device: torch.device, dtype: torch.dtype
+        self, low: int, high: int, s: float, n: int, device: torch.device, dtype: torch.dtype,
+        generator: Optional[torch.Generator] = None,  # KILN: see sample()
     ) -> torch.Tensor:
         """Return [n] integer sizes on device (vectorized)."""
         if self.cfg.strategy == "linear":
-            u = torch.rand(n, device=device, dtype=dtype)
+            u = torch.rand(n, device=device, dtype=dtype, generator=generator)
             sizes = low + u * (high - low)
         elif self.cfg.strategy == "loguniform":
             lo = math.log(max(1, low))
             hi = math.log(max(low + 1, high))
-            u = torch.rand(n, device=device, dtype=dtype)
+            u = torch.rand(n, device=device, dtype=dtype, generator=generator)
             sizes = torch.exp(u * (hi - lo) + lo)
         elif self.cfg.strategy == "mixture":
             bands = self._bands_between(low, high).to(device=device, dtype=dtype)
@@ -87,10 +88,10 @@ class GpuCutoutSampler:
                 gamma = 0.5 * (1.0 - s) + 2.0 * s
                 weights = xs.pow(gamma)
                 probs = (weights / (weights.sum() + 1e-12)).clamp_min(1e-12)
-                idx = torch.multinomial(probs, num_samples=n, replacement=True)
+                idx = torch.multinomial(probs, num_samples=n, replacement=True, generator=generator)
                 chosen = bands[idx]
                 # jitter ±25%, clamp to [low, high]
-                jitter = (torch.rand(n, device=device, dtype=dtype) * 0.5 + 0.75)
+                jitter = (torch.rand(n, device=device, dtype=dtype, generator=generator) * 0.5 + 0.75)
                 sizes = (chosen * jitter).clamp(min=float(low), max=float(high))
         else:
             raise ValueError(f"Unknown strategy {self.cfg.strategy}")
@@ -98,7 +99,8 @@ class GpuCutoutSampler:
         return sizes.round().clamp(min=2).to(torch.int64)
 
     def _sample_boxes(
-        self, H: int, W: int, sizes: torch.Tensor, device: torch.device, dtype: torch.dtype
+        self, H: int, W: int, sizes: torch.Tensor, device: torch.device, dtype: torch.dtype,
+        generator: Optional[torch.Generator] = None,  # KILN: see sample()
     ) -> torch.Tensor:
         """
         Return boxes [N, 4] where each row is (x0, y0, w, h), integers on device.
@@ -111,8 +113,8 @@ class GpuCutoutSampler:
         avail_h = max(2, H - 2*my)
 
         # aspect ratio jitter
-        ar = 0.8 + torch.rand(n, device=device, dtype=dtype) * (1.25 - 0.8)
-        flip = (torch.rand(n, device=device, dtype=dtype) < 0.5)
+        ar = 0.8 + torch.rand(n, device=device, dtype=dtype, generator=generator) * (1.25 - 0.8)
+        flip = (torch.rand(n, device=device, dtype=dtype, generator=generator) < 0.5)
 
         w = torch.where(flip, sizes.to(dtype), (sizes * ar).to(dtype))
         h = torch.where(flip, (sizes / ar).to(dtype), sizes.to(dtype))
@@ -123,8 +125,8 @@ class GpuCutoutSampler:
         # positions
         max_x0 = torch.clamp(torch.tensor(W - 2*mx, device=device) - w, min=0)
         max_y0 = torch.clamp(torch.tensor(H - 2*my, device=device) - h, min=0)
-        x0 = (torch.rand(n, device=device, dtype=dtype) * (max_x0 + 1).to(dtype)).floor().to(torch.int64) + mx
-        y0 = (torch.rand(n, device=device, dtype=dtype) * (max_y0 + 1).to(dtype)).floor().to(torch.int64) + my
+        x0 = (torch.rand(n, device=device, dtype=dtype, generator=generator) * (max_x0 + 1).to(dtype)).floor().to(torch.int64) + mx
+        y0 = (torch.rand(n, device=device, dtype=dtype, generator=generator) * (max_y0 + 1).to(dtype)).floor().to(torch.int64) + my
 
         boxes = torch.stack([x0, y0, w, h], dim=-1)  # [N,4]
         return boxes
@@ -197,8 +199,10 @@ class GpuCutoutSampler:
         Returns:
           crops: [N, C, out_size, out_size] on the same device as img.
         """
-        if generator is not None:
-            torch.manual_seed(generator.initial_seed())
+        # KILN: every crop is drawn from `generator` when one is given, rather than
+        # reseeding the global RNG from it. Kiln passes each sampling run's own
+        # generator, so concurrent runs cannot take each other's random numbers;
+        # reseeding the global RNG is exactly the shared state that broke that.
 
         if img.dim() == 3:
             _, H, W = img.shape
@@ -207,8 +211,9 @@ class GpuCutoutSampler:
 
         device, dtype = img.device, img.dtype
         low, high, num_cuts = self._derive_params(slider)
-        sizes = self._sample_sizes(low, high, s=slider, n=num_cuts, device=device, dtype=dtype)
-        boxes = self._sample_boxes(H, W, sizes, device=device, dtype=dtype)
+        sizes = self._sample_sizes(low, high, s=slider, n=num_cuts, device=device, dtype=dtype,
+                                   generator=generator)
+        boxes = self._sample_boxes(H, W, sizes, device=device, dtype=dtype, generator=generator)
         crops = self._extract(img, boxes)
         crops = self._maybe_clip_normalize(crops)
         return crops

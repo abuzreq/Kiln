@@ -9,13 +9,37 @@ At sample time a ``BendRuntime`` registers forward hooks on the targeted modules
 and rewrites their output activations. To see what a bend does, use Compare
 samples or the bend parameter sweep — both render real generations.
 """
+import threading
 from collections import defaultdict
+from contextlib import contextmanager
 
 import torch
 
 from app.core.craft.ops import apply_op
 
 GROUPS = ("all", "encoder", "mid", "decoder", "attention", "blocks")
+
+# Which sampling run the model forward on this thread belongs to. Hooks live on
+# the model's modules, and every run on a model shares one cached module, so a
+# bent run's hooks would otherwise fire on another run's forward passes.
+_caller = threading.local()
+_NOBODY = object()
+
+
+@contextmanager
+def forward_of(runtime):
+    """Run the enclosed model call as ``runtime``'s (None: a run with no bends).
+
+    The sampler wraps each denoise step in this. A hook fires only when its own
+    runtime is the caller -- or when no sampler run is calling at all, which is
+    how ``introspect.capture_activation`` and other direct callers still work.
+    """
+    prev = getattr(_caller, "run", _NOBODY)
+    _caller.run = runtime
+    try:
+        yield
+    finally:
+        _caller.run = prev
 
 
 def _default_backend():
@@ -83,6 +107,9 @@ class BendRuntime:
         def hook(m, inp, out):
             if not isinstance(out, torch.Tensor) or out.dim() != 4:
                 return out
+            caller = getattr(_caller, "run", _NOBODY)
+            if caller is not _NOBODY and caller is not self:
+                return out                  # another run's forward pass
             frac = self._frac()
             y = out
             for b in bends:
