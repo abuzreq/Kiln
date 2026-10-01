@@ -1,8 +1,9 @@
 """API smoke for generations going through the lanes (CPU, untrained models).
 
 Covers what the routes add on top of scripts/smoke_lanes.py: jobs start
-queued, a repeat run's seeds and saved files, cancelling a queued job and a
-whole group, the light job list, and a bad model failing as a job.
+queued, cancelling a queued job, the light job list, runs on two models at
+once, a bad model failing as a job, and saving into a captures folder (what
+Create does with a queue's results).
 """
 import os
 import shutil
@@ -37,19 +38,18 @@ def place_model(name):
 
 def main():
     a, b = place_model("smoke_queue_a"), place_model("smoke_queue_b")
-    group_dir = workspace.captures / f"smoke-repeat-{os.getpid()}"
+    folder = workspace.captures / f"smoke-queue-{os.getpid()}"
     c = create_app().test_client()
     try:
-        check_repeat(c, str(a), group_dir)
+        check_capture_folder(c, str(a), folder)
         check_same_model_waits(c, str(a))
         check_models_overlap(c, str(a), str(b))
-        check_cancel_group(c, str(a))
         check_bad_model(c)
         check_fill_size(c, str(a))
     finally:
         for p in (a, b):
             p.unlink(missing_ok=True)
-        shutil.rmtree(group_dir, ignore_errors=True)
+        shutil.rmtree(folder, ignore_errors=True)
     print("OK")
 
 
@@ -74,37 +74,27 @@ def wait(c, jid, pred=lambda j: j["status"] in TERMINAL, what="the job to finish
         time.sleep(0.05)
 
 
-def check_repeat(c, model, group_dir):
-    """Runs k start at seed + k * variations, and each image is saved with its recipe."""
-    out = post(c, "/api/perform/sample", {
-        "model_path": model, **FAST, "seed": 100, "batch_size": 2, "repeat": 3,
-        "group_name": group_dir.name})
-    jobs = out["jobs"]
-    assert len(jobs) == 3 and out["job"]["id"] == jobs[0]["id"]
-    groups = [j["detail"]["group"] for j in jobs]
-    assert len({g["id"] for g in groups}) == 1 and [g["index"] for g in groups] == [0, 1, 2]
-    assert [j["detail"]["seeds"] for j in jobs] == [[100, 101], [102, 103], [104, 105]]
-    # One model, so one lane: the rest wait their turn.
-    assert [j["status"] for j in jobs[1:]] == ["queued", "queued"], [j["status"] for j in jobs]
-
-    done = [wait(c, j["id"]) for j in jobs]
-    assert all(j["status"] == "done" for j in done), [j["message"] for j in done]
-    for j in done:
-        names = sorted(Path(p).name for p in j["detail"]["saved"])
-        assert names == sorted(f"{j['id']}-seed{s}.png" for s in j["detail"]["seeds"]), names
-        for p, s in zip(sorted(j["detail"]["saved"]), sorted(j["detail"]["seeds"])):
-            card = read_params(Path(p))
-            assert card["params"]["seed"] == s and card["params"]["batch_size"] == 1, card
-    assert len(list(group_dir.glob("*.png"))) == 6
-
+def check_capture_folder(c, model, folder):
+    """A queued run's images are saved by the client into one folder per queue."""
+    done = wait(c, post(c, "/api/perform/sample", {"model_path": model, **FAST, "seed": 100,
+                                                   "batch_size": 2})["job"]["id"])
+    assert done["status"] == "done" and done["detail"]["seeds"] == [100, 101]
+    for img, card in zip(done["detail"]["frames"], done["detail"]["cards"]):
+        seed = card["params"]["seed"]
+        out = post(c, "/api/perform/capture", {"image": img, "card": card, "folder": folder.name,
+                                               "name": f"{done['id']}-seed{seed}"})
+        assert Path(out["path"]).parent == folder, out["path"]
+        back = read_params(Path(out["path"]))
+        assert back["params"]["seed"] == seed and back["params"]["batch_size"] == 1, back
     listed = c.get("/api/captures").get_json()["data"]["captures"]
-    mine = [e for e in listed if e["folder"] == group_dir.name]
-    assert len(mine) == 6, f"/captures lists {len(mine)} of the run's 6 images"
+    mine = sorted(e["name"] for e in listed if e["folder"] == folder.name)
+    assert mine == [f"{done['id']}-seed100", f"{done['id']}-seed101"], mine
 
-    single = post(c, "/api/perform/sample", {"model_path": model, **FAST, "seed": 7})
-    assert "jobs" in single and "group" not in single["job"]["detail"]
-    assert "saved" not in wait(c, single["job"]["id"])["detail"], "a single run was saved"
-    print("repeat: consecutive seeds, one file per image with its recipe, /captures sees them")
+    r = c.post("/api/perform/capture", json={"image": done["detail"]["frames"][0],
+                                              "folder": "../outside"})
+    assert r.status_code == 422, f"a folder outside captures was accepted ({r.status_code})"
+    assert "group" not in done["detail"] and "saved" not in done["detail"]
+    print("capture folder: one file per image with its recipe, listed under its folder")
 
 
 def check_same_model_waits(c, model):
@@ -141,21 +131,6 @@ def check_models_overlap(c, a, b):
     for j in (ja, jb):
         wait(c, j["id"])
     print("different models: two lanes run at once")
-
-
-def check_cancel_group(c, model):
-    """Cancelling a group stops the running run and every waiting one."""
-    out = post(c, "/api/perform/sample", {"model_path": model, **SLOW, "seed": 1, "repeat": 4,
-                                          "group_name": f"smoke-cancel-{os.getpid()}"})
-    gid = out["job"]["detail"]["group"]["id"]
-    wait(c, out["job"]["id"], lambda j: j["status"] == "running", "the first run to start")
-    r = c.post(f"/api/jobs/group/{gid}/cancel").get_json()["data"]
-    assert r["cancelled"] == 4, r
-    finals = [wait(c, j["id"]) for j in out["jobs"]]
-    assert all(j["status"] == "cancelled" for j in finals), [j["status"] for j in finals]
-    assert not any(j["detail"].get("saved") for j in finals)
-    assert not (workspace.captures / f"smoke-cancel-{os.getpid()}").exists()
-    print("group cancel: the running run and all three waiting ones stop, nothing saved")
 
 
 def check_bad_model(c):

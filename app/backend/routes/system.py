@@ -204,12 +204,6 @@ def cancel_job(job_id):
     return ok({"cancelled": registry.cancel(job_id)})
 
 
-@bp.post("/jobs/group/<group_id>/cancel")
-def cancel_job_group(group_id):
-    """Stop a repeat run: every one of its jobs that has not finished."""
-    return ok({"cancelled": registry.cancel_group(group_id)})
-
-
 @bp.post("/jobs/<job_id>/pause")
 def pause_job(job_id):
     return ok({"paused": registry.pause(job_id)})

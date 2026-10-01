@@ -28,6 +28,13 @@ import {
 
 const HISTORY_MAX = 24;
 const TERMINAL = new Set(["done", "error", "cancelled"]);
+
+/** queue_YYYYmmdd-HHMMSS, local time: one captures folder per queue. */
+function queueFolderName(d = new Date()) {
+  const p = (n) => String(n).padStart(2, "0");
+  return `queue_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`
+    + `-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
 // The watched run is polled in full at the browser's preview rate; the rest of
 // the queue only needs progress and place in line, from the light job list.
 const WATCH_POLL_MS = 300;
@@ -148,9 +155,17 @@ export default function Play() {
   const watchedRef = useRef(null);
   // id -> what to do with the finished job; registered by whoever submitted it.
   const settlers = useRef({});
+  // The captures folder for this queue's results: named when a queue forms,
+  // shared by every run sent to Results while it lasts, forgotten once it empties.
+  const queueFolderRef = useRef(null);
+  const [queueFolder, setQueueFolder] = useState(null);
   const commitRuns = useCallback((fn) => {
     runsRef.current = fn(runsRef.current);
     setRuns(runsRef.current);
+    if (!runsRef.current.length && queueFolderRef.current) {
+      queueFolderRef.current = null;
+      setQueueFolder(null);
+    }
   }, []);
   const watch = useCallback((id) => {
     if (watchedRef.current === id) return;
@@ -171,14 +186,22 @@ export default function Play() {
    *  Returns one promise per job, settled once its `settle` has run. */
   const trackRuns = useCallback((jobs, { settle, fill = false, toResults = false }) => {
     const queueing = toResults || jobs.length > 1 || runsRef.current.length > 0;
+    if (queueing && !queueFolderRef.current) {
+      queueFolderRef.current = queueFolderName();
+      setQueueFolder(queueFolderRef.current);
+    }
+    const folder = queueFolderRef.current;
     const done = jobs.map((j) => new Promise((resolve) => {
       settlers.current[j.id] = async (finished, run) => {
         try { await settle(finished, run); } finally { resolve(finished); }
       };
     }));
     commitRuns((rs) => [
-      ...rs.map((r) => (queueing && !r.fill ? { ...r, toResults: true } : r)),
-      ...jobs.map((j) => ({ id: j.id, job: j, fill, toResults: queueing && !fill, discard: false })),
+      ...rs.map((r) => (queueing && !r.fill ? { ...r, toResults: true, folder } : r)),
+      ...jobs.map((j) => ({
+        id: j.id, job: j, fill, toResults: queueing && !fill, folder: queueing ? folder : null,
+        discard: false,
+      })),
     ]);
     if (!watchedRef.current && jobs.length) watch(jobs[0].id);
     return done;
@@ -187,11 +210,6 @@ export default function Play() {
   const cancelRun = useCallback(async (id) => {
     commitRuns((rs) => rs.map((r) => (r.id === id ? { ...r, discard: true } : r)));
     await api.post(`/jobs/${id}/cancel`);
-  }, [commitRuns]);
-  const cancelGroup = useCallback(async (groupId) => {
-    commitRuns((rs) => rs.map((r) => (
-      r.job.detail?.group?.id === groupId ? { ...r, discard: true } : r)));
-    await api.post(`/jobs/group/${groupId}/cancel`);
   }, [commitRuns]);
 
   // One poll loop for the whole queue, alive while anything is in it.
@@ -1154,7 +1172,7 @@ export default function Play() {
     // the new state, so it reads this rather than a prop.
     docRef,
     job, genRunning, genPaused,
-    runs, watchedId, watch, trackRuns, cancelRun, cancelGroup,
+    runs, watchedId, watch, trackRuns, cancelRun, queueFolder,
   };
 
   return (
@@ -1518,27 +1536,17 @@ function CaptureButton({ image, card, label = "Save", className = "btn sm" }) {
  */
 /** Every run the Create panel has in flight, one chip each.
  *
- *  A repeat run collapses to one chip with its count. A running chip shows a
- *  progress ring, a waiting one its place in line. Clicking a chip watches it;
- *  the x cancels it (a whole repeat run at once), and what it had is dropped. */
+ *  A running chip shows a progress ring, a waiting one its place in line.
+ *  Clicking a chip watches it; the x cancels it, and what it had is dropped. */
 function QueueStrip() {
-  const { runs, watchedId, watch, cancelRun, cancelGroup } = usePlay();
+  const { runs, watchedId, watch, cancelRun, queueFolder } = usePlay();
   if (!runs.length) return null;
-  const chips = [];
-  const groups = new Map();
-  for (const r of runs) {
-    const g = r.job.detail?.group;
-    if (g && groups.has(g.id)) { groups.get(g.id).members.push(r); continue; }
-    const chip = { key: g?.id || r.id, group: g || null, members: [r] };
-    if (g) groups.set(g.id, chip);
-    chips.push(chip);
-  }
   const live = runs.filter((r) => r.job.status === "running").length;
   const waiting = runs.length - live;
   // Where they land, as the landing rule decided: a lone run still goes to its
   // layer, and a queue (or a fill, which is never queued) says so too.
   const toResults = runs.filter((r) => r.toResults).length;
-  const lands = toResults === runs.length ? "Lands in Results"
+  const lands = toResults === runs.length ? `Lands in Results, saved to captures/${queueFolder}`
     : toResults === 0 ? (runs.some((r) => r.fill) ? "Lands over the mask" : "Lands in the layer")
       : "Fill lands over the mask, the rest in Results";
   return (
@@ -1550,13 +1558,13 @@ function QueueStrip() {
         <span className="sub">{lands}</span>
       </div>
       <div className="queue-chips">
-        {chips.map((c) => (
+        {runs.map((r) => (
           <QueueChip
-            key={c.key}
-            chip={c}
-            watched={c.members.some((m) => m.id === watchedId)}
+            key={r.id}
+            run={r}
+            watched={r.id === watchedId}
             onWatch={watch}
-            onCancel={() => (c.group ? cancelGroup(c.group.id) : cancelRun(c.members[0].id))}
+            onCancel={() => cancelRun(r.id)}
           />
         ))}
       </div>
@@ -1569,30 +1577,28 @@ function seedsOf(job) {
   return d.seeds || (d.seed != null ? [d.seed] : []);
 }
 
-function QueueChip({ chip, watched, onWatch, onCancel }) {
-  const lead = chip.members.find((m) => m.job.status === "running") || chip.members[0];
-  const j = lead.job;
+function QueueChip({ run, watched, onWatch, onCancel }) {
+  const j = run.job;
   const running = j.status === "running";
   const paused = running && !!j.detail?.paused;
   const model = j.detail?.card?.model || "model";
-  const seeds = chip.members.flatMap((m) => seedsOf(m.job));
+  const seeds = seedsOf(j);
   const seedText = seeds.length
     ? (seeds.length > 1 ? `seeds ${Math.min(...seeds)}–${Math.max(...seeds)}` : `seed ${seeds[0]}`)
     : "";
-  const g = chip.group;
-  const count = g ? `${(j.detail.group.index ?? 0) + 1}/${g.count}` : null;
   const place = j.detail?.queue?.position;
+  // A waiting chip's place is already its marker on the left.
   const state = running
     ? (paused ? "paused" : `${Math.round((j.progress || 0) * 100)}%`)
-    : (place ? `#${place}` : "waiting");
-  const label = [j.kind === "inpaint" ? "fill" : null, model, count && `run ${count}`, seedText]
+    : "waiting";
+  const label = [j.kind === "inpaint" ? "fill" : null, model, seedText]
     .filter(Boolean).join(" · ");
   return (
     <div className={`queue-chip ${watched ? "on" : ""} ${running ? "running" : "waiting"}`}>
       <button
         type="button"
         className="queue-chip-main"
-        onClick={() => onWatch(lead.id)}
+        onClick={() => onWatch(run.id)}
         title={watched ? "Watching this run" : "Watch this run: its preview goes on the canvas"}
       >
         {running
@@ -1605,8 +1611,8 @@ function QueueChip({ chip, watched, onWatch, onCancel }) {
         type="button"
         className="queue-chip-x"
         onClick={onCancel}
-        aria-label={g ? `Cancel all ${chip.members.length} remaining runs` : "Cancel this run"}
-        title={g ? "Cancel the rest of this repeat run" : "Cancel this run"}
+        aria-label="Cancel this run"
+        title="Cancel this run"
       >×</button>
     </div>
   );
