@@ -560,7 +560,9 @@ def postproc():
     body = request.get_json(force=True, silent=True) or {}
     (image,) = require(body, "image")
     img = from_data_url(image)
-    out = postprocess_only(img, body.get("postproc") or {})
+    seed = body.get("seed")
+    out = postprocess_only(img, body.get("postproc") or {},
+                           seed=None if seed in (None, "") else int(seed))
     return ok({"image": data_url(out)})
 
 

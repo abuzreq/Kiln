@@ -41,6 +41,7 @@ def main():
     check_clip_device_switch(out)
     check_single_load(out)
     check_generation_loads_once(out)
+    check_postproc_noise_repro(out)
 
     out.unlink(missing_ok=True)
     print("OK")
@@ -229,6 +230,55 @@ def check_generation_loads_once(ckpt: Path):
     keys = [k for k in manager._cache if k.rsplit("|", 2)[0] == ident]
     assert keys == [f"{ident}|cuda|ema"], f"one generation cached {keys}"
     print("generation loads once: only the GPU copy is cached")
+
+
+def check_postproc_noise_repro(ckpt: Path):
+    """Finish's grain is part of the recipe: the seed decides it, nothing else does.
+
+    It used to come from the global RNG, so the same recipe gave different grain
+    on every render. Now each image's grain is seeded from that image's seed, on
+    the CPU, apart from the run's own generator.
+    """
+    from app.core.engine.sampler import postprocess_only
+
+    def finished(seed, batch=1, noise=0.15, eta=0.5):
+        last = None
+        for frame in sampler.run(SampleParams(
+                model_path=str(ckpt), image_size=64, steps=3, device="cpu", seed=seed, eta=eta,
+                batch_size=batch, sampler="ddim", postproc={"noise": noise})):
+            last = frame
+        return [im.tobytes() for im in (last.get("images_pp") or [last["image_pp"]])]
+
+    first = finished(7)
+    torch.manual_seed(1234)                  # whatever the global RNG holds ...
+    torch.rand(1000)
+    assert finished(7) == first, "the same recipe gave different grain"  # ... does not matter
+    assert finished(8) != first, "two seeds gave the same grain"
+    assert finished(7, noise=0.0) != first, "the grain did nothing"
+    # A batch's item i gets seed + i's grain. Compared at eta 0: with eta above 0
+    # a batch's per-step noise is still drawn batch-wide, so its pixels already
+    # differ from the solo run's before any grain is added.
+    # Batched arithmetic can still move a pixel by one level, so each item is
+    # held to that; grain seeded from the wrong seed is off by tens of levels.
+    import numpy as np
+
+    pair = finished(7, batch=2, eta=0.0)
+    for i, seed in enumerate((7, 8)):
+        item = np.frombuffer(pair[i], np.uint8).astype(int)
+        solo = np.frombuffer(finished(seed, eta=0.0)[0], np.uint8).astype(int)
+        gap = np.abs(item - solo).max()
+        assert gap <= 1, f"a batch's item {i} grain is not seed {seed}'s (off by {gap})"
+
+    # Finish applied after the fact is just as repeatable, and the seed is what changes it.
+    raw = next(iter(sampler.run(SampleParams(
+        model_path=str(ckpt), image_size=64, steps=2, device="cpu", seed=7,
+        sampler="ddim", postproc={}))))["image"]
+    opts = {"noise": 0.15}
+    a = postprocess_only(raw, opts, seed=7).tobytes()
+    assert postprocess_only(raw, opts, seed=7).tobytes() == a
+    assert postprocess_only(raw, opts).tobytes() == postprocess_only(raw, opts).tobytes()
+    assert postprocess_only(raw, opts, seed=8).tobytes() != a
+    print("finish grain: seeded per image, repeatable, apart from the global RNG")
 
 
 if __name__ == "__main__":
