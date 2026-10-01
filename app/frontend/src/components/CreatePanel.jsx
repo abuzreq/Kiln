@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { api, pollJob } from "../api.js";
+import { api } from "../api.js";
 import { useApp } from "../state.jsx";
 import { usePlay } from "../screens/playContext.jsx";
 import { Slider, Select, Num, Disclose, TipLabel, Tooltip } from "./ui.jsx";
@@ -60,6 +60,9 @@ function isIdentityPostproc(pp) {
   );
 }
 
+// The server's own cap on one click's runs (perform.MAX_REPEAT).
+const MAX_RUNS = 50;
+
 function loadStored(key) {
   try { return localStorage.getItem(key) || ""; } catch { return ""; }
 }
@@ -72,7 +75,7 @@ function resolveBends(presets, name) {
 export default function CreatePanel() {
   const { toast, modelPath, models, ops } = useApp();
   const {
-    generateIntoLayer, fillIntoLayer, pushHistory, setProgress, frame, setPostFrame,
+    generateIntoLayer, fillIntoLayer, pushHistory, frame, setPostFrame,
     sampleParams, openDocument,
     brushSize, setBrushSize, brushHard, setBrushHard, eraser, setEraser,
     maskTool, setMaskTool, wandTolerance, setWandTolerance,
@@ -80,7 +83,7 @@ export default function CreatePanel() {
     getMaskDataUrl, applyContrastMask, frameCard, activeLayer,
     activeMask, maskPixels, hasMask, liveMasks, invertMask, clearMask, setMaskParam, nudgeMask,
     undo, canUndo, redo, canRedo, tab, setLivePreview, livePreviewOn,
-    job, setJob, genRunning, genPaused, canvasIsBlank,
+    job, genRunning, genPaused, canvasIsBlank, runs, trackRuns,
   } = usePlay();
   const layerName = activeLayer?.name || "the active layer";
 
@@ -144,6 +147,9 @@ export default function CreatePanel() {
     hasMask ? setMaskParam(activeMask?.id, "bendPreset", v) : setGenBendPreset(v)
   );
   const [variations, setVariations] = useState(1);
+  // How many runs one click queues. Each is a whole batch of Variations, and
+  // run k starts where run k-1's seeds stopped.
+  const [runCount, setRunCount] = useState(1);
   const [splitMethod, setSplitMethod] = useState("luminance");
   const [brightnessThreshold, setBrightnessThreshold] = useState(128);
   const [contrastThreshold, setContrastThreshold] = useState(0);
@@ -158,7 +164,9 @@ export default function CreatePanel() {
   // direct call, because both of those commit new state during the same render
   // and calculating inline would still see the previous image.
   const [splitPending, setSplitPending] = useState(false);
-  const pausedSnapshot = useRef(null);
+  // Job id -> the live settings it was started (or last resumed) with. Resume
+  // sends only what differs, and with a queue each run has its own baseline.
+  const snapshots = useRef({});
   const ppSource = frame;
   const ppGen = useRef(0);
   const [canvasSize, setCanvasSize] = useState(null);
@@ -259,14 +267,6 @@ export default function CreatePanel() {
     return () => clearTimeout(t);
   }, [pp, ppOn, ppSource, setPostFrame, getMaskDataUrl, maskPixels]);
 
-  // Live frames go to a preview slot rather than into the stack: a half-drawn
-  // intermediate is not a layer, and only the finished result should be one.
-  const onJob = (j) => {
-    setJob(j);
-    if (j.detail?.frame) setLivePreview(j.detail.frame);
-    setProgress(j.status === "running" ? { value: j.progress, message: j.message } : null);
-  };
-
   const regionForSide = (side) => {
     if (splitMethod === "contrast") {
       return side === "foreground" ? "high" : "low";
@@ -344,11 +344,22 @@ export default function CreatePanel() {
 
   /** A whole-canvas generation lands in the active layer, replacing what it
    *  had. The layer is the user's; Kiln never adds one. Extra variations go to
-   *  Results, from where any of them can be put into a layer. */
-  const finishGeneration = (done) => {
-    setProgress(null);
-    setLivePreview(null);
+   *  Results, from where any of them can be put into a layer.
+   *
+   *  Unless it was part of a queue (`run.toResults`, decided by Play's landing
+   *  rule): then every image goes to Results and the layer is left alone. A
+   *  run cancelled from the queue strip (`run.discard`) lands nowhere. */
+  const finishGeneration = (done, run = {}) => {
+    delete snapshots.current[done.id];
+    if (run.discard) return;
     if (done.status === "error") toast(done.message, "error");
+    if (run.toResults) {
+      if (done.status === "done" || done.status === "cancelled") {
+        framesOf(done).forEach((f) => pushHistory(f.img, f.raw, f.card));
+      }
+      return;
+    }
+    setLivePreview(null);
     if (done.status === "done") setSplitPending(true);
     if (done.status === "done" || done.status === "cancelled") {
       const out = framesOf(done);
@@ -362,8 +373,6 @@ export default function CreatePanel() {
         toast(`Stopped — kept in ${layerName}`, "success");
       }
     }
-    setJob(null);
-    pausedSnapshot.current = null;
   };
 
   /** A fill lands in the active layer, over what the layer had in that area.
@@ -372,7 +381,7 @@ export default function CreatePanel() {
    *  layer first, or make a new one: toggling between them is the comparison.
    */
   const finishFill = async (done, maskSrc, maskIds = []) => {
-    setProgress(null);
+    delete snapshots.current[done.id];
     if (done.status === "error") toast(done.message, "error");
     if (done.status === "done") setSplitPending(true);
     if (done.status === "done" || done.status === "cancelled") {
@@ -388,8 +397,6 @@ export default function CreatePanel() {
       }
     }
     setLivePreview(null);
-    setJob(null);
-    pausedSnapshot.current = null;
   };
 
   /** One masked run. Returns when the job settles.
@@ -424,13 +431,13 @@ export default function CreatePanel() {
     body.live_preview = livePreviewOn;
     try {
       const { job: j } = await api.post("/perform/inpaint", body);
-      onJob(j);
-      pausedSnapshot.current = snapshotLive();
-      const done = await pollJob(j.id, onJob, 300);
-      await finishFill(done, mask, usedMasks);
-      return done;
+      snapshots.current[j.id] = snapshotLive();
+      const [landed] = trackRuns([j], {
+        fill: true, settle: (done) => finishFill(done, mask, usedMasks),
+      });
+      return await landed;
     } catch (e) {
-      toast(e.message, "error"); setProgress(null); setLivePreview(null); setJob(null);
+      toast(e.message, "error"); setLivePreview(null);
       return null;
     }
   };
@@ -447,9 +454,16 @@ export default function CreatePanel() {
     const batchSize = Math.max(1, Math.min(4, Math.round(variations) || 1));
 
     if (mask) {
+      // A fill is punched to the mask it was sent with and lands over the layer
+      // as it is when it finishes; behind a queue, that canvas is anyone's guess.
+      if (runs.length) {
+        toast("A fill starts when nothing else is running — wait for the queue, or cancel it", "error");
+        return;
+      }
       await runFill({ init: frame, mask, batchSize });
       return;
     }
+    const repeat = Math.max(1, Math.min(MAX_RUNS, Math.round(runCount) || 1));
     try {
       const genBends = resolveBends(bendPresets, genBendPreset);
       const mapped = changeToParams(genChange, sampleParams.steps, reworkCanvas);
@@ -463,12 +477,14 @@ export default function CreatePanel() {
         batch_size: batchSize,
       });
       body.live_preview = livePreviewOn;
-      const { job: j } = await api.post("/perform/sample", body);
-      onJob(j);
-      pausedSnapshot.current = snapshotLive();
-      const done = await pollJob(j.id, onJob, 300);
-      finishGeneration(done);
-    } catch (e) { toast(e.message, "error"); setProgress(null); setLivePreview(null); setJob(null); }
+      body.repeat = repeat;
+      const { jobs } = await api.post("/perform/sample", body);
+      const snap = snapshotLive();
+      jobs.forEach((j) => { snapshots.current[j.id] = snap; });
+      trackRuns(jobs, { settle: finishGeneration });
+      const group = jobs[0]?.detail?.group;
+      if (group) toast(`Queued ${jobs.length} runs — each image is also saved to captures/${group.name}`, "success");
+    } catch (e) { toast(e.message, "error"); }
   };
 
   // What the live settings were when the run was paused. Resume sends only what
@@ -480,7 +496,7 @@ export default function CreatePanel() {
 
   const pause = async () => {
     if (!job) return;
-    if (!pausedSnapshot.current) pausedSnapshot.current = snapshotLive();
+    if (!snapshots.current[job.id]) snapshots.current[job.id] = snapshotLive();
     try {
       await api.post(`/jobs/${job.id}/pause`);
       // Name only the controls actually on screen: Create maps its Change slider
@@ -495,7 +511,7 @@ export default function CreatePanel() {
 
   const resume = async () => {
     if (!job) return;
-    const snap = pausedSnapshot.current || {};
+    const snap = snapshots.current[job.id] || {};
     const updates = {};
     for (const k of LIVE_PARAM_KEYS) {
       if (sampleParams[k] !== snap[k]) updates[k] = sampleParams[k];
@@ -503,7 +519,7 @@ export default function CreatePanel() {
     if (updates.seed === "") updates.seed = null;
     try {
       await api.post(`/jobs/${job.id}/resume`, updates);
-      pausedSnapshot.current = snapshotLive();
+      snapshots.current[job.id] = snapshotLive();
     } catch (e) { toast(e.message, "error"); }
   };
 
@@ -530,6 +546,16 @@ export default function CreatePanel() {
   };
 
   const setPpField = (k, v) => setPp((s) => ({ ...s, [k]: v }));
+
+  const inFlight = runs.length > 0;
+  const repeatRuns = hasMask ? 1 : Math.max(1, Math.round(runCount) || 1);
+  // Where this click's result goes: Results whenever it is or joins a queue.
+  const queueing = !hasMask && (inFlight || repeatRuns > 1);
+  const generateLabel = hasMask
+    ? "Fill mask"
+    : repeatRuns > 1
+      ? `Queue ${repeatRuns} runs${variations > 1 ? ` × ${variations}` : ""}`
+      : inFlight ? "Queue" : "Generate";
 
   const runSteps = hasMask
     ? effectiveSteps(effectiveRegionChange, sampleParams.steps, true)
@@ -634,6 +660,22 @@ export default function CreatePanel() {
               tip="How many seeds to sample in one GPU run (1–4). With a fixed Seed, uses seed, seed+1, …. All land together for comparison."
             />
           </div>
+          <div className="w-100">
+            <Num
+              label="Runs"
+              value={runCount}
+              onChange={(v) => setRunCount(v === "" ? "" : Math.max(1, Math.min(MAX_RUNS, Math.round(v) || 1)))}
+              min={1}
+              max={MAX_RUNS}
+              step={1}
+              disabled={hasMask}
+              tip={hasMask
+                ? "A fill is one run: it lands over the layer as it is when it finishes."
+                : `How many runs one click queues (1–${MAX_RUNS}), each of ${variations} variation${variations > 1 ? "s" : ""}. `
+                  + "Seeds carry on from run to run. Everything lands in Results, and each image is also saved "
+                  + "to its own folder under captures, with its recipe."}
+            />
+          </div>
           {bendPresets.length > 0 && (
             <div className="grow">
               <Select
@@ -669,6 +711,18 @@ export default function CreatePanel() {
               the Layers panel; this is only the consequence, said next to the
               button, with the reasons a hover away. */}
           <span className="sub block mt-1">
+            {queueing ? (
+              <TipLabel tip={
+                "While a queue exists, every run lands in Results and the layer is left alone: "
+                + "otherwise each run would replace the layer in turn, and which one stayed would "
+                + "depend on which finished last. Put any of them into a layer from Results."
+                + (repeatRuns > 1 ? "\n\nEach image is also saved, with its recipe, to a folder under captures." : "")
+              }
+              >
+                Into <strong>Results</strong>
+                {repeatRuns > 1 ? ` · ${repeatRuns} runs, saved to captures` : ""}
+              </TipLabel>
+            ) : (
             <TipLabel tip={[
               hasMask
                 ? `The result lands in ${layerName}, over what that layer has in the masked area. `
@@ -689,8 +743,20 @@ export default function CreatePanel() {
               {fill && canvasSize ? ` · ${fill.w}×${fill.h}` : ""}
               {stepsTrimmed ? ` · ${sampleParams.steps - runSteps} steps skipped` : ""}
             </TipLabel>
+            )}
           </span>
-          {genRunning ? (
+          {/* Generate never locks: while anything is in flight it queues the
+              settings as they are at the click. Fills are the exception, see run(). */}
+          <button
+            type="button"
+            className="btn primary w-full mt-2"
+            onClick={run}
+            disabled={!modelPath || (hasMask && inFlight)}
+            title={hasMask && inFlight ? "A fill starts when nothing else is running" : undefined}
+          >
+            {generateLabel}
+          </button>
+          {genRunning && (
             <div className="row gap-2 mt-2">
               {genPaused ? (
                 <button type="button" className="btn primary grow" onClick={resume}>Resume</button>
@@ -699,10 +765,6 @@ export default function CreatePanel() {
               )}
               <button type="button" className="btn danger grow" onClick={stopAndSave}>Stop &amp; save</button>
             </div>
-          ) : (
-            <button type="button" className="btn primary w-full mt-2" onClick={run} disabled={!modelPath}>
-              {hasMask ? "Fill mask" : "Generate"}
-            </button>
           )}
           {/* The fill's edge belongs to the mask, but it is decided at the moment
               of filling, so it sits with the button that fills. */}

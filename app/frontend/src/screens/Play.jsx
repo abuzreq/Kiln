@@ -27,6 +27,11 @@ import {
 } from "../layers.js";
 
 const HISTORY_MAX = 24;
+const TERMINAL = new Set(["done", "error", "cancelled"]);
+// The watched run is polled in full at the browser's preview rate; the rest of
+// the queue only needs progress and place in line, from the light job list.
+const WATCH_POLL_MS = 300;
+const LIST_EVERY = 3;   // ticks, so about once a second
 // One entry is a whole document -- both entity arrays and the selected row.
 // That is only stroke lists and image references, so it is cheap enough to keep
 // plenty of, and it makes Undo mean the same thing everywhere.
@@ -82,7 +87,6 @@ export default function Play() {
   const [pendingCard, setPendingCard] = useState(null);
   const [showRaw, setShowRaw] = useState(false);
   const [history, setHistory] = useState([]);
-  const [progress, setProgress] = useState(null);
   const [dragOver, setDragOver] = useState(false);
   const [brushSize, setBrushSize] = useState(48);
   const [brushHard, setBrushHard] = useState(false);
@@ -130,7 +134,119 @@ export default function Play() {
     setLivePreviewOnState(on);
     try { localStorage.setItem("kiln.livePreview", on ? "on" : "off"); } catch { /* not fatal */ }
   }, []);
-  const [job, setJob] = useState(null);
+
+  // --- Generation queue --------------------------------------------------
+  // Every Create run the server holds for us, oldest first, until it lands.
+  // One is *watched*: its preview is on the canvas, its progress in the
+  // header, and Pause / Stop & save act on it. The rest are followed through
+  // the light job list. Kept here, not in CreatePanel, because Play stays
+  // mounted: a queue keeps landing while you are on another tab.
+  //   run = { id, job, fill, toResults, discard }
+  const [runs, setRuns] = useState([]);
+  const runsRef = useRef([]);
+  const [watchedId, setWatchedId] = useState(null);
+  const watchedRef = useRef(null);
+  // id -> what to do with the finished job; registered by whoever submitted it.
+  const settlers = useRef({});
+  const commitRuns = useCallback((fn) => {
+    runsRef.current = fn(runsRef.current);
+    setRuns(runsRef.current);
+  }, []);
+  const watch = useCallback((id) => {
+    if (watchedRef.current === id) return;
+    watchedRef.current = id;
+    setWatchedId(id);
+    // The picture on the canvas belongs to the run you are watching.
+    setLivePreview(null);
+  }, []);
+  /** Follow freshly submitted jobs until they land.
+   *
+   *  The landing rule lives here: a run goes into the layer only if it was
+   *  alone for its whole life. Submitting while anything is live sends the new
+   *  run *and* every live one to Results, so ten queued runs never take turns
+   *  replacing the layer, and which one ended up there never depends on
+   *  finishing order. Fills are exempt -- each is punched to its own mask, and
+   *  the panel only starts one when nothing else is live.
+   *
+   *  Returns one promise per job, settled once its `settle` has run. */
+  const trackRuns = useCallback((jobs, { settle, fill = false, toResults = false }) => {
+    const queueing = toResults || jobs.length > 1 || runsRef.current.length > 0;
+    const done = jobs.map((j) => new Promise((resolve) => {
+      settlers.current[j.id] = async (finished, run) => {
+        try { await settle(finished, run); } finally { resolve(finished); }
+      };
+    }));
+    commitRuns((rs) => [
+      ...rs.map((r) => (queueing && !r.fill ? { ...r, toResults: true } : r)),
+      ...jobs.map((j) => ({ id: j.id, job: j, fill, toResults: queueing && !fill, discard: false })),
+    ]);
+    if (!watchedRef.current && jobs.length) watch(jobs[0].id);
+    return done;
+  }, [commitRuns, watch]);
+  /** Cancel from the queue strip: the run is dropped, not kept. */
+  const cancelRun = useCallback(async (id) => {
+    commitRuns((rs) => rs.map((r) => (r.id === id ? { ...r, discard: true } : r)));
+    await api.post(`/jobs/${id}/cancel`);
+  }, [commitRuns]);
+  const cancelGroup = useCallback(async (groupId) => {
+    commitRuns((rs) => rs.map((r) => (
+      r.job.detail?.group?.id === groupId ? { ...r, discard: true } : r)));
+    await api.post(`/jobs/group/${groupId}/cancel`);
+  }, [commitRuns]);
+
+  // One poll loop for the whole queue, alive while anything is in it.
+  const anyRuns = runs.length > 0;
+  useEffect(() => {
+    if (!anyRuns) return undefined;
+    let stopped = false;
+    let timer = null;
+    let n = 0;
+    const nextWatched = () => {
+      const rs = runsRef.current;
+      return (rs.find((r) => r.job.status === "running") || rs[0])?.id ?? null;
+    };
+    const absorb = async (id, j) => {
+      const run = runsRef.current.find((r) => r.id === id);
+      if (!run) return;               // already landed via the other poll
+      const job = j || { id, status: "error", message: "the job disappeared", detail: {} };
+      if (!TERMINAL.has(job.status)) {
+        commitRuns((rs) => rs.map((r) => (r.id === id ? { ...r, job } : r)));
+        if (id === watchedRef.current && job.detail?.frame) setLivePreview(job.detail.frame);
+        return;
+      }
+      commitRuns((rs) => rs.filter((r) => r.id !== id));
+      if (id === watchedRef.current) watch(nextWatched());
+      const settle = settlers.current[id];
+      delete settlers.current[id];
+      if (settle) await settle(job, run);
+    };
+    const tick = async () => {
+      n += 1;
+      try {
+        const wid = watchedRef.current;
+        if (wid) {
+          const j = await api.get(`/jobs/${wid}`);
+          if (stopped) return;
+          await absorb(wid, j);
+        }
+        const others = runsRef.current.filter((r) => r.id !== watchedRef.current);
+        if (others.length && (n % LIST_EVERY === 1 || !wid)) {
+          const list = await api.get("/jobs?kinds=sample,inpaint&light=1");
+          if (stopped) return;
+          const byId = new Map(list.map((j) => [j.id, j]));
+          for (const r of others) {
+            const j = byId.get(r.id);
+            // A finished one is fetched in full once: its images are what lands.
+            if (j && TERMINAL.has(j.status)) await absorb(r.id, await api.get(`/jobs/${r.id}`));
+            else await absorb(r.id, j || null);
+          }
+        }
+      } catch { /* a missed poll is retried on the next tick */ }
+      if (!stopped && runsRef.current.length) timer = setTimeout(tick, WATCH_POLL_MS);
+    };
+    tick();
+    return () => { stopped = true; clearTimeout(timer); };
+  }, [anyRuns, commitRuns, watch]);
   // The blank canvas people paint regions onto. Its size is remembered here
   // rather than read from the sampler's image size: a composition can be any
   // shape, and region fill works at the canvas's own aspect anyway.
@@ -880,7 +996,7 @@ export default function Play() {
   // Busy state is derived here rather than inside each tab: Play stays mounted,
   // so the indicator keeps updating after you navigate away from a running job.
   const busyByTab = {
-    create: !!(job && job.status === "running"),
+    create: runs.length > 0,
     // the compare and the parameter sweep are both long Bend runs
     bend: !!tabState["bend.busy"] || !!tabState["bend.sweep"]?.busy,
     merge: !!tabState["merge.busy"],
@@ -953,8 +1069,10 @@ export default function Play() {
     [rasterLayers, activeLayerId, pickActiveLayer],
   );
   const activeSeed = frameCard?.params?.seed ?? null;
+  const job = runs.find((r) => r.id === watchedId)?.job ?? null;
   const genRunning = !!(job && job.status === "running");
   const genPaused = genRunning && !!job?.detail?.paused;
+  const progress = genRunning ? { value: job.progress, message: job.message } : null;
   const canUndo = undoLen > 0;
   const canRedo = redoLen > 0;
   const maskMeasure = useMemo(
@@ -1012,7 +1130,7 @@ export default function Play() {
     frameCard, pendingCard, setPendingCard, applyCard, lockSeed, activeSeed,
     history, generateIntoLayer, fillIntoLayer, pushHistory, placeHistory, addHistoryAsLayer,
     removeHistory, clearHistory, loadFile, openDocument,
-    progress, setProgress,
+    progress,
     brushSize, setBrushSize, brushHard, setBrushHard, eraser, setEraser,
     maskTool, setMaskTool, wandTolerance, setWandTolerance,
     shapeKind, setShapeKind, genShape, setGenShape, polygonRef, polyCount, setPolyCount,
@@ -1035,7 +1153,8 @@ export default function Play() {
     // rebuilds its display inside rasterizeMasks, before React has rendered
     // the new state, so it reads this rather than a prop.
     docRef,
-    job, setJob, genRunning, genPaused,
+    job, genRunning, genPaused,
+    runs, watchedId, watch, trackRuns, cancelRun, cancelGroup,
   };
 
   return (
@@ -1056,12 +1175,13 @@ export default function Play() {
               // does nothing.
               overriddenBy={tab === "create" ? { noise_level: "The Change slider in Create" } : null}
               sweptBy={tab === "sweep" ? sweptParams : null}
-              // While a run is on, only the live keys stay editable; the rest
-              // dim, so what can still change is what stands out. Edits apply
-              // on the next Pause -> Resume.
-              editable={genRunning ? LIVE_PARAM_KEYS : null}
-              running={genRunning && !genPaused}
-              stepsMin={genRunning ? (job?.detail?.step || 1) : undefined}
+              // While a run is paused, only the live keys stay editable; the
+              // rest dim, so what Resume will apply is what stands out. While
+              // one is running the whole panel stays open: whatever you change
+              // is what the next queued run is made with.
+              editable={genPaused ? LIVE_PARAM_KEYS : null}
+              running={false}
+              stepsMin={genPaused ? (job?.detail?.step || 1) : undefined}
             />
           </div>
         </div>
@@ -1076,6 +1196,7 @@ export default function Play() {
             >
               <div className="play-main">
                 <PlayCanvas brushable={!!canvasImage} />
+                <QueueStrip />
                 <ResultsPanel />
               </div>
               <div className="play-rail">
@@ -1395,6 +1516,102 @@ function CaptureButton({ image, card, label = "Save", className = "btn sm" }) {
  *  few ever showed; under the picture it has the canvas's full width, and it is
  *  where a batch or a queue of runs lands.
  */
+/** Every run the Create panel has in flight, one chip each.
+ *
+ *  A repeat run collapses to one chip with its count. A running chip shows a
+ *  progress ring, a waiting one its place in line. Clicking a chip watches it;
+ *  the x cancels it (a whole repeat run at once), and what it had is dropped. */
+function QueueStrip() {
+  const { runs, watchedId, watch, cancelRun, cancelGroup } = usePlay();
+  if (!runs.length) return null;
+  const chips = [];
+  const groups = new Map();
+  for (const r of runs) {
+    const g = r.job.detail?.group;
+    if (g && groups.has(g.id)) { groups.get(g.id).members.push(r); continue; }
+    const chip = { key: g?.id || r.id, group: g || null, members: [r] };
+    if (g) groups.set(g.id, chip);
+    chips.push(chip);
+  }
+  const live = runs.filter((r) => r.job.status === "running").length;
+  const waiting = runs.length - live;
+  // Where they land, as the landing rule decided: a lone run still goes to its
+  // layer, and a queue (or a fill, which is never queued) says so too.
+  const toResults = runs.filter((r) => r.toResults).length;
+  const lands = toResults === runs.length ? "Lands in Results"
+    : toResults === 0 ? (runs.some((r) => r.fill) ? "Lands over the mask" : "Lands in the layer")
+      : "Fill lands over the mask, the rest in Results";
+  return (
+    <section className="card queue-strip" aria-label="Queue">
+      <div className="row between center">
+        <h3 className="mb-0">
+          Queue <span className="sub">· {live} running{waiting ? `, ${waiting} waiting` : ""}</span>
+        </h3>
+        <span className="sub">{lands}</span>
+      </div>
+      <div className="queue-chips">
+        {chips.map((c) => (
+          <QueueChip
+            key={c.key}
+            chip={c}
+            watched={c.members.some((m) => m.id === watchedId)}
+            onWatch={watch}
+            onCancel={() => (c.group ? cancelGroup(c.group.id) : cancelRun(c.members[0].id))}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function seedsOf(job) {
+  const d = job.detail || {};
+  return d.seeds || (d.seed != null ? [d.seed] : []);
+}
+
+function QueueChip({ chip, watched, onWatch, onCancel }) {
+  const lead = chip.members.find((m) => m.job.status === "running") || chip.members[0];
+  const j = lead.job;
+  const running = j.status === "running";
+  const paused = running && !!j.detail?.paused;
+  const model = j.detail?.card?.model || "model";
+  const seeds = chip.members.flatMap((m) => seedsOf(m.job));
+  const seedText = seeds.length
+    ? (seeds.length > 1 ? `seeds ${Math.min(...seeds)}–${Math.max(...seeds)}` : `seed ${seeds[0]}`)
+    : "";
+  const g = chip.group;
+  const count = g ? `${(j.detail.group.index ?? 0) + 1}/${g.count}` : null;
+  const place = j.detail?.queue?.position;
+  const state = running
+    ? (paused ? "paused" : `${Math.round((j.progress || 0) * 100)}%`)
+    : (place ? `#${place}` : "waiting");
+  const label = [j.kind === "inpaint" ? "fill" : null, model, count && `run ${count}`, seedText]
+    .filter(Boolean).join(" · ");
+  return (
+    <div className={`queue-chip ${watched ? "on" : ""} ${running ? "running" : "waiting"}`}>
+      <button
+        type="button"
+        className="queue-chip-main"
+        onClick={() => onWatch(lead.id)}
+        title={watched ? "Watching this run" : "Watch this run: its preview goes on the canvas"}
+      >
+        {running
+          ? <span className="queue-ring" style={{ "--p": j.progress || 0 }} aria-hidden="true" />
+          : <span className="queue-place mono" aria-hidden="true">{place ? `#${place}` : "…"}</span>}
+        <span className="queue-chip-label">{label}</span>
+        <span className="sub mono">{state}</span>
+      </button>
+      <button
+        type="button"
+        className="queue-chip-x"
+        onClick={onCancel}
+        aria-label={g ? `Cancel all ${chip.members.length} remaining runs` : "Cancel this run"}
+        title={g ? "Cancel the rest of this repeat run" : "Cancel this run"}
+      >×</button>
+    </div>
+  );
+}
+
 function ResultsPanel() {
   const {
     history, frame, placeHistory, removeHistory, clearHistory,

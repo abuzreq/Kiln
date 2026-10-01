@@ -390,6 +390,33 @@ body {
   .results-panel { order: 2; }
 }
 
+/* Queue: one chip per run in flight, between the canvas and Results. */
+.queue-strip { padding: var(--s-2) var(--s-3); min-width: 0; }
+.queue-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--s-2); }
+.queue-chip {
+  display: inline-flex; align-items: stretch; max-width: 100%;
+  border: 1px solid var(--line); border-radius: 999px; background: var(--bg-2);
+}
+.queue-chip.on { border-color: var(--accent); background: var(--accent-soft); }
+.queue-chip-main {
+  display: inline-flex; align-items: center; gap: 6px; min-width: 0;
+  padding: 3px 4px 3px 6px; background: none; border: 0; color: inherit; cursor: pointer;
+}
+.queue-chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-chip-x {
+  padding: 0 10px 0 6px; background: none; border: 0; color: var(--text-dim);
+  cursor: pointer; font-size: 15px; line-height: 1;
+}
+.queue-chip-x:hover { color: var(--accent); }
+/* A ring, not a disc: the mask cuts the middle out, so it sits on any chip colour. */
+.queue-ring {
+  flex: 0 0 auto; width: 16px; height: 16px; border-radius: 50%;
+  background: conic-gradient(var(--accent) calc(var(--p) * 1turn), var(--line) 0);
+  -webkit-mask: radial-gradient(closest-side, transparent 58%, #000 62%);
+  mask: radial-gradient(closest-side, transparent 58%, #000 62%);
+}
+.queue-place { flex: 0 0 auto; min-width: 16px; text-align: center; opacity: 0.8; }
+
 /* Results: a grid as wide as the canvas. No scroller of its own -- the session
    keeps at most HISTORY_MAX images, so the page scrolls instead. */
 .results-panel { padding: var(--s-2) var(--s-3) var(--s-3); min-width: 0; }
