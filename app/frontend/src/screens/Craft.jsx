@@ -42,7 +42,7 @@ function ComparePair({ plain, bent, large = false, onEnlarge }) {
 }
 
 export function BendWorkspace({ stack, setStack }) {
-  const { toast, modelPath, ops: sharedOps, setPlayTab } = useApp();
+  const { toast, modelPath, ops: sharedOps, setPlayTab, bendCompare, setBendCompare } = useApp();
   const { sampleParams, commitFrame, applyCard } = usePlay();
   const [graph, setGraph] = useState(null);
   const [groups, setGroups] = useState([]);
@@ -89,6 +89,22 @@ export function BendWorkspace({ stack, setStack }) {
       .then(setGraph)
       .catch((e) => toast(e.message, "error"));
   }, [modelPath]);
+
+  // A before/after handed over from the Discoveries drawer. Declared after the
+  // reset above on purpose: opening a discovery usually switches model too, and
+  // effects run in declaration order, so this one has the last word in the
+  // commit that does both. Consumed once -- a later model switch is the user
+  // moving on, and should clear the pair rather than restore it.
+  useEffect(() => {
+    if (!bendCompare) return;
+    setGenPlain(bendCompare.plain || null);
+    setGenBent(bendCompare.bent || null);
+    // Not a sampled image of these settings, so the unbent cache must not claim
+    // it: leaving a stale key here would let Compare skip rendering and show
+    // the discovery's "before" as if it were this model's.
+    setCachedPlainKey(null);
+    setBendCompare(null);
+  }, [bendCompare]);
 
   // Keep focus pointing at a bend that still exists.
   useEffect(() => {

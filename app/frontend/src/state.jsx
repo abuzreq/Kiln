@@ -37,6 +37,11 @@ export function AppProvider({ children }) {
   const [trainDataset, setTrainDataset] = useState("");
   const [appMode, setAppModeState] = useState(loadAppMode);
   const [bendStack, setBendStackState] = useState(loadBendStack);
+  // A before/after handed to the Bend tab from outside it -- the Discoveries
+  // drawer, which already has both pictures and should not make you re-render
+  // them. Deliberately not persisted: it describes one click, and a stale one
+  // restored next session would caption itself with the wrong model.
+  const [bendCompare, setBendCompare] = useState(null);
   const [toasts, setToasts] = useState([]);
   const [models, setModels] = useState(null);
   const [ops, setOps] = useState(null);
@@ -181,6 +186,7 @@ export function AppProvider({ children }) {
     trainDataset, setTrainDataset,
     appMode, setAppMode, openPrepare, openPlay,
     bendStack, setBendStack,
+    bendCompare, setBendCompare,
   };
   return (
     <AppCtx.Provider value={value}>

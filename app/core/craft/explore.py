@@ -52,6 +52,11 @@ SIZE = 256
 STEPS = 16
 SAMPLER = "unipc"
 
+# The unbent render, kept as a picture and not only as the embedding the
+# novelty score is measured from: it is the only honest "before" for every
+# discovery in the archive, and it costs one render per archive to keep.
+BASELINE_NAME = "baseline.png"
+
 K = 5                      # nearest neighbours the novelty score averages over
 CAP = 100                  # entries per archive; past it the oldest non-starred one goes
 WINDOW = 20                # tries per threshold adaptation
@@ -118,6 +123,24 @@ def _empty_index(model_path: str, metric: str) -> dict:
         "threshold": METRICS[metric]["threshold0"], "tried": 0, "accepted": 0,
         "updated_at": 0.0, "baseline": None, "entries": [],
     }
+
+
+def _baseline_card(model_path: str, metric: str) -> dict:
+    """Recipe for the unbent render, so the PNG explains itself like any other.
+
+    Deliberately the same params a discovery records, minus the bends -- that is
+    the whole point of it: the two pictures differ by the bend stack and nothing
+    else.
+    """
+    params = SampleParams(
+        model_path=model_path, ema=True, image_size=SIZE, steps=STEPS,
+        sampler=SAMPLER, seed=FIRST_SEED, batch_size=1, postproc={},
+    )
+    return build_card(
+        params, model_path=model_path, model_name=model_name(model_path),
+        bends=[], kind="discovery-baseline",
+        extra={"metric": metric, "seeds": [FIRST_SEED + i for i in range(SEEDS)]},
+    )
 
 
 class Archive:
@@ -211,12 +234,23 @@ class Archive:
                 return
             self.remove(victim["id"])
 
+    def baseline_image(self) -> str | None:
+        """The unbent render, if this archive has one on disk."""
+        if self.dir is None:
+            return None
+        p = self.dir / BASELINE_NAME
+        return str(p) if p.exists() else None
+
     def public_entries(self) -> list[dict]:
         missing = not model_exists(self.model_path)
+        # One picture for the whole archive: every entry is rendered from the
+        # same seed on the same model, so they all share a "before".
+        base = self.baseline_image()
         out = []
         for e in self.entries:
             pub = {k: v for k, v in e.items() if k != "embedding"}
             pub["image"] = str(self.dir / f"{e['id']}.png")
+            pub["baseline"] = base
             pub["model_missing"] = missing
             pub["metric"] = self.metric
             out.append(pub)
@@ -678,13 +712,25 @@ class Explorer:
             self._set(tried=arch.index.get("tried", 0), accepted=len(arch.entries),
                       archive_size=len(arch.entries), threshold=arch.index["threshold"])
 
-            if arch.index.get("baseline") is None:
+            # One unbent render per archive, checked every time exploring
+            # starts: it is both the yardstick novelty is measured from and the
+            # "before" shown beside a discovery. Re-rendered when only the
+            # embedding is on disk, which is every archive written before the
+            # picture was kept.
+            need_vec = arch.index.get("baseline") is None
+            need_img = arch.baseline_image() is None
+            if need_vec or need_img:
                 imgs = self._render(model_path, None, stop)
                 if not imgs:
                     return
                 with self.archive_lock(model_path):
-                    arch.index["baseline"] = [round(float(x), 4)
-                                              for x in embed(imgs, device, metric)]
+                    arch.dir.mkdir(parents=True, exist_ok=True)
+                    if need_vec:
+                        arch.index["baseline"] = [round(float(x), 4)
+                                                  for x in embed(imgs, device, metric)]
+                    if need_img:
+                        save_with_params(imgs[0], arch.dir / BASELINE_NAME,
+                                         _baseline_card(model_path, metric))
                     arch.save()
             base = np.asarray(arch.index["baseline"], dtype=np.float32)
             # The threshold adapts once per window of tries, not per try:

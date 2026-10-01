@@ -99,10 +99,52 @@ def main():
     print(f"bended sampling produced {len(frames)} frames; last size {frames[-1]['image'].size}")
 
     check_bend_isolation(out)
+    check_discovery_baseline()
 
     out.unlink(missing_ok=True)
     (ROOT / "workspace_smoke_craft_conf.pt").unlink(missing_ok=True)
     print("OK")
+
+
+def check_discovery_baseline():
+    """Every discovery carries the unbent render to compare it against.
+
+    The drawer shows the pair without sampling anything, so the path has to come
+    back with the entry. Archives written before the picture was kept have the
+    embedding but no file, and must report that honestly rather than hand the UI
+    a path to nothing.
+    """
+    import json
+    import tempfile
+    from PIL import Image
+
+    from app.core.craft.explore import Archive, BASELINE_NAME
+
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp) / "arch"
+        d.mkdir()
+        (d / "index.json").write_text(json.dumps({
+            "version": 1, "model_path": "nonexistent.pt", "metric": "clip",
+            "threshold": 0.1, "tried": 1, "accepted": 1, "baseline": [0.1, 0.2],
+            "entries": [{"id": "aa11", "bends": [], "novelty": 0.5,
+                         "created_at": 0.0, "embedding": [0.1, 0.2]}],
+        }), encoding="utf-8")
+        Image.new("RGB", (8, 8)).save(d / "aa11.png")
+
+        a = Archive.from_dir(d)
+        assert a is not None
+        # An embedding on its own is not a picture: an old archive says so.
+        assert a.baseline_image() is None
+        assert a.public_entries()[0]["baseline"] is None, "promised a file that is not there"
+
+        Image.new("RGB", (8, 8)).save(d / BASELINE_NAME)
+        a = Archive.from_dir(d)
+        got = a.public_entries()[0]["baseline"]
+        assert got == str(d / BASELINE_NAME), got
+        assert Path(got).exists()
+        # One render per archive, shared: every entry points at the same file.
+        assert len({e["baseline"] for e in a.public_entries()}) == 1
+    print("  discoveries carry the unbent render, and admit when they have none")
 
 
 def check_bend_isolation(ckpt: Path):

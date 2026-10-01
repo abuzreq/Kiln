@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { api, thumbUrl } from "../api.js";
+import { api, mediaUrl, thumbUrl } from "../api.js";
 import { useApp } from "../state.jsx";
 import { ConfirmModal, Seg, Tooltip } from "./ui.jsx";
 import { bendPresetSummary } from "../bendSynopsis.js";
@@ -44,7 +44,7 @@ const SORT_TABS = [
 const orient = (entries, sort) => (sort === "newest" ? [...entries].reverse() : entries);
 
 export default function DiscoveriesDrawer() {
-  const { modelPath, models, ops, setBendStack, openPlay, toast } = useApp();
+  const { modelPath, models, ops, setBendStack, setBendCompare, openPlay, toast } = useApp();
   const [open, setOpen] = useState(loadOpen);
   const [status, setStatus] = useState(null);
   const [entries, setEntries] = useState([]);
@@ -224,6 +224,15 @@ export default function DiscoveriesDrawer() {
 
   const openInBend = (entry) => {
     setBendStack((entry.bends || []).map((b) => ({ ...b, id: newId() })));
+    // Both pictures already exist: the discovery itself, and the unbent render
+    // the explorer measured its novelty against. Showing them beats re-running
+    // a compare that would only reproduce them -- and on the same seed, so the
+    // pair differs by the bends and nothing else.
+    setBendCompare(entry.image ? {
+      plain: entry.baseline ? mediaUrl(entry.baseline) : null,
+      bent: mediaUrl(entry.image),
+      model: entry.model_path || null,
+    } : null);
     if (entry.model_missing) {
       toast("That model is gone; the bends are loaded on the current one", "warn");
       openPlay({ tab: "bend" });
