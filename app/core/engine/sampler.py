@@ -12,7 +12,9 @@ Ported and generalized from the vendored ``xurdifapp3.py`` gradio sampler:
 Everything is device-aware (``cuda`` if available, else ``cpu``) so the module can
 be imported and exercised without a GPU.
 """
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from functools import partial
 
 from PIL import Image
 
@@ -516,7 +518,12 @@ class Sampler:
         height: int | None = None,
         width: int | None = None,
     ):
-        """Generator yielding dicts: {step, total, image, image_pp, images?, images_pp?}.
+        """Generator yielding a ``Frame`` per denoise step.
+
+        A frame reads like the dict this used to yield --
+        ``{step, total, batch, image, image_pp, images?, images_pp?}`` -- but its
+        images are rendered on first read (see ``Frame``), so a caller pays only
+        for the steps it actually looks at.
 
         ``mask`` (optional, L or RGB) enables masked img2img: denoise inside the
         white region and keep the init image outside, with the mask's gray values
@@ -816,17 +823,11 @@ class Sampler:
                         x = x + (noise_level - 1.0) * beta_next.sqrt() * torch.randn_like(x)
 
                 done += 1
-                raws, pps = self._to_images(x_s, params, pprocess, tensor_to_pil, backend, meta)
-                out = {
-                    "step": done,
-                    "total": max(total, done),
-                    "image": raws[0],
-                    "image_pp": pps[0],
-                }
-                if bs > 1:
-                    out["images"] = raws
-                    out["images_pp"] = pps
-                yield out
+                yield Frame(
+                    step=done, total=max(total, done), batch=bs,
+                    render=partial(self._to_images, x_s, params, pprocess,
+                                   tensor_to_pil, backend, meta),
+                )
         finally:
             if bend_runtime is not None:
                 bend_runtime.detach()
@@ -861,6 +862,80 @@ class Sampler:
                 log.info("postproc failed: %s", e)
                 pps.append(raws[b])
         return raws, pps
+
+
+class Frame(Mapping):
+    """One denoise step's output, with its images rendered on first read.
+
+    The sampler used to convert every step's x0 to PIL -- the backend's display
+    mapping, ``ToPILImage`` and the whole post-processing chain, per batch item --
+    while the routes publish a preview at most ten times a second and every
+    other caller reads only the last frame. Measured with
+    scripts/bench_concurrency.py, the discarded renders were 12-35% of a 256px
+    run. A frame now holds the step's x0 and renders when someone reads
+    ``image`` / ``image_pp`` / ``images`` / ``images_pp``, once; ``step``,
+    ``total`` and ``batch`` cost nothing.
+
+    It is a read-only mapping so every ``frame["image"]`` / ``frame.get(...)``
+    caller works unchanged. A caller that wants to transform the images -- region
+    fill composites them onto the canvas -- uses ``map_images``, which defers
+    the work along with the render instead of forcing it.
+
+    Rendering draws no random numbers unless post-processing's ``noise`` option
+    is set, which the app never sets, so when a frame renders cannot change the
+    sampled image.
+    """
+
+    _SINGLE = ("image", "image_pp")
+    _BATCH = ("images", "images_pp")
+
+    def __init__(self, *, step: int, total: int, batch: int, render):
+        self._meta = {"step": step, "total": total, "batch": batch}
+        self._render = render          # () -> (raws, pps); dropped once used
+        self._maps = []
+        self._images = None
+
+    def map_images(self, fn) -> "Frame":
+        """Apply ``fn`` to every image this frame yields, raw and processed alike."""
+        if self._images is None:
+            self._maps.append(fn)
+        else:
+            self._images = {k: ([fn(im) for im in v] if isinstance(v, list) else fn(v))
+                            for k, v in self._images.items()}
+        return self
+
+    def _image_keys(self):
+        return self._SINGLE + (self._BATCH if self._meta["batch"] > 1 else ())
+
+    def _ensure(self):
+        if self._images is not None:
+            return
+        raws, pps = self._render()
+        for fn in self._maps:
+            raws = [fn(im) for im in raws]
+            pps = [fn(im) for im in pps]
+        self._images = {"image": raws[0], "image_pp": pps[0]}
+        if self._meta["batch"] > 1:
+            self._images["images"] = raws
+            self._images["images_pp"] = pps
+        # The closure holds the step's x0 on the device; let it go.
+        self._render = None
+        self._maps = []
+
+    def __getitem__(self, key):
+        if key in self._meta:
+            return self._meta[key]
+        if key in self._image_keys():
+            self._ensure()
+            return self._images[key]
+        raise KeyError(key)
+
+    def __iter__(self):
+        yield from self._meta
+        yield from self._image_keys()
+
+    def __len__(self):
+        return len(self._meta) + len(self._image_keys())
 
 
 def _batched_init_noise(torch, bs, H, W, device, seed):

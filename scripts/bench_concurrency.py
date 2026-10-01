@@ -6,13 +6,13 @@ depends on one number this measures: wall time for N runs in N threads against
 the same N runs back to back, in one process and one CUDA context -- exactly
 how Kiln's sampling threads share the GPU.
 
-Each case is timed three ways, because the sampler renders a PIL image on every
-step while the routes only publish one every 0.1 s, and that CPU work runs under
-the GIL:
+Each case is timed three ways. Frames render on first read (``sampler.Frame``),
+so what a run costs depends on how often its caller looks, and that CPU work
+runs under the GIL:
 
-    every  -- today's sampler, a render per step
-    10hz   -- renders at most every 0.1 s per run (what a lazy render would do)
-    none   -- no rendering at all (the GPU-bound ceiling)
+    every  -- the caller reads every step's image
+    10hz   -- reads at most every 0.1 s, as the perform routes' live preview does
+    none   -- reads only the final image, as previews, sweeps and the explorer do
 
 Threaded cases run twice: as Kiln's threads do today, all on the device's
 default CUDA stream, and with a stream per thread (see ``_case``).
@@ -55,28 +55,13 @@ PREVIEW_INTERVAL = 0.1  # matches app/backend/routes/perform.py
 
 
 # --- rendering modes ----------------------------------------------------------
-_real_to_images = sampler_mod.Sampler._to_images
-_tls = threading.local()
-
-
-def _to_images_10hz(self, x_s, params, *a, **kw):
-    now = time.perf_counter()
-    last = getattr(_tls, "at", 0.0)
-    if now - last >= PREVIEW_INTERVAL or getattr(_tls, "cached", None) is None:
-        _tls.at = now
-        _tls.cached = _real_to_images(self, x_s, params, *a, **kw)
-    return _tls.cached
-
-
-def _to_images_none(self, x_s, params, *a, **kw):
-    n = x_s.shape[0]
-    return [None] * n, [None] * n
+# How often a run's caller reads a frame's image; set per case, read by _run.
+_mode = "every"
 
 
 def set_render_mode(mode: str):
-    sampler_mod.Sampler._to_images = {
-        "every": _real_to_images, "10hz": _to_images_10hz, "none": _to_images_none,
-    }[mode]
+    global _mode
+    _mode = mode
 
 
 # --- one run --------------------------------------------------------------------
@@ -90,10 +75,17 @@ def _params(model, size, steps, sampler_name, seed, batch=1, text=""):
 
 
 def _run(params) -> float:
-    _tls.at, _tls.cached = 0.0, None
     t0 = time.perf_counter()
-    for _ in sampler.run(params):
-        pass
+    shown = 0.0
+    last = None
+    for frame in sampler.run(params):
+        last = frame
+        now = time.perf_counter()
+        if _mode == "every" or (_mode == "10hz" and now - shown >= PREVIEW_INTERVAL):
+            shown = now
+            frame["image_pp"]
+    if last is not None:
+        last["image_pp"]                     # every caller wants the result
     # This thread's stream only: a device-wide sync would make each thread wait
     # for the others and blur the per-run times.
     torch.cuda.current_stream().synchronize()

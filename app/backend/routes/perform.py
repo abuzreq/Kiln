@@ -166,7 +166,7 @@ def _apply_frame_to_job(job, frame, *, final=False):
             job.detail["frame"] = preview_url(frame["image_pp"])
 
     if not job.paused():
-        n = len(frame.get("images_pp") or [])
+        n = frame.get("batch", 1)
         suffix = f" · {n} vars" if n > 1 else ""
         job.message = f"step {frame['step']}/{frame['total']}{suffix}"
 

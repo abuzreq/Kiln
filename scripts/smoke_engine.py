@@ -36,8 +36,54 @@ def main():
     frames = list(sampler.run(params))
     print(f"sampled {len(frames)} frames; last image size = {frames[-1]['image'].size}")
 
+    check_lazy_frames(out)
+
     out.unlink(missing_ok=True)
     print("OK")
+
+
+def check_lazy_frames(ckpt: Path):
+    """Frames render only when read, once, and a deferred transform rides along.
+
+    The sampler used to render every step whether or not anyone looked; callers
+    that read only the last frame paid for all of them. Counting calls to
+    ``_to_images`` is the direct test that they no longer do.
+    """
+    from app.core.engine import sampler as sampler_mod
+
+    calls = []
+    real = sampler_mod.Sampler._to_images
+
+    def counting(self, *a, **kw):
+        calls.append(1)
+        return real(self, *a, **kw)
+
+    sampler_mod.Sampler._to_images = counting
+    try:
+        params = SampleParams(model_path=str(ckpt), image_size=64, steps=6, device="cpu",
+                              batch_size=2, seed=7)
+        last = None
+        for frame in sampler.run(params):
+            assert frame["step"] >= 1 and frame["batch"] == 2   # free to read
+            last = frame
+        assert not calls, f"frames rendered before anyone read them: {len(calls)}"
+        img = last["image"]
+        assert last["images_pp"][0].size == img.size and len(last["images"]) == 2
+        assert len(calls) == 1, f"one frame rendered {len(calls)} times"
+        assert set(last) == {"step", "total", "batch", "image", "image_pp",
+                             "images", "images_pp"}
+
+        # map_images is deferred too, and applies to every image the frame yields.
+        seen = []
+        frame = next(iter(sampler.run(SampleParams(
+            model_path=str(ckpt), image_size=64, steps=2, device="cpu", seed=7))))
+        frame.map_images(lambda im: seen.append(im) or im.transpose(0))
+        assert not seen, "map_images ran before the frame was read"
+        frame["image_pp"]
+        assert len(seen) == 2 and "images" not in frame
+    finally:
+        sampler_mod.Sampler._to_images = real
+    print("lazy frames: no render until read, one render per frame, map_images deferred")
 
 
 if __name__ == "__main__":

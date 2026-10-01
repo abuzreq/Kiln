@@ -94,10 +94,5 @@ def run_inpaint(
         height=h,
         width=w,
     ):
-        for key in ("image", "image_pp"):
-            if frame.get(key) is not None:
-                frame[key] = _merge(frame[key])
-        for key in ("images", "images_pp"):
-            if frame.get(key):
-                frame[key] = [_merge(im) for im in frame[key]]
-        yield frame
+        # Deferred with the render: a step nobody looks at is never composited.
+        yield frame.map_images(_merge)
