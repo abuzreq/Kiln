@@ -649,11 +649,23 @@ body {
 
 /* Group quick-select sits with the map, so every way of picking layers is together. */
 .bend-map-chips { margin-bottom: var(--s-2); }
-.unet-map { touch-action: none; }
+/* The map draws itself at its own size and scales into the column; the
+   min-width floor is what makes a very narrow column scroll instead of
+   shrinking the layers into illegibility. */
+.unet-map { touch-action: none; width: 100%; height: auto; display: block; max-width: 100%; }
 .unet-map.dragging { cursor: crosshair; }
 .unet-node { cursor: pointer; outline: none; }
 .unet-node:focus-visible circle:last-of-type { stroke: var(--accent); stroke-width: 2.5; }
 .unet-marquee { fill: var(--accent); opacity: 0.14; pointer-events: none; }
+.unet-band line { pointer-events: none; }
+.unet-gutter, .unet-capsule g[role="button"], .unet-region, .unet-expand { cursor: pointer; outline: none; }
+.unet-gutter:hover text:first-of-type, .unet-expand:hover text { fill: var(--accent); }
+.unet-gutter:focus-visible rect, .unet-expand:focus-visible circle,
+.unet-capsule g[role="button"]:focus-visible rect, .unet-region:focus-visible path {
+  stroke: var(--accent); stroke-width: 2.5;
+}
+.unet-capsule rect, .unet-region path { transition: opacity 120ms ease; }
+.unet-capsule g[role="button"]:hover rect, .unet-region:hover path { opacity: 0.9; }
 .bend-card-body { padding: 10px 12px 12px; border-top: 1px solid var(--line); }
 
 .mb-grid {

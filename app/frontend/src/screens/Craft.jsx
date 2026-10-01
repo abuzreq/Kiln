@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api, downloadPost, pollJob } from "../api.js";
 import { useApp } from "../state.jsx";
 import { usePlay, usePlayState } from "./playContext.jsx";
-import { Select, Num, Text, Disclose, Progress, Modal } from "../components/ui.jsx";
+import { Select, Num, Text, Disclose, Progress, Modal, Seg } from "../components/ui.jsx";
 import UnetVisualizer from "../components/UnetVisualizer.jsx";
 import BendEditor from "../components/BendEditor.jsx";
 import BendPresetList from "../components/BendPresetList.jsx";
@@ -12,6 +12,37 @@ import {
 } from "../bendTargets.js";
 
 const newBendId = () => Math.random().toString(36).slice(2);
+
+// How much of the network the map draws. The geometry is the same at every
+// density, so switching does not move anything you were looking at.
+const DENSITIES = [
+  { id: "regions", label: "Regions", tip: "The three parts of the network, and what each one does" },
+  { id: "overview", label: "Overview", tip: "One capsule per resolution level" },
+  { id: "layers", label: "Layers", tip: "Every layer you can bend" },
+];
+const DENSITY_KEY = "kiln.bendMapDensity";
+
+function loadDensity() {
+  try {
+    const v = localStorage.getItem(DENSITY_KEY);
+    return DENSITIES.some((d) => d.id === v) ? v : "overview";
+  } catch { return "overview"; }
+}
+
+const MAP_HINT = {
+  regions: {
+    focus: "Click a part of the network to bend all of it. The chips above do the same in words.",
+    empty: "Click a part of the network to start a bend there.",
+  },
+  overview: {
+    focus: "Click a level to target its layers, + to open it up. Solid rings: this bend. Dashed: the rest.",
+    empty: "Click a level to start a bend on it.",
+  },
+  layers: {
+    focus: "Click to target, shift+click for a range through the network, drag a box (alt+drag removes). Solid rings: this bend. Dashed: the rest.",
+    empty: "Click a layer to start a bend on it.",
+  },
+};
 
 const BEND_SWEEP_EMPTY = {
   bend: 0, param: "", from: 0, to: 1, count: 5,
@@ -65,6 +96,7 @@ export function BendWorkspace({ stack, setStack }) {
   // invalidate one without the other.
   const [cachedPlainKey, setCachedPlainKey] = usePlayState("bend.plainKey", null);
   const [compareOpen, setCompareOpen] = useState(false);
+  const [density, setDensityState] = useState(loadDensity);
   const [gifBusy, setGifBusy] = useState(false);
 
   useEffect(() => {
@@ -72,6 +104,11 @@ export function BendWorkspace({ stack, setStack }) {
     api.get("/craft/ops").then((d) => setGroups(d.groups || [])).catch(() => {});
     api.get("/craft/bends").then(setPresets).catch(() => {});
   }, []);
+
+  const setDensity = (d) => {
+    setDensityState(d);
+    try { localStorage.setItem(DENSITY_KEY, d); } catch { /* private window: the session keeps it */ }
+  };
 
   const ops = sharedOps || [];
   // Kiln's own recipes are listed apart from the user's: they are the answer to
@@ -160,8 +197,10 @@ export function BendWorkspace({ stack, setStack }) {
     setNote(expanded.length ? { bendId: focusedBend.id, groups: expanded } : null);
   };
 
-  const onCreateFromNode = (id) => {
-    if (addBend([id])) toast("Started a bend on that layer", "success");
+  const onCreateFromNode = (ids) => {
+    const list = (Array.isArray(ids) ? ids : [ids]).filter(Boolean);
+    if (!list.length || !addBend(list)) return;
+    toast(list.length > 1 ? `Started a bend on ${list.length} layers` : "Started a bend on that layer", "success");
   };
 
   // Turning a group on absorbs the individual layers it already covers, so
@@ -451,11 +490,13 @@ export function BendWorkspace({ stack, setStack }) {
               <span className="pill">No bend selected</span>
             )}
           </div>
-          <p className="hint mt-1">
-            {focusedBend
-              ? "Click to target, shift+click a range, drag a span (alt+drag removes). Solid rings: this bend. Dashed: the rest."
-              : "Click a layer to start a bend on it."}
-          </p>
+          <div className="row between center wrap gap-2 mt-1">
+            <p className="hint mb-0 grow">
+              {MAP_HINT[density][focusedBend ? "focus" : "empty"]}
+            </p>
+            <Seg ariaLabel="How much of the model to show" tabs={DENSITIES} value={density}
+                 onChange={setDensity} size="sm" />
+          </div>
           <div className="row wrap gap-2 bend-map-chips">
             {groups.map((g) => (
               <button type="button" key={g}
@@ -468,7 +509,10 @@ export function BendWorkspace({ stack, setStack }) {
             focusTargets={focusTargets}
             otherTargets={otherTargets}
             hasFocus={!!focusedBend}
+            density={density}
+            activeGroups={(focusedBend?.targets || []).filter(isGroup)}
             onToggle={onMapToggle}
+            onToggleGroup={toggleGroup}
             onCreateFromNode={onCreateFromNode}
           />
         </div>

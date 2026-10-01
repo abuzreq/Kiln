@@ -2,9 +2,11 @@ import React, { useMemo } from "react";
 import { layoutNodes, spinePath } from "./unetLayout.js";
 import { resolveTargets } from "../bendTargets.js";
 
-// Tiny U-silhouette showing which layers one bend hits. It lives in the card
-// head so a collapsed stack is still scannable: you can see at a glance that one
-// bend sits on the decoder and another on the bottleneck, and where they overlap.
+// Tiny strip showing which layers one bend hits, in network order. It lives in
+// the card head so a collapsed stack is still scannable: you can see at a glance
+// that one bend sits on the decoder and another on the bottleneck, and where
+// they overlap. It keeps the sequential layout rather than the map's U -- at
+// eight pixels a column the U folds into a blob and tells you less.
 const SMALL = { colW: 8, rowH: 6, marginX: 5, top: 5, bottom: 6, rMin: 2, rMax: 4.5 };
 
 export default function BendFootprint({ nodes, targets }) {
