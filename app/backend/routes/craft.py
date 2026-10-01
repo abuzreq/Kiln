@@ -124,8 +124,7 @@ def bend_sweep():
     Same seed and settings for every frame, so the only thing moving is the bend
     — which is what makes the strip (and the GIF) legible.
     """
-    import threading
-
+    from app.core.engine.lanes import enqueue, is_oom
     from app.core.engine.sampler import SampleParams, resolve_seed, sampler
     from utils.imaging import build_card, data_url, preview_url
     from utils.process_control import registry
@@ -156,14 +155,14 @@ def bend_sweep():
             sampler=body.get("sampler") or "ddim",
         )
 
-    job = registry.create("bend_sweep")
-    job.message = "sweeping bend..."
+    job = registry.create("bend_sweep", status="queued")
+    job.message = "queued"
     job.detail.update({
         "param": param, "bend_index": index, "seed": seed,
         "values": [round(v, 4) for v in values], "frames": [], "total": len(values),
     })
 
-    def worker():
+    def worker(job):
         from app.core.craft.bending import build_runtime
 
         try:
@@ -211,12 +210,12 @@ def bend_sweep():
             job.progress = 1.0
             job.message = f"{len(frames)} frames"
         except Exception as e:  # noqa: BLE001
+            if is_oom(e):
+                raise       # the lane decides: retry alone, or fail
             job.finish("error")
             job.message = str(e)
 
-    t = threading.Thread(target=worker, daemon=True)
-    job.thread = t
-    t.start()
+    enqueue(job, model_path, worker)
     return ok({"job": job.to_dict()})
 
 

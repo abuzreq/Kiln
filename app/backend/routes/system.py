@@ -161,10 +161,33 @@ def _within(path: Path, root: Path) -> bool:
         return False
 
 
+# Detail keys that hold images. A queue strip polling every live job wants
+# progress and position, not megabytes of data URLs it will not draw.
+_HEAVY_DETAIL = ("frame", "frames", "frame_raw", "frames_raw", "sheet", "cells",
+                 "mask_union")
+
+
 @bp.get("/jobs")
 def list_jobs():
-    kind = request.args.get("kind")
-    return ok(registry.list(kind))
+    """Jobs, newest first.
+
+    ``kind`` or ``kinds=sample,inpaint`` filter by kind, ``live=1`` keeps only
+    queued and running jobs, and ``light=1`` leaves the images out of detail.
+    """
+    from utils.process_control import LIVE
+
+    kinds = {k for k in (request.args.get("kinds") or "").split(",") if k}
+    if request.args.get("kind"):
+        kinds.add(request.args["kind"])
+    jobs = registry.list()
+    if kinds:
+        jobs = [j for j in jobs if j["kind"] in kinds]
+    if request.args.get("live") == "1":
+        jobs = [j for j in jobs if j["status"] in LIVE]
+    if request.args.get("light") == "1":
+        jobs = [{**j, "detail": {k: v for k, v in j["detail"].items() if k not in _HEAVY_DETAIL}}
+                for j in jobs]
+    return ok(jobs)
 
 
 @bp.get("/jobs/<job_id>")
@@ -179,6 +202,12 @@ def get_job(job_id):
 @bp.post("/jobs/<job_id>/cancel")
 def cancel_job(job_id):
     return ok({"cancelled": registry.cancel(job_id)})
+
+
+@bp.post("/jobs/group/<group_id>/cancel")
+def cancel_job_group(group_id):
+    """Stop a repeat run: every one of its jobs that has not finished."""
+    return ok({"cancelled": registry.cancel_group(group_id)})
 
 
 @bp.post("/jobs/<job_id>/pause")

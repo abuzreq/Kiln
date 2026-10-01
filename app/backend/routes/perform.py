@@ -1,11 +1,13 @@
 """Perform routes: model listing, guided sampling (as a streamed job), postproc."""
 import io
 import json
-import threading
+from dataclasses import replace
+from functools import partial
 
 from flask import Blueprint, request, send_file
 
 from app.core.engine.inpaint import fill_size
+from app.core.engine.lanes import enqueue, is_oom
 from app.core.engine.sampler import (
     DEFAULT_SAMPLER, RECOMMENDED_SAMPLER, SampleParams, postprocess_only, resolve_seed,
     sampler, sampler_catalog,
@@ -17,7 +19,7 @@ from utils.imaging import (
     preview_url, read_params, save_with_params,
 )
 from utils.process_control import registry
-from utils.validators import require
+from utils.validators import require, safe_name
 
 bp = Blueprint("perform", __name__, url_prefix="/api")
 
@@ -129,11 +131,6 @@ def _publish_card(job, params, *, bends=None, bend_preset=None,
     return card
 
 
-def _is_oom(exc: BaseException) -> bool:
-    msg = str(exc).lower()
-    return "out of memory" in msg or ("cuda" in msg and "memory" in msg)
-
-
 # Previews are for watching progress, so there is no point rendering more of
 # them than anyone fetches. The rate is capped rather than the step count, so
 # the cost stays flat however fast the steps are, and the cap is the browser's
@@ -189,11 +186,42 @@ def _apply_frame_to_job(job, frame, *, final=False, live=True):
         job.message = f"step {frame['step']}/{frame['total']}{suffix}"
 
 
-def _sample_worker(job, params, init_image, image_prompt, bend_runtime, mask=None,
-                   feather=8.0, mults=None, live=True):
-    from dataclasses import replace
+def _save_group_images(job, images):
+    """A repeat run's images go to disk as each run finishes, recipe in the PNG.
 
+    Results in the browser are capped and job records expire within the hour;
+    forty images from an unattended queue need somewhere that keeps them. A
+    single run is not saved: the Capture button still means "keep this".
+    """
+    group = job.detail.get("group")
+    if not group or not images:
+        return
+    from app.core.config import workspace
+
+    folder = workspace.captures / group["name"]
+    folder.mkdir(parents=True, exist_ok=True)
+    cards = job.detail.get("cards") or [job.detail.get("card")]
+    seeds = job.detail.get("seeds") or [job.detail.get("seed")]
+    saved = []
+    # Named by job and seed, not by time: a queue finishes several in a second.
+    for img, card, seed in zip(images, cards, seeds):
+        out = folder / f"{job.id}-seed{seed}.png"
+        save_with_params(img, out, card)
+        saved.append(str(out))
+    job.detail["saved"] = saved
+
+
+def _sample_worker(job, params, init_image, image_prompt, bends=None, mask=None,
+                   feather=8.0, live=True):
+    """Run one sample or fill in its lane.
+
+    The model is described here, not in the route: on a cache miss that reads
+    the whole checkpoint, which made the POST slow and turned a bad model into a
+    failed request rather than a failed job.
+    """
     from app.core.engine.inpaint import run_inpaint
+
+    meta = bend_runtime = None
 
     def _frames(p):
         if mask is not None:
@@ -204,7 +232,7 @@ def _sample_worker(job, params, init_image, image_prompt, bend_runtime, mask=Non
                 bend_runtime=bend_runtime,
                 cancel=job.cancelled,
                 control=job,
-                mults=mults,
+                mults=meta.mults,
             )
         return sampler.run(
             p, init_image, image_prompt, bend_runtime,
@@ -212,6 +240,18 @@ def _sample_worker(job, params, init_image, image_prompt, bend_runtime, mask=Non
         )
 
     try:
+        meta, backend = manager.describe(params.model_path)
+        bend_runtime = _build_bend_runtime(bends, meta, backend)
+        if mask is not None:
+            # Region fill works at the canvas's own size, not params.image_size.
+            fill_w, fill_h = fill_size(init_image, meta.mults)
+            job.detail["fill_size"] = [fill_w, fill_h]
+            job.detail["card"] = {**job.detail["card"], "fill_size": [fill_w, fill_h]}
+            if job.detail.get("cards"):
+                job.detail["cards"] = [{**cd, "fill_size": [fill_w, fill_h]}
+                                       for cd in job.detail["cards"]]
+
+        finals = []
         last_frame = None
         try:
             for frame in _frames(params):
@@ -221,8 +261,9 @@ def _sample_worker(job, params, init_image, image_prompt, bend_runtime, mask=Non
                     break
             if last_frame is not None:
                 _apply_frame_to_job(job, last_frame, final=True)
+                finals = last_frame.get("images_pp") or [last_frame["image_pp"]]
         except Exception as e:  # noqa: BLE001
-            if not _is_oom(e) or params.batch_size <= 1:
+            if not is_oom(e) or params.batch_size <= 1:
                 raise
             # VRAM too tight for a true batch — fall back to sequential seeds.
             try:
@@ -254,17 +295,22 @@ def _sample_worker(job, params, init_image, image_prompt, bend_runtime, mask=Non
                     if job.cancelled():
                         break
                 if last is not None:
+                    finals.append(last["image_pp"])
                     collected_pp.append(data_url(last["image_pp"]))
                     collected_raw.append(data_url(last["image"]))
                     job.detail["frames"] = list(collected_pp)
                     job.detail["frames_raw"] = list(collected_raw)
 
+        if job.status == "running" and not job.cancelled():
+            _save_group_images(job, finals)
         if job.status == "running":
             job.status = "cancelled" if job.cancelled() else "done"
             job.progress = 1.0 if job.status == "done" else job.progress
             job.detail["paused"] = False
             job.message = "done" if job.status == "done" else "stopped"
     except Exception as e:  # noqa: BLE001
+        if is_oom(e):
+            raise           # the lane decides: retry alone, or fail
         job.status = "error"
         job.detail["paused"] = False
         job.message = str(e)
@@ -278,28 +324,47 @@ def sample():
 
     init_image = from_data_url(body["init_image"]) if body.get("init_image") else None
     image_prompt = from_data_url(body["image_prompt"]) if body.get("image_prompt") else None
+    repeat = max(1, min(MAX_REPEAT, int(body.get("repeat") or 1)))
+    group = _new_group(body, repeat)
 
-    meta, backend = manager.describe(params.model_path)
-    bend_runtime = _build_bend_runtime(body.get("bends"), meta, backend)
+    jobs = []
+    for k in range(repeat):
+        # Run k carries on where run k-1's variations stopped: seeds stay
+        # consecutive, the same "item i is seed + i" rule a batch follows.
+        p = replace(params, seed=params.seed + k * params.batch_size)
+        job = registry.create("sample", status="queued")
+        job.message = "queued"
+        job.detail["total"] = 0
+        if group:
+            job.detail["group"] = {**group, "index": k}
+        _publish_card(
+            job, p,
+            bends=body.get("bends"), bend_preset=body.get("bend_preset"),
+            init_image=init_image is not None, kind="sample",
+        )
+        enqueue(job, p.model_path, partial(
+            _sample_worker, params=p, init_image=init_image, image_prompt=image_prompt,
+            bends=body.get("bends"), live=_wants_live(body)))
+        jobs.append(job)
+    # ``job`` is the first, for callers that send one run and want one back.
+    out = [j.to_dict() for j in jobs]
+    return ok({"job": out[0], "jobs": out})
 
-    job = registry.create("sample")
-    job.message = "sampling..."
-    job.detail["total"] = 0
-    _publish_card(
-        job, params,
-        bends=body.get("bends"), bend_preset=body.get("bend_preset"),
-        init_image=init_image is not None, kind="sample",
-    )
 
-    t = threading.Thread(
-        target=_sample_worker,
-        args=(job, params, init_image, image_prompt, bend_runtime, None),
-        kwargs={"live": _wants_live(body)},
-        daemon=True,
-    )
-    job.thread = t
-    t.start()
-    return ok({"job": job.to_dict()})
+# One click of Generate with Runs set; 50 runs of 4 variations is 200 images.
+MAX_REPEAT = 50
+
+
+def _new_group(body: dict, repeat: int) -> dict | None:
+    """What a repeat run's jobs share: an id to cancel by, and a folder to save to."""
+    import time
+    import uuid
+
+    if repeat <= 1:
+        return None
+    name = body.get("group_name")
+    name = safe_name(name, "group_name") if name else f"run_{time.strftime('%Y%m%d-%H%M%S')}"
+    return {"id": uuid.uuid4().hex[:12], "count": repeat, "name": name}
 
 
 @bp.post("/perform/inpaint")
@@ -311,33 +376,24 @@ def inpaint():
     init_image = from_data_url(body["init_image"])
     mask = from_data_url_mask(body["mask"])
 
-    meta, backend = manager.describe(params.model_path)
-    bend_runtime = _build_bend_runtime(body.get("bends"), meta, backend)
-
-    job = registry.create("inpaint")
-    job.message = "filling..."
+    job = registry.create("inpaint", status="queued")
+    job.message = "queued"
     job.detail["total"] = 0
     feather = float(body.get("feather", 8) or 0)
-    # Region fill works at the canvas's own size, not params.image_size — surface
-    # it so the UI can stop implying that Sample settings governs fills.
-    fill_w, fill_h = fill_size(init_image, meta.mults)
-    job.detail["fill_size"] = [fill_w, fill_h]
+    # Region fill works at the canvas's own size, not params.image_size; the
+    # worker adds detail.fill_size (and puts it on the card) once it knows the
+    # model's downsampling. Surfaced so the UI can stop implying that Sample
+    # settings govern fills.
     job.detail["canvas_size"] = list(init_image.size)
     _publish_card(
         job, params,
         bends=body.get("bends"), bend_preset=body.get("bend_preset"),
         init_image=True, mask=True, kind="inpaint",
-        extra={"fill_size": [fill_w, fill_h], "canvas_size": list(init_image.size)},
+        extra={"canvas_size": list(init_image.size)},
     )
-
-    t = threading.Thread(
-        target=_sample_worker,
-        args=(job, params, init_image, None, bend_runtime, mask, feather, meta.mults),
-        kwargs={"live": _wants_live(body)},
-        daemon=True,
-    )
-    job.thread = t
-    t.start()
+    enqueue(job, params.model_path, partial(
+        _sample_worker, params=params, init_image=init_image, image_prompt=None,
+        bends=body.get("bends"), mask=mask, feather=feather, live=_wants_live(body)))
     return ok({"job": job.to_dict()})
 
 
@@ -521,6 +577,8 @@ def _randomize_worker(job, body, plan, init_image):
             job.progress = 1.0 if job.status == "done" else job.progress
             job.message = "done" if job.status == "done" else "stopped"
     except Exception as e:  # noqa: BLE001
+        if is_oom(e):
+            raise           # the lane decides: retry alone, or fail
         if str(e) == "stopped":
             job.status = "cancelled"
             job.message = "stopped"
@@ -541,17 +599,17 @@ def randomize():
         init_image = init_image.resize(size)
     plan = _plan_roll(body, seed)
 
-    job = registry.create("randomize")
-    job.message = "rolling..."
+    job = registry.create("randomize", status="queued")
+    job.message = "queued"
     job.detail["total"] = 0
     job.detail["regions"] = len(plan["regions"])
     params = _params_from_body({**body, "seed": seed, "batch_size": 1})
     _publish_card(job, params, init_image=init_image is not None, mask=True, kind="randomize",
                   extra={"roll_seed": seed, "canvas_size": list(size)})
 
-    t = threading.Thread(target=_randomize_worker, args=(job, body, plan, init_image), daemon=True)
-    job.thread = t
-    t.start()
+    # A roll reaches for up to two other models; it holds every one it uses.
+    models = {body["model_path"], *(r["model_path"] for r in plan["regions"])}
+    enqueue(job, models, partial(_randomize_worker, body=body, plan=plan, init_image=init_image))
     return ok({"job": job.to_dict()})
 
 
@@ -621,9 +679,13 @@ def captures():
     from app.core.config import workspace
 
     out = []
-    paths = sorted(workspace.captures.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+    # One level of folders: each repeat run saves into its own.
+    root = workspace.captures
+    files = [*root.glob("*.png"), *root.glob("*/*.png")]
+    paths = sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
     for p in paths[:120]:
-        entry = {"path": str(p), "name": p.stem, "mtime": p.stat().st_mtime}
+        entry = {"path": str(p), "name": p.stem, "mtime": p.stat().st_mtime,
+                 "folder": "" if p.parent == root else p.parent.name}
         try:
             entry["card"] = read_params(p)
         except Exception:  # noqa: BLE001

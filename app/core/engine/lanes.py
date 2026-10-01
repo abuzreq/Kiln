@@ -145,6 +145,7 @@ class Lanes:
                     self._pending.remove(e)  # cancelled a moment ago
                     continue
                 self._pending.remove(e)
+                e.job.message = "starting..."    # until the work reports progress
                 if self._running:
                     e.overlapped = True
                     for other in self._running.values():

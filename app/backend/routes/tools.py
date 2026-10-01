@@ -1,12 +1,12 @@
 """Tools routes: super-resolution, sweep runner / contact sheets, GIF export."""
 import base64
 import io
-import threading
 import time
 
 from flask import Blueprint, request, send_file
 
 from app.core.config import workspace
+from app.core.engine.lanes import enqueue, is_oom
 from app.core.engine.sampler import resolve_seed
 from app.core.tools import sweep as sweep_mod
 from app.core.tools.superres import upscale
@@ -182,8 +182,8 @@ def sweep():
         "sampler": body.get("sampler") or "unipc",
     }
 
-    job = registry.create("sweep")
-    job.message = "starting sweep..."
+    job = registry.create("sweep", status="queued")
+    job.message = "queued"
     job.detail["cols"] = len(ax0["values"])
     job.detail["rows"] = len(axes[1]["values"]) if len(axes) > 1 else 1
     job.detail["axis_x"] = ax0
@@ -195,7 +195,7 @@ def sweep():
         for x in ax0["values"]
     ]
 
-    def worker():
+    def worker(job):
         try:
             sheet = sweep_mod.run_sweep(job, model_path, axes, base)
             if sheet is None:
@@ -215,12 +215,12 @@ def sweep():
             n = len(job.detail.get("planned") or [])
             job.message = f"sweep ready ({n} samples)"
         except Exception as e:  # noqa: BLE001
+            if is_oom(e):
+                raise       # the lane decides: retry alone, or fail
             job.status = "error"
             job.message = str(e)
 
-    t = threading.Thread(target=worker, daemon=True)
-    job.thread = t
-    t.start()
+    enqueue(job, model_path, worker)
     return ok({"job": job.to_dict()})
 
 

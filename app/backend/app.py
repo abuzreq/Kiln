@@ -62,6 +62,10 @@ def create_app() -> Flask:
 
     _register_blueprints(app)
 
+    # Generations wait in lanes; size them (and the model cache) once.
+    from app.core.engine import lanes
+    lanes.configure(lanes.DEFAULT_LANES)
+
     # --- static frontend --------------------------------------------------
     def _api_endpoint_exists(path: str) -> bool:
         """Does any real route serve this path, under any method?
