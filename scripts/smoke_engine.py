@@ -37,6 +37,7 @@ def main():
     print(f"sampled {len(frames)} frames; last image size = {frames[-1]['image'].size}")
 
     check_lazy_frames(out)
+    check_interleaved_repro(out)
 
     out.unlink(missing_ok=True)
     print("OK")
@@ -94,6 +95,44 @@ def check_lazy_frames(ckpt: Path):
         sampler_mod.Sampler._to_images = real
     print("lazy frames: no render until read, raw item-0 preview skips postproc, "
           "map_images deferred")
+
+
+def check_interleaved_repro(ckpt: Path):
+    """A run's image does not depend on what else is sampling at the same time.
+
+    Two runs stepped alternately in one thread interleave their random draws
+    exactly as two concurrent runs do: DDIM's eta noise, extra noise, and the
+    guidance cutouts. Each has to come out byte-identical to its solo render,
+    which is the promise every capture's recipe makes.
+    """
+    def params(seed, text=""):
+        return SampleParams(model_path=str(ckpt), image_size=64, steps=4, device="cpu",
+                            seed=seed, eta=0.5, noise_level=0.9, sampler="ddim",
+                            text=text, guidance_step=0.05, postproc={})
+
+    def alone(p):
+        last = None
+        for frame in sampler.run(p):
+            last = frame
+        return last["image"].tobytes()
+
+    guided, plain = params(5, "a red bird on a branch"), params(9)
+    want = [alone(guided), alone(plain)]
+
+    runs = [sampler.run(guided), sampler.run(plain)]
+    last = [None, None]
+    live = [True, True]
+    while any(live):
+        for i, run in enumerate(runs):
+            if live[i]:
+                try:
+                    last[i] = next(run)
+                except StopIteration:
+                    live[i] = False
+    got = [f["image"].tobytes() for f in last]
+    assert got[0] == want[0], "a guided run changed because another run sampled alongside it"
+    assert got[1] == want[1], "a plain run changed because another run sampled alongside it"
+    print("interleaved runs reproduce their solo renders (eta, extra noise, guidance)")
 
 
 if __name__ == "__main__":

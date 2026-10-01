@@ -269,15 +269,20 @@ def spherical_dist_loss(x, y):
     return (x - y).norm(dim=-1).div(2).arcsin().pow(2).mul(2)
 
 
-def _clip_cutouts(img01, cuts: float):
-    """CLIP-normalised crops of a (B,3,H,W) image in [0,1], gradients intact."""
+def _clip_cutouts(img01, cuts: float, generator=None):
+    """CLIP-normalised crops of a (B,3,H,W) image in [0,1], gradients intact.
+
+    ``generator`` is the run's own (see ``Sampler.run``); without it the crops
+    come from the global RNG, which any other sampling run also draws from.
+    """
     torch = _torch()
     cutter = _Clip.cutter()
     # GpuCutoutSampler asserts a single image, so batch items are cut separately
     # and stacked. The losses stay effectively per-item anyway: each crop's
     # gradient flows back only into the item it was cut from.
     return torch.cat(
-        [cutter.sample(img01[b:b + 1], slider=float(cuts)) for b in range(img01.shape[0])],
+        [cutter.sample(img01[b:b + 1], slider=float(cuts), generator=generator)
+         for b in range(img01.shape[0])],
         dim=0,
     )
 
@@ -310,7 +315,7 @@ def _text_weight(params) -> float:
     return w if w > 0 else 1.0
 
 
-def clip_grad(x0, clip_model, params, txt_enc=None, imgp_enc=None):
+def clip_grad(x0, clip_model, params, txt_enc=None, imgp_enc=None, generator=None):
     """``dL/dx0`` for the active CLIP losses, or None if nothing is guiding.
 
     The gradient stops at x0; it is deliberately *not* backpropagated through
@@ -323,7 +328,7 @@ def clip_grad(x0, clip_model, params, txt_enc=None, imgp_enc=None):
     with torch.enable_grad():
         x0 = x0.detach().float().requires_grad_(True)
         # CLIP wants [0,1]; x0 lives in [-1,1] and can overshoot early on.
-        crops = _clip_cutouts((x0.clamp(-1, 1) + 1) * 0.5, params.cuts)
+        crops = _clip_cutouts((x0.clamp(-1, 1) + 1) * 0.5, params.cuts, generator)
         img_enc = _encode_cutouts(clip_model, crops)
 
         loss = None
@@ -339,7 +344,8 @@ def clip_grad(x0, clip_model, params, txt_enc=None, imgp_enc=None):
     return torch.nan_to_num(grad.detach(), nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def guide_step(x, eps, x0, alpha, params, clip_model, txt_enc=None, imgp_enc=None):
+def guide_step(x, eps, x0, alpha, params, clip_model, txt_enc=None, imgp_enc=None,
+               generator=None):
     """Nudge x0 toward the prompt, then re-derive the epsilon the solver is fed.
 
     Working in x0-space is what keeps this solver-agnostic: every scheduler in
@@ -356,7 +362,7 @@ def guide_step(x, eps, x0, alpha, params, clip_model, txt_enc=None, imgp_enc=Non
     its adversarial texture rather than the subject.
     """
     torch = _torch()
-    grad = clip_grad(x0, clip_model, params, txt_enc, imgp_enc)
+    grad = clip_grad(x0, clip_model, params, txt_enc, imgp_enc, generator)
     if grad is None:
         return eps, x0
     rms = grad.flatten(1).pow(2).mean(dim=1).sqrt().view(-1, 1, 1, 1) + 1e-8
@@ -436,7 +442,7 @@ def repaint_positions(n: int, jump_length: int, jump_n_sample: int) -> list[int]
     return [p for p in out if 0 <= p < n]
 
 
-def undo_step(sched, x, t, stride, torch):
+def undo_step(sched, x, t, stride, torch, generator=None):
     """One jump back up the schedule: RePaint Algorithm 1, line 10.
 
     ``x <- sqrt(1-beta)*x + sqrt(beta)*noise``, applied once per training
@@ -445,7 +451,7 @@ def undo_step(sched, x, t, stride, torch):
     last = len(sched.betas) - 1
     for k in range(max(int(stride), 1)):
         beta = sched.betas[min(int(t) + k, last)].to(x.device)
-        x = (1 - beta).sqrt() * x + beta.sqrt() * torch.randn_like(x)
+        x = (1 - beta).sqrt() * x + beta.sqrt() * _randn_like(torch, x, generator)
     return x
 
 
@@ -594,12 +600,33 @@ class Sampler:
         # fill); plain generation still uses the square ``image_size``.
         H = int(height or params.image_size)
         W = int(width or params.image_size)
-        # Guidance is set up *before* the seeded noise is drawn, and the order
-        # matters: loading CLIP allocates random tensors, so doing it after
-        # torch.manual_seed advanced the global stream by a different amount on
-        # the first guided run of a process than on every one after it. Same
-        # seed, same settings, different image -- verified, and reproducibility
-        # is the one promise every capture in Kiln makes.
+        # Every random draw this run makes comes from its own generator: the
+        # seeded starting noise, DDIM's eta noise, extra noise, RePaint's
+        # re-noising and the guidance cutouts. The global RNG is shared with every
+        # other sampling run in the process -- and the Diffusers trainer -- so
+        # drawing from it made an image depend on whatever else was running.
+        # Reseeded per batch item exactly as the global RNG was, the generator
+        # gives the same numbers, so recipes captured before it replay unchanged.
+        gen = torch.Generator(device=device)
+
+        def _reference_generator():
+            """For cutting up the image prompt, which happens before the run is
+            seeded. Its own generator, seeded from the run's seed, so the crops
+            are reproducible and the run's stream starts where it always has.
+            (They used to come from whatever state the global RNG was left in,
+            so an image-prompt recipe never quite replayed.)"""
+            g = torch.Generator(device=device)
+            if params.seed is None:
+                g.seed()
+            else:
+                g.manual_seed(int(params.seed))
+            return g
+
+        # Guidance is set up *before* the seeded noise is drawn. That mattered
+        # while the run drew from the global RNG: loading CLIP allocates random
+        # tensors, so loading it after seeding shifted the stream on the first
+        # guided run of a process. The run has its own generator now, but the
+        # order is kept.
         # Guidance is rebuilt from scratch whenever its settings change, rather
         # than patched, so a mid-run prompt swap cannot leave a stale embedding
         # paired with a new weight. Encoding a prompt is milliseconds next to a
@@ -627,7 +654,8 @@ class Sampler:
                         # Cut the reference the same way the sample will be cut,
                         # or the two embeddings describe different things.
                         i_enc = _encode_cutouts(
-                            clip_model, _clip_cutouts(ip, p.cuts)).detach()
+                            clip_model,
+                            _clip_cutouts(ip, p.cuts, _reference_generator())).detach()
                 return clip_model, t_enc, i_enc
             except Exception as e:  # noqa: BLE001
                 log.warning("guidance disabled: %s", e)
@@ -640,7 +668,7 @@ class Sampler:
         clip_ctx, txt_enc, imgp_enc = _build_guidance(gparams)
         guided = clip_ctx is not None and (txt_enc is not None or imgp_enc is not None)
 
-        init_noise = _batched_init_noise(torch, bs, H, W, device, params.seed)
+        init_noise = _batched_init_noise(torch, bs, H, W, device, params.seed, gen)
         # Attenuation scales the seed noise once, here, before it is used. Every
         # way a run can start draws from this tensor -- pure noise below, an init
         # image's added noise, and the noise a mask is filled with -- so scaling
@@ -717,7 +745,7 @@ class Sampler:
             if "seed" in updates:
                 seed = updates["seed"]
                 if seed is not None and seed != "":
-                    torch.manual_seed(int(seed))
+                    gen.manual_seed(int(seed))
             if "steps" in updates and updates["steps"] is not None and not spec["multistep"]:
                 # Rebuilding a multistep scheduler would silently drop its solver
                 # history and corrupt the run, so step count is fixed for those.
@@ -755,7 +783,7 @@ class Sampler:
                     # A jump back up the schedule. No model evaluation, so it
                     # does not advance progress; the solver's multistep history
                     # (if any) is now stale and has to go.
-                    x = undo_step(sched, x, timeline[pos], stride, torch)
+                    x = undo_step(sched, x, timeline[pos], stride, torch, gen)
                     _reset_solver_state(sched)
                     pos_prev = pos
                     continue
@@ -791,12 +819,14 @@ class Sampler:
                         eps, x0 = guide_step(
                             x, eps, x0,
                             alpha_bar(sched.alphas_cumprod, t_batch, device),
-                            gparams, clip_ctx, txt_enc, imgp_enc,
+                            gparams, clip_ctx, txt_enc, imgp_enc, gen,
                         )
                     # Only DDIM-style solvers take eta, and the multistep ones do
                     # not return pred_original_sample — but we already computed x0
                     # above, so use that and stay scheduler-agnostic.
-                    kw = {"eta": eta} if spec["eta"] else {}
+                    # The eta solvers (DDIM) add noise inside step(); it is the
+                    # run's noise, so it comes from the run's generator.
+                    kw = {"eta": eta, "generator": gen} if spec["eta"] else {}
                     s = sched.step(eps, t_step, x, **kw)
                     x = s["prev_sample"].detach()
                     x_s = x0.detach()
@@ -806,7 +836,7 @@ class Sampler:
                         if remaining:
                             t_next = remaining[0]
                             noised = noise_level * sched.add_noise(
-                                orig, torch.randn_like(orig),
+                                orig, _randn_like(torch, orig, gen),
                                 _noise_timestep(t_next, device),
                             )
                             x = mask_t * x + (1 - mask_t) * noised
@@ -820,7 +850,7 @@ class Sampler:
                             torch.tensor([int(t_next)], device="cpu")
                         ].to(device=device, dtype=torch.float32)
                         beta_next = (1 - ac_next).view(-1, 1, 1, 1).clamp(min=1e-8)
-                        x = x + (noise_level - 1.0) * beta_next.sqrt() * torch.randn_like(x)
+                        x = x + (noise_level - 1.0) * beta_next.sqrt() * _randn_like(torch, x, gen)
 
                 done += 1
                 yield Frame(
@@ -952,15 +982,26 @@ class Frame(Mapping):
         return len(self._meta) + len(self._image_keys())
 
 
-def _batched_init_noise(torch, bs, H, W, device, seed):
-    """Independent Gaussian noise per batch item; honors base seed when set."""
+def _batched_init_noise(torch, bs, H, W, device, seed, generator):
+    """Independent Gaussian noise per batch item; honors base seed when set.
+
+    Item ``i`` is ``seed + i``, reseeding ``generator`` per item -- the same
+    draws ``torch.manual_seed`` gave when this used the global RNG, which is
+    what keeps every recipe captured before the change replaying unchanged.
+    """
     if seed is None:
-        return torch.zeros(bs, 3, H, W, device=device).normal_(0, 1)
+        generator.seed()
+        return torch.randn(bs, 3, H, W, device=device, generator=generator)
     out = torch.empty(bs, 3, H, W, device=device)
     for i in range(bs):
-        torch.manual_seed(int(seed) + i)
-        out[i] = torch.randn(3, H, W, device=device)
+        generator.manual_seed(int(seed) + i)
+        out[i] = torch.randn(3, H, W, device=device, generator=generator)
     return out
+
+
+def _randn_like(torch, x, generator):
+    """``torch.randn_like(x)``, drawn from ``generator``."""
+    return torch.randn(x.shape, device=x.device, dtype=x.dtype, generator=generator)
 
 
 class _PostprocOpts:
