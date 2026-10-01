@@ -382,6 +382,24 @@ def guide_step(x, eps, x0, alpha, params, clip_model, txt_enc=None, imgp_enc=Non
     return eps, x0
 
 
+# Finish's grain is seeded from the image's own seed, but kept apart from the
+# initial noise drawn from that same seed: the salt keeps the two from being
+# the same numbers, which on the CPU they would otherwise be.
+_PP_NOISE_SALT = 0x6E6F697365  # "noise"
+
+
+def _postproc_generator(torch, seed):
+    """A CPU generator for one image's post-processing grain, or None if unseeded.
+
+    Its own generator, not the run's: post-processing happens when a frame is
+    read, and drawing from the run's stream would make the picture depend on
+    how often anyone looked at the preview.
+    """
+    if seed is None:
+        return None
+    return torch.Generator().manual_seed((int(seed) + _PP_NOISE_SALT) % 2 ** 63)
+
+
 def _postproc_fn():
     try:
         from ._vendor import ensure_on_path
@@ -898,11 +916,14 @@ class Sampler:
             return raws, list(raws)
 
         pps = []
+        torch = _torch()
         for b in range(im.shape[0]):
             try:
                 o = _PostprocOpts(params.postproc)
                 single = im[b : b + 1] * 2 - 1
-                pim = pprocess(single, o)
+                # Item b is seed + b, the rule every batch follows.
+                seed = None if params.seed is None else int(params.seed) + b
+                pim = pprocess(single, o, generator=_postproc_generator(torch, seed))
                 pim = pim - pim.min()
                 pim = pim / pim.max().clamp(min=1e-6)
                 pps.append(tensor_to_pil(pim[0].cpu()))
@@ -1044,8 +1065,13 @@ class _nullcontext:
 sampler = Sampler()
 
 
-def postprocess_only(image: Image.Image, opts: dict) -> Image.Image:
-    """Re-apply post-processing to an already generated image (no re-sampling)."""
+def postprocess_only(image: Image.Image, opts: dict, seed: int | None = None) -> Image.Image:
+    """Re-apply post-processing to an already generated image (no re-sampling).
+
+    ``seed`` seeds the grain, as the image's own seed does when it is sampled.
+    Without one it is seed 0: the same image and settings always give the same
+    picture, rather than fresh grain every time a slider moves.
+    """
     pprocess = _postproc_fn()
     if pprocess is None:
         return image
@@ -1055,7 +1081,7 @@ def postprocess_only(image: Image.Image, opts: dict) -> Image.Image:
     t = TF.to_tensor(image.convert("RGB")).unsqueeze(0) * 2 - 1
     try:
         o = _PostprocOpts(opts)
-        t = pprocess(t, o)
+        t = pprocess(t, o, generator=_postproc_generator(torch, 0 if seed is None else seed))
         t = t - t.min()
         t = t / t.max().clamp(min=1e-6)
         return TF.to_pil_image(t[0])

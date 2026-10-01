@@ -56,7 +56,7 @@ def assert_range(x, lo, hi, name=""):
 
 
 
-def pprocess(imT, opt):
+def pprocess(imT, opt, generator=None):  # KILN: generator, see step 8
     """
     Convention:
       - input imT is in [-1, 1]
@@ -131,7 +131,14 @@ def pprocess(imT, opt):
 
     # ---- 8) Noise (add in [0,1]) ----
     if opt.noise > 0:
-        noise = torch.randn_like(im01) * float(opt.noise)
+        # KILN: drawn from the caller's generator when given, on the CPU, so the
+        # grain is part of the image's recipe (the same on every device and
+        # every replay) instead of whatever the global RNG held at the time.
+        if generator is None:
+            noise = torch.randn_like(im01)
+        else:
+            noise = torch.randn(im01.shape, generator=generator, dtype=im01.dtype).to(im01.device)
+        noise = noise * float(opt.noise)
         im01 = clamp_01(im01 + noise)
 
     # ---- 9) Convert once back to [-1,1] ----
