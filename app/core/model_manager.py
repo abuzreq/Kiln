@@ -10,6 +10,7 @@ existing callers (routes, sampler, craft, the smoke scripts) are untouched.
 """
 import threading
 from collections import OrderedDict
+from contextlib import contextmanager
 from pathlib import Path
 
 from app.core import backends
@@ -208,7 +209,8 @@ class ModelManager:
                     self._cache.move_to_end(key)
                     return self._cache[key]
 
-            model, meta = backend.load(ref, device=device, ema=ema)
+            with _on_default_stream(device):
+                model, meta = backend.load(ref, device=device, ema=ema)
 
             bundle = {"model": model, "meta": meta, "backend": backend, "ref": ref}
             with self._lock:
@@ -242,6 +244,24 @@ class ModelManager:
         with self._lock:
             self._cache.clear()
         _free_cuda()
+
+
+@contextmanager
+def _on_default_stream(device: str):
+    """Load onto the GPU on the default stream, and finish before returning.
+
+    Generation lanes run on CUDA streams of their own. Weights copied up on one
+    lane's stream would be read by another lane's stream with nothing ordering
+    the copy before the read, and would live in that one lane's allocator pool.
+    """
+    torch = _torch()
+    if not str(device).startswith("cuda") or not torch.cuda.is_available():
+        yield
+        return
+    stream = torch.cuda.default_stream(torch.device(device))
+    with torch.cuda.stream(stream):
+        yield
+    stream.synchronize()
 
 
 def _free_cuda():
