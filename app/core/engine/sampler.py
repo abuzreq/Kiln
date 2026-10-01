@@ -12,6 +12,7 @@ Ported and generalized from the vendored ``xurdifapp3.py`` gradio sampler:
 Everything is device-aware (``cuda`` if available, else ``cpu``) so the module can
 be imported and exercised without a GPU.
 """
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import partial
@@ -209,31 +210,38 @@ def _make_betas(timesteps: int):
 
 
 class _Clip:
-    """Lazily-loaded CLIP model + cutout sampler for guidance."""
+    """Lazily-loaded CLIP model + cutout sampler for guidance.
+
+    One copy is shared by every guided run in the process and by the explorer,
+    so it is built under a lock and never modified once handed out: a run keeps
+    using the copy it was given, whatever happens to the cache afterwards.
+    """
 
     _inst = None
     _cutter = None
+    _lock = threading.Lock()
 
     @classmethod
     def get(cls, device):
         torch = _torch()
-        if cls._inst is None:
+        want = torch.device(device).type
+        with cls._lock:
+            inst = cls._inst
+            if inst is not None and next(inst[0].parameters()).device.type == want:
+                return inst
+            # First use, or a device switch -- a CPU run after a CUDA one, or the
+            # reverse. Load afresh for the new device rather than converting the
+            # cached copy. clip.load builds fp16 weights on the GPU and fp32 on
+            # the CPU; converting a CPU copy by hand (.to(cuda).half()) left
+            # tensors in fp32, so guidance failed with "expected scalar type
+            # Float but found Half", was disabled, and the run came out unguided
+            # without saying so. Converting in place also changed the model
+            # under any run still using it.
             import clip
 
             model, _ = clip.load("ViT-B/32", device=device, jit=False)
             cls._inst = (model.eval(), clip)
             return cls._inst
-        model, clip_mod = cls._inst
-        want = torch.device(device).type
-        if next(model.parameters()).device.type != want:
-            # The cache outlives a device switch -- a CPU run after a CUDA one,
-            # or the reverse. clip.load keeps fp16 weights on GPU and casts to
-            # fp32 on CPU (where half is slow and partly unimplemented), so
-            # match that rather than only moving the tensors.
-            model = model.to(device)
-            model = model.float() if want == "cpu" else model.half()
-            cls._inst = (model, clip_mod)
-        return cls._inst
 
     @classmethod
     def cutter(cls):
@@ -245,14 +253,15 @@ class _Clip:
         between the two -- 0 is many small crops (detail), 1 is few large ones
         (structure).
         """
-        if cls._cutter is None:
-            from ._vendor import ensure_on_path
+        with cls._lock:
+            if cls._cutter is None:
+                from ._vendor import ensure_on_path
 
-            ensure_on_path()
-            from cutouts25 import CutoutConfig, GpuCutoutSampler
+                ensure_on_path()
+                from cutouts25 import CutoutConfig, GpuCutoutSampler
 
-            cls._cutter = GpuCutoutSampler(CutoutConfig())
-        return cls._cutter
+                cls._cutter = GpuCutoutSampler(CutoutConfig())
+            return cls._cutter
 
 
 def spherical_dist_loss(x, y):

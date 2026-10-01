@@ -167,8 +167,7 @@ def bend_sweep():
         from app.core.craft.bending import build_runtime
 
         try:
-            bundle = manager.load(model_path, ema=bool(body.get("ema", True)))
-            meta = bundle["meta"]
+            meta, backend = manager.describe(model_path)
             frames = []
             for i, v in enumerate(values):
                 if job.cancelled():
@@ -180,7 +179,7 @@ def bend_sweep():
                 runtime = None
                 try:
                     runtime = build_runtime([b for b in mod if b.get("active", True)], meta,
-                                            backend=bundle["backend"])
+                                            backend=backend)
                 except Exception as e:  # noqa: BLE001
                     log.warning("bend sweep: bends ignored (%s)", e)
                 last = None

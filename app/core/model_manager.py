@@ -54,6 +54,10 @@ class ModelManager:
     def __init__(self):
         self._cache: "OrderedDict[str, object]" = OrderedDict()
         self._lock = threading.Lock()
+        # One gate per cache key while it is being loaded, so runs that miss on
+        # the same model at once wait for one load instead of each reading the
+        # file and building a second copy on the device.
+        self._loading: dict[str, threading.Lock] = {}
 
     # --- discovery ----------------------------------------------------
     def _sources(self, extra_dirs: list[Path] | None = None) -> "list[tuple[Path, str]]":
@@ -179,6 +183,16 @@ class ModelManager:
         return out
 
     # --- loading ------------------------------------------------------
+    def describe(self, path: str):
+        """``(descriptor, backend)`` for a model, without loading its weights.
+
+        For callers that need to know what a model is -- its mults, whether it
+        can be bent -- and not to run it. Loading for that put a second, CPU
+        copy of every generated-from model in the two-slot cache.
+        """
+        backend, ref = backends.resolve(str(path))
+        return backend.describe(ref), backend
+
     def load(self, path: str, device: str = "cpu", ema: bool = True):
         backend, ref = backends.resolve(str(path))
         key = f"{ref}|{device}|{'ema' if ema else 'model'}"
@@ -186,18 +200,26 @@ class ModelManager:
             if key in self._cache:
                 self._cache.move_to_end(key)
                 return self._cache[key]
+            gate = self._loading.setdefault(key, threading.Lock())
 
-        model, meta = backend.load(ref, device=device, ema=ema)
+        with gate:
+            with self._lock:
+                if key in self._cache:          # loaded while we waited
+                    self._cache.move_to_end(key)
+                    return self._cache[key]
 
-        bundle = {"model": model, "meta": meta, "backend": backend, "ref": ref}
-        with self._lock:
-            self._cache[key] = bundle
-            self._cache.move_to_end(key)
-            evicted = False
-            while len(self._cache) > self.MAX_LOADED:
-                old_key, _ = self._cache.popitem(last=False)
-                log.info("evicting cached model %s", old_key)
-                evicted = True
+            model, meta = backend.load(ref, device=device, ema=ema)
+
+            bundle = {"model": model, "meta": meta, "backend": backend, "ref": ref}
+            with self._lock:
+                self._cache[key] = bundle
+                self._cache.move_to_end(key)
+                self._loading.pop(key, None)
+                evicted = False
+                while len(self._cache) > self.MAX_LOADED:
+                    old_key, _ = self._cache.popitem(last=False)
+                    log.info("evicting cached model %s", old_key)
+                    evicted = True
         if evicted:
             _free_cuda()
         return bundle

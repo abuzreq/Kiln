@@ -279,9 +279,8 @@ def sample():
     init_image = from_data_url(body["init_image"]) if body.get("init_image") else None
     image_prompt = from_data_url(body["image_prompt"]) if body.get("image_prompt") else None
 
-    bundle = manager.load(params.model_path, ema=params.ema)
-    meta = bundle["meta"]
-    bend_runtime = _build_bend_runtime(body.get("bends"), meta, bundle["backend"])
+    meta, backend = manager.describe(params.model_path)
+    bend_runtime = _build_bend_runtime(body.get("bends"), meta, backend)
 
     job = registry.create("sample")
     job.message = "sampling..."
@@ -312,9 +311,8 @@ def inpaint():
     init_image = from_data_url(body["init_image"])
     mask = from_data_url_mask(body["mask"])
 
-    bundle = manager.load(params.model_path, ema=params.ema)
-    meta = bundle["meta"]
-    bend_runtime = _build_bend_runtime(body.get("bends"), meta, bundle["backend"])
+    meta, backend = manager.describe(params.model_path)
+    bend_runtime = _build_bend_runtime(body.get("bends"), meta, backend)
 
     job = registry.create("inpaint")
     job.message = "filling..."
@@ -453,9 +451,8 @@ def _randomize_worker(job, body, plan, init_image):
     state = {"done": 0}
 
     def _run_region(params, current, mask, feather, bends):
-        bundle = manager.load(params.model_path, ema=params.ema)
-        meta = bundle["meta"]
-        runtime = _build_bend_runtime(bends, meta, bundle["backend"])
+        meta, backend = manager.describe(params.model_path)
+        runtime = _build_bend_runtime(bends, meta, backend)
         last = None
         for frame in run_inpaint(params, current, mask, feather=feather, bend_runtime=runtime,
                                  cancel=job.cancelled, control=job, mults=meta.mults):
