@@ -60,9 +60,6 @@ function isIdentityPostproc(pp) {
   );
 }
 
-// The server's own cap on one click's runs (perform.MAX_REPEAT).
-const MAX_RUNS = 50;
-
 function loadStored(key) {
   try { return localStorage.getItem(key) || ""; } catch { return ""; }
 }
@@ -147,9 +144,6 @@ export default function CreatePanel() {
     hasMask ? setMaskParam(activeMask?.id, "bendPreset", v) : setGenBendPreset(v)
   );
   const [variations, setVariations] = useState(1);
-  // How many runs one click queues. Each is a whole batch of Variations, and
-  // run k starts where run k-1's seeds stopped.
-  const [runCount, setRunCount] = useState(1);
   const [splitMethod, setSplitMethod] = useState("luminance");
   const [brightnessThreshold, setBrightnessThreshold] = useState(128);
   const [contrastThreshold, setContrastThreshold] = useState(0);
@@ -355,7 +349,9 @@ export default function CreatePanel() {
     if (done.status === "error") toast(done.message, "error");
     if (run.toResults) {
       if (done.status === "done" || done.status === "cancelled") {
-        framesOf(done).forEach((f) => pushHistory(f.img, f.raw, f.card));
+        const out = framesOf(done);
+        out.forEach((f) => pushHistory(f.img, f.raw, f.card));
+        saveQueued(done, out, run.folder);
       }
       return;
     }
@@ -373,6 +369,25 @@ export default function CreatePanel() {
         toast(`Stopped — kept in ${layerName}`, "success");
       }
     }
+  };
+
+  /** A queue's results are also written to disk, recipe in each PNG.
+   *
+   *  Results keeps only the last HISTORY_MAX images, and a long queue would
+   *  push its first ones out. Saved here, when the run lands, because it is
+   *  the landing rule -- decided in the browser -- that sent them to Results,
+   *  and it can do that after the server has already finished the run. */
+  const saveQueued = async (done, out, folder) => {
+    if (!folder) return;
+    try {
+      for (const f of out) {
+        const seed = f.card?.params?.seed;
+        await api.post("/perform/capture", {
+          image: f.img, card: f.card, folder,
+          name: `${done.id}-seed${seed ?? "x"}`,
+        });
+      }
+    } catch (e) { toast(`Could not save to captures/${folder}: ${e.message}`, "error"); }
   };
 
   /** A fill lands in the active layer, over what the layer had in that area.
@@ -463,7 +478,6 @@ export default function CreatePanel() {
       await runFill({ init: frame, mask, batchSize });
       return;
     }
-    const repeat = Math.max(1, Math.min(MAX_RUNS, Math.round(runCount) || 1));
     try {
       const genBends = resolveBends(bendPresets, genBendPreset);
       const mapped = changeToParams(genChange, sampleParams.steps, reworkCanvas);
@@ -477,13 +491,9 @@ export default function CreatePanel() {
         batch_size: batchSize,
       });
       body.live_preview = livePreviewOn;
-      body.repeat = repeat;
-      const { jobs } = await api.post("/perform/sample", body);
-      const snap = snapshotLive();
-      jobs.forEach((j) => { snapshots.current[j.id] = snap; });
-      trackRuns(jobs, { settle: finishGeneration });
-      const group = jobs[0]?.detail?.group;
-      if (group) toast(`Queued ${jobs.length} runs — each image is also saved to captures/${group.name}`, "success");
+      const { job: j } = await api.post("/perform/sample", body);
+      snapshots.current[j.id] = snapshotLive();
+      trackRuns([j], { settle: finishGeneration });
     } catch (e) { toast(e.message, "error"); }
   };
 
@@ -548,14 +558,11 @@ export default function CreatePanel() {
   const setPpField = (k, v) => setPp((s) => ({ ...s, [k]: v }));
 
   const inFlight = runs.length > 0;
-  const repeatRuns = hasMask ? 1 : Math.max(1, Math.round(runCount) || 1);
-  // Where this click's result goes: Results whenever it is or joins a queue.
-  const queueing = !hasMask && (inFlight || repeatRuns > 1);
-  const generateLabel = hasMask
-    ? "Fill mask"
-    : repeatRuns > 1
-      ? `Queue ${repeatRuns} runs${variations > 1 ? ` × ${variations}` : ""}`
-      : inFlight ? "Queue" : "Generate";
+  // Where this click's result goes: Results whenever it joins a queue. More
+  // runs means clicking Queue again -- there is no count to confuse with
+  // Variations.
+  const queueing = !hasMask && inFlight;
+  const generateLabel = hasMask ? "Fill mask" : inFlight ? "Queue" : "Generate";
 
   const runSteps = hasMask
     ? effectiveSteps(effectiveRegionChange, sampleParams.steps, true)
@@ -660,22 +667,7 @@ export default function CreatePanel() {
               tip="How many seeds to sample in one GPU run (1–4). With a fixed Seed, uses seed, seed+1, …. All land together for comparison."
             />
           </div>
-          <div className="w-100">
-            <Num
-              label="Runs"
-              value={runCount}
-              onChange={(v) => setRunCount(v === "" ? "" : Math.max(1, Math.min(MAX_RUNS, Math.round(v) || 1)))}
-              min={1}
-              max={MAX_RUNS}
-              step={1}
-              disabled={hasMask}
-              tip={hasMask
-                ? "A fill is one run: it lands over the layer as it is when it finishes."
-                : `How many runs one click queues (1–${MAX_RUNS}), each of ${variations} variation${variations > 1 ? "s" : ""}. `
-                  + "Seeds carry on from run to run. Everything lands in Results, and each image is also saved "
-                  + "to its own folder under captures, with its recipe."}
-            />
-          </div>
+
           {bendPresets.length > 0 && (
             <div className="grow">
               <Select
@@ -716,11 +708,11 @@ export default function CreatePanel() {
                 "While a queue exists, every run lands in Results and the layer is left alone: "
                 + "otherwise each run would replace the layer in turn, and which one stayed would "
                 + "depend on which finished last. Put any of them into a layer from Results."
-                + (repeatRuns > 1 ? "\n\nEach image is also saved, with its recipe, to a folder under captures." : "")
+                + "\n\nEach image is also saved, with its recipe, to one folder per queue under "
+                + "captures, so a long queue cannot push its first images out of Results."
               }
               >
-                Into <strong>Results</strong>
-                {repeatRuns > 1 ? ` · ${repeatRuns} runs, saved to captures` : ""}
+                Into <strong>Results</strong> · saved to captures
               </TipLabel>
             ) : (
             <TipLabel tip={[

@@ -186,31 +186,6 @@ def _apply_frame_to_job(job, frame, *, final=False, live=True):
         job.message = f"step {frame['step']}/{frame['total']}{suffix}"
 
 
-def _save_group_images(job, images):
-    """A repeat run's images go to disk as each run finishes, recipe in the PNG.
-
-    Results in the browser are capped and job records expire within the hour;
-    forty images from an unattended queue need somewhere that keeps them. A
-    single run is not saved: the Capture button still means "keep this".
-    """
-    group = job.detail.get("group")
-    if not group or not images:
-        return
-    from app.core.config import workspace
-
-    folder = workspace.captures / group["name"]
-    folder.mkdir(parents=True, exist_ok=True)
-    cards = job.detail.get("cards") or [job.detail.get("card")]
-    seeds = job.detail.get("seeds") or [job.detail.get("seed")]
-    saved = []
-    # Named by job and seed, not by time: a queue finishes several in a second.
-    for img, card, seed in zip(images, cards, seeds):
-        out = folder / f"{job.id}-seed{seed}.png"
-        save_with_params(img, out, card)
-        saved.append(str(out))
-    job.detail["saved"] = saved
-
-
 def _sample_worker(job, params, init_image, image_prompt, bends=None, mask=None,
                    feather=8.0, live=True):
     """Run one sample or fill in its lane.
@@ -251,7 +226,6 @@ def _sample_worker(job, params, init_image, image_prompt, bends=None, mask=None,
                 job.detail["cards"] = [{**cd, "fill_size": [fill_w, fill_h]}
                                        for cd in job.detail["cards"]]
 
-        finals = []
         last_frame = None
         try:
             for frame in _frames(params):
@@ -261,7 +235,6 @@ def _sample_worker(job, params, init_image, image_prompt, bends=None, mask=None,
                     break
             if last_frame is not None:
                 _apply_frame_to_job(job, last_frame, final=True)
-                finals = last_frame.get("images_pp") or [last_frame["image_pp"]]
         except Exception as e:  # noqa: BLE001
             if not is_oom(e) or params.batch_size <= 1:
                 raise
@@ -295,14 +268,11 @@ def _sample_worker(job, params, init_image, image_prompt, bends=None, mask=None,
                     if job.cancelled():
                         break
                 if last is not None:
-                    finals.append(last["image_pp"])
                     collected_pp.append(data_url(last["image_pp"]))
                     collected_raw.append(data_url(last["image"]))
                     job.detail["frames"] = list(collected_pp)
                     job.detail["frames_raw"] = list(collected_raw)
 
-        if job.status == "running" and not job.cancelled():
-            _save_group_images(job, finals)
         if job.status == "running":
             job.status = "cancelled" if job.cancelled() else "done"
             job.progress = 1.0 if job.status == "done" else job.progress
@@ -324,47 +294,19 @@ def sample():
 
     init_image = from_data_url(body["init_image"]) if body.get("init_image") else None
     image_prompt = from_data_url(body["image_prompt"]) if body.get("image_prompt") else None
-    repeat = max(1, min(MAX_REPEAT, int(body.get("repeat") or 1)))
-    group = _new_group(body, repeat)
 
-    jobs = []
-    for k in range(repeat):
-        # Run k carries on where run k-1's variations stopped: seeds stay
-        # consecutive, the same "item i is seed + i" rule a batch follows.
-        p = replace(params, seed=params.seed + k * params.batch_size)
-        job = registry.create("sample", status="queued")
-        job.message = "queued"
-        job.detail["total"] = 0
-        if group:
-            job.detail["group"] = {**group, "index": k}
-        _publish_card(
-            job, p,
-            bends=body.get("bends"), bend_preset=body.get("bend_preset"),
-            init_image=init_image is not None, kind="sample",
-        )
-        enqueue(job, p.model_path, partial(
-            _sample_worker, params=p, init_image=init_image, image_prompt=image_prompt,
-            bends=body.get("bends"), live=_wants_live(body)))
-        jobs.append(job)
-    # ``job`` is the first, for callers that send one run and want one back.
-    out = [j.to_dict() for j in jobs]
-    return ok({"job": out[0], "jobs": out})
-
-
-# One click of Generate with Runs set; 50 runs of 4 variations is 200 images.
-MAX_REPEAT = 50
-
-
-def _new_group(body: dict, repeat: int) -> dict | None:
-    """What a repeat run's jobs share: an id to cancel by, and a folder to save to."""
-    import time
-    import uuid
-
-    if repeat <= 1:
-        return None
-    name = body.get("group_name")
-    name = safe_name(name, "group_name") if name else f"run_{time.strftime('%Y%m%d-%H%M%S')}"
-    return {"id": uuid.uuid4().hex[:12], "count": repeat, "name": name}
+    job = registry.create("sample", status="queued")
+    job.message = "queued"
+    job.detail["total"] = 0
+    _publish_card(
+        job, params,
+        bends=body.get("bends"), bend_preset=body.get("bend_preset"),
+        init_image=init_image is not None, kind="sample",
+    )
+    enqueue(job, params.model_path, partial(
+        _sample_worker, params=params, init_image=init_image, image_prompt=image_prompt,
+        bends=body.get("bends"), live=_wants_live(body)))
+    return ok({"job": job.to_dict()})
 
 
 @bp.post("/perform/inpaint")
@@ -628,17 +570,21 @@ def capture():
 
     The generation recipe travels with the client (``job.detail.card``) and is
     written into the PNG itself, so the file stays reproducible on its own.
+    ``folder`` puts it one level down: Create saves a queue's results there.
     """
     import time
     from app.core.config import workspace
-    from utils.validators import safe_name
 
     body = request.get_json(force=True, silent=True) or {}
     (image,) = require(body, "image")
     img = from_data_url(image)
     name = safe_name(body.get("name") or f"capture_{int(time.time())}", "capture name")
     card = body.get("card") or read_params(img)
-    out = workspace.captures / f"{name}.png"
+    folder = workspace.captures
+    if body.get("folder"):
+        folder = folder / safe_name(body["folder"], "folder")
+        folder.mkdir(parents=True, exist_ok=True)
+    out = folder / f"{name}.png"
     save_with_params(img, out, card)
     return ok({"path": str(out), "card": card})
 
@@ -679,7 +625,7 @@ def captures():
     from app.core.config import workspace
 
     out = []
-    # One level of folders: each repeat run saves into its own.
+    # One level of folders: each queue's results are saved into their own.
     root = workspace.captures
     files = [*root.glob("*.png"), *root.glob("*/*.png")]
     paths = sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)

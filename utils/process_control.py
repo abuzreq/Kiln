@@ -156,18 +156,6 @@ class JobRegistry:
             return True
         return False
 
-    def cancel_group(self, group_id: str) -> int:
-        """Cancel every unfinished job of one repeat run. Returns how many.
-
-        The waiting ones go first, so none of them slips into a lane freed by
-        stopping the running ones.
-        """
-        with self._lock:
-            jobs = [j for j in self._jobs.values()
-                    if (j.detail.get("group") or {}).get("id") == group_id]
-        jobs.sort(key=lambda j: j.status != "queued")
-        return sum(self.cancel(j.id) for j in jobs)
-
     def pause(self, job_id: str) -> bool:
         job = self.get(job_id)
         if not job:
