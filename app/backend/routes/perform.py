@@ -71,6 +71,15 @@ def _params_from_body(body: dict) -> SampleParams:
     )
 
 
+def _wants_live(body: dict) -> bool:
+    """Whether the client wants in-progress previews (Create's Live preview switch).
+
+    A viewing preference, not part of the recipe: it never reaches SampleParams
+    or the card, so it cannot change what an image is or how it replays.
+    """
+    return body.get("live_preview", True) is not False
+
+
 def _build_bend_runtime(bends, meta, backend=None):
     """Optional: construct a bending runtime if a bend stack is supplied."""
     if not bends:
@@ -126,44 +135,53 @@ def _is_oom(exc: BaseException) -> bool:
 
 
 # Previews are for watching progress, so there is no point rendering more of
-# them than a person can see. Cap the rate rather than the step count so the
-# cost stays flat however many steps the sampler takes.
-PREVIEW_INTERVAL = 0.1  # seconds
+# them than anyone fetches. The rate is capped rather than the step count, so
+# the cost stays flat however fast the steps are, and the cap is the browser's
+# poll interval (pollJob, every 300 ms from Create): a preview published in
+# between was overwritten before it was ever seen.
+PREVIEW_INTERVAL = 0.3  # seconds
 
 
-def _throttled_preview(job, frame):
-    """Rate-limited JPEG preview, shared by the batch and sequential paths."""
+def _live_preview(job, frame):
+    """The in-progress picture: raw, as a cheap JPEG.
+
+    Raw on purpose. Finish (post-processing) is applied to the result only:
+    running it on every preview was most of what a preview cost, 11-22% of a
+    run with Finish on, for a picture that is replaced a moment later.
+    """
+    job.detail["frame"] = preview_url(frame["image"])
+
+
+def _throttled_preview(job, frame, live=True):
+    """Rate-limited preview, shared by the batch and sequential paths."""
     import time
 
+    if not live:
+        return
     now = time.time()
     if now - job.detail.get("_preview_at", 0.0) < PREVIEW_INTERVAL:
         return
     job.detail["_preview_at"] = now
-    job.detail["frame"] = preview_url(frame["image_pp"])
+    _live_preview(job, frame)
 
 
-def _apply_frame_to_job(job, frame, *, final=False):
+def _apply_frame_to_job(job, frame, *, final=False, live=True):
     import time
 
     job.progress = frame["step"] / max(frame["total"], 1)
     job.detail["step"] = frame["step"]
     job.detail["total"] = frame["total"]
 
-    last = job.detail.get("_preview_at", 0.0)
-    now = time.time()
-    is_last = frame["step"] >= frame["total"]
-    if final or is_last or (now - last) >= PREVIEW_INTERVAL:
-        job.detail["_preview_at"] = now
-        if final:
-            # the run is over — hand back the real thing
-            job.detail["frame"] = data_url(frame["image_pp"])
-            job.detail["frame_raw"] = data_url(frame["image"])
-            if frame.get("images_pp"):
-                job.detail["frames"] = [data_url(im) for im in frame["images_pp"]]
-                job.detail["frames_raw"] = [data_url(im) for im in frame["images"]]
-        else:
-            # cheap JPEG thumbnail; frame_raw is only needed once, at the end
-            job.detail["frame"] = preview_url(frame["image_pp"])
+    if final:
+        # the run is over — hand back the real thing
+        job.detail["frame"] = data_url(frame["image_pp"])
+        job.detail["frame_raw"] = data_url(frame["image"])
+        if frame.get("images_pp"):
+            job.detail["frames"] = [data_url(im) for im in frame["images_pp"]]
+            job.detail["frames_raw"] = [data_url(im) for im in frame["images"]]
+    elif live and (time.time() - job.detail.get("_preview_at", 0.0)) >= PREVIEW_INTERVAL:
+        job.detail["_preview_at"] = time.time()
+        _live_preview(job, frame)
 
     if not job.paused():
         n = frame.get("batch", 1)
@@ -172,7 +190,7 @@ def _apply_frame_to_job(job, frame, *, final=False):
 
 
 def _sample_worker(job, params, init_image, image_prompt, bend_runtime, mask=None,
-                   feather=8.0, mults=None):
+                   feather=8.0, mults=None, live=True):
     from dataclasses import replace
 
     from app.core.engine.inpaint import run_inpaint
@@ -198,7 +216,7 @@ def _sample_worker(job, params, init_image, image_prompt, bend_runtime, mask=Non
         try:
             for frame in _frames(params):
                 last_frame = frame
-                _apply_frame_to_job(job, frame)
+                _apply_frame_to_job(job, frame, live=live)
                 if job.cancelled():
                     break
             if last_frame is not None:
@@ -230,7 +248,7 @@ def _sample_worker(job, params, init_image, image_prompt, bend_runtime, mask=Non
                     job.progress = (i + frame["step"] / max(frame["total"], 1)) / n
                     job.detail["step"] = frame["step"]
                     job.detail["total"] = frame["total"]
-                    _throttled_preview(job, frame)
+                    _throttled_preview(job, frame, live)
                     if not job.paused():
                         job.message = f"var {i + 1}/{n} · step {frame['step']}/{frame['total']}"
                     if job.cancelled():
@@ -277,6 +295,7 @@ def sample():
     t = threading.Thread(
         target=_sample_worker,
         args=(job, params, init_image, image_prompt, bend_runtime, None),
+        kwargs={"live": _wants_live(body)},
         daemon=True,
     )
     job.thread = t
@@ -316,6 +335,7 @@ def inpaint():
     t = threading.Thread(
         target=_sample_worker,
         args=(job, params, init_image, None, bend_runtime, mask, feather, meta.mults),
+        kwargs={"live": _wants_live(body)},
         daemon=True,
     )
     job.thread = t
@@ -443,7 +463,7 @@ def _randomize_worker(job, body, plan, init_image):
             job.progress = (state["done"] + frame["step"] / max(frame["total"], 1)) / n
             job.detail["step"] = frame["step"]
             job.detail["total"] = frame["total"]
-            _throttled_preview(job, frame)
+            _throttled_preview(job, frame, _wants_live(body))
             if job.cancelled():
                 break
         return last

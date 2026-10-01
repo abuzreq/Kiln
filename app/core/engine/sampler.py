@@ -832,8 +832,11 @@ class Sampler:
             if bend_runtime is not None:
                 bend_runtime.detach()
 
-    def _to_images(self, x_s, params, pprocess, tensor_to_pil, backend=None, meta=None):
+    def _to_images(self, x_s, params, pprocess, tensor_to_pil, backend=None, meta=None,
+                   with_pp=True):
         """Convert a (B,3,H,W) tensor to parallel lists of raw / postproc PILs.
+
+        ``with_pp=False`` skips post-processing and returns ``(raws, None)``.
 
         Mapping x0 into displayable range is the backend's call: xurdif's models
         are low-contrast and have always been stretched to a fixed std, which
@@ -846,6 +849,8 @@ class Sampler:
         im = backend.to_display(x_s, meta)
 
         raws = [tensor_to_pil(im[b].cpu()) for b in range(im.shape[0])]
+        if not with_pp:
+            return raws, None
         if pprocess is None or not params.postproc:
             return raws, list(raws)
 
@@ -877,7 +882,8 @@ class Frame(Mapping):
     ``image`` / ``image_pp`` renders only the first batch item -- all a live
     preview shows -- and ``images`` / ``images_pp`` render the rest. The display
     mapping and post-processing are per item, so item 0 comes out the same
-    either way.
+    either way. Raw and post-processed images are rendered separately: a raw
+    read (the live preview) never runs the post-processing chain.
 
     It is a read-only mapping so every ``frame["image"]`` / ``frame.get(...)``
     caller works unchanged. A caller that wants to transform the images -- region
@@ -889,60 +895,53 @@ class Frame(Mapping):
     sampled image.
     """
 
-    _SINGLE = ("image", "image_pp")
-    _BATCH = ("images", "images_pp")
+    # key -> (scope, kind): scope is item 0 or the whole batch, kind 0 is the
+    # raw image and 1 the post-processed one.
+    _KEYS = {"image": ("first", 0), "image_pp": ("first", 1),
+             "images": ("all", 0), "images_pp": ("all", 1)}
 
     def __init__(self, *, step: int, total: int, batch: int, x, render):
         self._meta = {"step": step, "total": total, "batch": batch}
-        self._x = x                    # the step's x0, (B,3,H,W); dropped once rendered
-        self._render = render          # x -> (raws, pps)
+        self._x = x                    # the step's x0, (B,3,H,W)
+        self._render = render          # (x, with_pp) -> (raws, pps | None)
         self._maps = []
-        self._first = None             # (raw, pp) of item 0
-        self._all = None               # (raws, pps) of every item
+        self._cache = {}               # (scope, kind) -> [PIL]
 
     def map_images(self, fn) -> "Frame":
         """Apply ``fn`` to every image this frame yields, raw and processed alike."""
         self._maps.append(fn)
-        if self._first is not None:
-            self._first = tuple(fn(im) for im in self._first)
-        if self._all is not None:
-            self._all = tuple([fn(im) for im in ims] for ims in self._all)
+        self._cache = {k: [fn(im) for im in v] for k, v in self._cache.items()}
         return self
 
     def _image_keys(self):
-        return self._SINGLE + (self._BATCH if self._meta["batch"] > 1 else ())
+        keys = ("image", "image_pp")
+        return keys + (("images", "images_pp") if self._meta["batch"] > 1 else ())
 
-    def _rendered(self, x):
-        raws, pps = self._render(x)
+    def _fill(self, scope: str, kind: int):
+        if (scope, kind) in self._cache:
+            return
+        # The live preview shows the first variation only; rendering the other
+        # three for it was the bulk of a 4-variation preview's cost.
+        whole = scope == "all" or self._meta["batch"] == 1
+        raws, pps = self._render(self._x if whole else self._x[:1], with_pp=bool(kind))
         for fn in self._maps:
             raws = [fn(im) for im in raws]
-            pps = [fn(im) for im in pps]
-        return raws, pps
-
-    def _ensure(self, every: bool):
-        if self._all is not None or (not every and self._first is not None):
-            return
-        if every or self._meta["batch"] == 1:
-            self._all = self._rendered(self._x)
-            self._first = (self._all[0][0], self._all[1][0])
-            # The step's x0 lives on the device; nothing needs it any more.
-            self._x = None
-        else:
-            # The live preview shows the first variation only. Rendering and
-            # post-processing the other three for it was the bulk of a 4-variation
-            # preview's cost.
-            raws, pps = self._rendered(self._x[:1])
-            self._first = (raws[0], pps[0])
+            pps = None if pps is None else [fn(im) for im in pps]
+        for k, ims in ((0, raws), (1, pps)):
+            if ims is None or (scope, k) in self._cache:
+                continue
+            self._cache[(scope, k)] = ims
+            if whole:
+                self._cache.setdefault(("first", k), ims[:1])
 
     def __getitem__(self, key):
         if key in self._meta:
             return self._meta[key]
-        if key in self._SINGLE:
-            self._ensure(every=False)
-            return self._first[self._SINGLE.index(key)]
         if key in self._image_keys():
-            self._ensure(every=True)
-            return self._all[self._BATCH.index(key)]
+            scope, kind = self._KEYS[key]
+            self._fill(scope, kind)
+            ims = self._cache[(scope, kind)]
+            return ims[0] if scope == "first" else ims
         raise KeyError(key)
 
     def __iter__(self):

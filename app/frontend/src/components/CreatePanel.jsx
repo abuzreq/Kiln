@@ -79,7 +79,7 @@ export default function CreatePanel() {
     shapeKind, setShapeKind, genShape, setGenShape, polygonRef, polyCount, addStroke, addMaskWithStroke,
     getMaskDataUrl, applyContrastMask, frameCard, activeLayer,
     activeMask, maskPixels, hasMask, liveMasks, invertMask, clearMask, setMaskParam, nudgeMask,
-    undo, canUndo, redo, canRedo, tab, setLivePreview,
+    undo, canUndo, redo, canRedo, tab, setLivePreview, livePreviewOn,
     job, setJob, genRunning, genPaused, canvasIsBlank,
   } = usePlay();
   const layerName = activeLayer?.name || "the active layer";
@@ -421,6 +421,7 @@ export default function CreatePanel() {
       overrides: { ...mapped, resample: canResample ? resample : 1 },
       batch_size: batchSize,
     });
+    body.live_preview = livePreviewOn;
     try {
       const { job: j } = await api.post("/perform/inpaint", body);
       onJob(j);
@@ -461,6 +462,7 @@ export default function CreatePanel() {
         overrides: mapped,
         batch_size: batchSize,
       });
+      body.live_preview = livePreviewOn;
       const { job: j } = await api.post("/perform/sample", body);
       onJob(j);
       pausedSnapshot.current = snapshotLive();

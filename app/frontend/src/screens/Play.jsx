@@ -121,6 +121,15 @@ export default function Play() {
   // In-progress frames from a running job, kept off the layer stack so a live
   // preview never becomes a layer of its own.
   const [livePreview, setLivePreview] = useState(null);
+  // Whether a run shows its in-progress picture. A viewing preference, kept per
+  // browser; with it off the canvas keeps the old picture until the result lands.
+  const [livePreviewOn, setLivePreviewOnState] = useState(() => {
+    try { return localStorage.getItem("kiln.livePreview") !== "off"; } catch { return true; }
+  });
+  const setLivePreviewOn = useCallback((on) => {
+    setLivePreviewOnState(on);
+    try { localStorage.setItem("kiln.livePreview", on ? "on" : "off"); } catch { /* not fatal */ }
+  }, []);
   const [job, setJob] = useState(null);
   // The blank canvas people paint regions onto. Its size is remembered here
   // rather than read from the sampler's image size: a composition can be any
@@ -1016,7 +1025,7 @@ export default function Play() {
     deleteEntity, moveEntity, addLayer, duplicateLayer,
     addMask, clearMask, invertMask, setMaskParam, moveMask, nudgeMask,
     addRasterLayer, useLayerAsMask, addMaskWithStroke,
-    undo, canUndo, redo, canRedo, setLivePreview,
+    undo, canUndo, redo, canRedo, setLivePreview, livePreviewOn, setLivePreviewOn,
     // Assets
     assets, addAssetFiles, deleteAsset, placeAsset, openAsset,
     sampleParams, setSampleParam, mergeSampleParams, maskVersion, bumpMask,
@@ -1091,6 +1100,7 @@ function PlayCanvas({ brushable }) {
   const { toast } = useApp();
   const {
     postFrame, showRaw, setShowRaw, progress, heroRef, canvasImage, syncMaskOverlayRef, tab,
+    livePreviewOn, setLivePreviewOn,
     frameCard, pendingCard, setPendingCard, applyCard, activeSeed,
     clearCanvas, canvasSize, setCanvasSize, newCanvas, loadFile,
     activeMask, maskPixels, hasMask, liveMasks,
@@ -1222,6 +1232,12 @@ function PlayCanvas({ brushable }) {
             {activeSeed != null && !progress && (
               <span className="pill mono" title="Seed that produced this image">seed {activeSeed}</span>
             )}
+            <Tooltip text="Show the picture while it is being made. The preview is the raw image; Finish is applied to the result only. Turn it off to keep the current picture on the canvas until the result lands, which saves a little time per run.">
+              <label className="row center gap-1 has-tip">
+                <input type="checkbox" checked={livePreviewOn} onChange={(e) => setLivePreviewOn(e.target.checked)} />
+                <span className="sub">Live preview</span>
+              </label>
+            </Tooltip>
             {postFrame && (
               <Tooltip text="Show the layer stack as it is, before post-processing. Useful for judging what the models actually produced.">
                 <label className="row center gap-1 has-tip">

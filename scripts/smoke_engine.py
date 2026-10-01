@@ -54,28 +54,31 @@ def check_lazy_frames(ckpt: Path):
     calls = []
     real = sampler_mod.Sampler._to_images
 
-    def counting(self, *a, **kw):
-        calls.append(1)
-        return real(self, *a, **kw)
+    def counting(self, x_s, *a, with_pp=True, **kw):
+        calls.append((x_s.shape[0], with_pp))
+        return real(self, x_s, *a, with_pp=with_pp, **kw)
 
     sampler_mod.Sampler._to_images = counting
     try:
         params = SampleParams(model_path=str(ckpt), image_size=64, steps=6, device="cpu",
-                              batch_size=2, seed=7)
+                              batch_size=2, seed=7, postproc={"contrast": 1.2})
         last = None
         for frame in sampler.run(params):
             assert frame["step"] >= 1 and frame["batch"] == 2   # free to read
             last = frame
         assert not calls, f"frames rendered before anyone read them: {len(calls)}"
-        img = last["image_pp"]
+        # A live preview: the first variation, raw, with no post-processing.
         last["image"]
-        assert len(calls) == 1, f"the preview item rendered {len(calls)} times"
+        assert calls == [(1, False)], f"a raw preview rendered {calls}"
+        pp = last["image_pp"]
+        assert calls[-1] == (1, True) and len(calls) == 2
         # The preview renders the first variation alone; it has to be the same
         # picture the full batch render gives for that item.
-        assert len(last["images"]) == 2 and len(calls) == 2
-        assert last["images_pp"][0].tobytes() == img.tobytes(), "preview differs from item 0"
-        last["images_pp"], last["image"]
-        assert len(calls) == 2, "a rendered frame rendered again"
+        assert len(last["images_pp"]) == 2 and calls[-1] == (2, True)
+        assert last["images_pp"][0].tobytes() == pp.tobytes(), "preview differs from item 0"
+        n = len(calls)
+        last["images"], last["images_pp"], last["image"], last["image_pp"]
+        assert len(calls) == n, "a rendered frame rendered again"
         assert set(last) == {"step", "total", "batch", "image", "image_pp",
                              "images", "images_pp"}
 
@@ -89,7 +92,7 @@ def check_lazy_frames(ckpt: Path):
         assert len(seen) == 2 and "images" not in frame
     finally:
         sampler_mod.Sampler._to_images = real
-    print("lazy frames: no render until read, preview renders item 0 only, "
+    print("lazy frames: no render until read, raw item-0 preview skips postproc, "
           "map_images deferred")
 
 
