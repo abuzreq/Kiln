@@ -209,7 +209,7 @@ function BendCard({ b, i, opDef, nodes, focused, dragging, onFocus, onKeyMove, d
  *  workspace's, so taking a group here behaves exactly as it did on the chips
  *  that used to sit above the map. */
 export function BendInspector({
-  b, index, opDef, ops, nodes, groups, note, update, remove, toggleGroup,
+  b, index, opDef, ops, nodes, groups, note, update, remove, duplicate, toggleGroup,
 }) {
   if (!b) {
     return (
@@ -344,6 +344,10 @@ export function BendInspector({
       />
 
       <div className="bend-inspector-foot">
+        <button type="button" className="btn sm ghost" onClick={() => duplicate(b.id)}
+          title="A copy right after this one, to try a variation without losing the original">
+          Duplicate
+        </button>
         <button type="button" className="btn sm danger ghost" onClick={() => remove(b.id)}>
           Remove bend
         </button>

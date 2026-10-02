@@ -191,6 +191,19 @@ export function BendWorkspace({ stack, setStack }) {
   const updateBend = (id, patch) => setStack(stack.map((b) => (b.id === id ? { ...b, ...patch } : b)));
   // Focus moves on by itself: the effect above re-points it at the first bend.
   const removeBend = (id) => setStack(stack.filter((b) => b.id !== id));
+  // A copy straight after the original, focused, so the variation is the one
+  // being edited and the original is a click (or a switch-off) away.
+  const duplicateBend = (id) => {
+    const i = stack.findIndex((b) => b.id === id);
+    if (i < 0) return;
+    const src = stack[i];
+    const copy = {
+      ...src, id: newBendId(), params: { ...src.params }, targets: [...(src.targets || [])],
+    };
+    setStack([...stack.slice(0, i + 1), copy, ...stack.slice(i + 1)]);
+    setFocusedBendId(copy.id);
+    setNote(null);
+  };
 
   const addBend = (targets) => {
     const op = ops[0];
@@ -637,6 +650,7 @@ export function BendWorkspace({ stack, setStack }) {
               note={note?.bendId === focusedBendId ? note.groups : null}
               update={updateBend}
               remove={removeBend}
+              duplicate={duplicateBend}
               toggleGroup={toggleGroup}
             />
           </div>

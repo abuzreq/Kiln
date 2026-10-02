@@ -609,7 +609,9 @@ body {
   align-items: start;
 }
 @media (max-width: 1100px) {
-  .bend-work { grid-template-columns: 1fr; }
+  /* minmax: a plain 1fr cannot shrink below its widest child, and the map
+     card held the whole column wider than the window. */
+  .bend-work { grid-template-columns: minmax(0, 1fr); }
 }
 @media (min-width: 1101px) {
   .bend-work > :last-child { position: sticky; top: var(--s-3); }
@@ -684,7 +686,7 @@ body {
 .num-field input:focus { outline: none; }
 .bend-inspector-help { margin: 0; line-height: 1.5; }
 .bend-inspector-section { display: flex; flex-direction: column; gap: var(--s-2); }
-.bend-inspector-foot { display: flex; justify-content: flex-end; border-top: 1px solid var(--line); padding-top: var(--s-2); }
+.bend-inspector-foot { display: flex; justify-content: flex-end; gap: var(--s-2); border-top: 1px solid var(--line); padding-top: var(--s-2); }
 .bend-cat {
   display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 4px;
   background: var(--bg-3); color: var(--text-dim);
