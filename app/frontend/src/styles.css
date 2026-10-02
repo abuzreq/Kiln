@@ -572,6 +572,32 @@ body {
 .merge-shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .merge-result-mark { display: flex; flex-direction: column; align-items: center; gap: var(--s-1); padding: var(--s-4); text-align: center; }
 .empty-shot { border-style: dashed; }
+/* The Bend screen's header: what it is on the left, how to look at it on the
+   right. A row, not a card -- it was a whole card for a title and a sentence. */
+.bend-toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: var(--s-2) var(--s-3);
+}
+.bend-toolbar-id { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-2) var(--s-3); min-width: 0; }
+.bend-title { margin: 0; font-size: var(--fs-display); font-weight: 700; letter-spacing: -0.01em; }
+.bend-toolbar-tools { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-2); }
+.bend-toolbar-sep { width: 1px; height: 22px; background: var(--line); margin: 0 var(--s-1); }
+.bend-share { width: 300px; }
+.bend-share .sub { margin: 0 0 var(--s-3); line-height: 1.45; }
+
+/* Popover: a panel dropped from its own button (ui.jsx Popover). */
+.popover-anchor { position: relative; display: inline-flex; }
+.popover {
+  position: absolute; top: calc(100% + 6px); z-index: 150;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: var(--s-3); box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+}
+.popover-end { right: 0; }
+.popover-start { left: 0; }
+
+/* Numbers that change in place (amounts, counts, read-outs) keep their width. */
+.tnum { font-variant-numeric: tabular-nums; }
+
 /* The work area: the map and the stack it drives in one card on the left, the
    two samples beside them on the right where they have room to be looked at. */
 .bend-work {

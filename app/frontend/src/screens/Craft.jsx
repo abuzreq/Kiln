@@ -2,7 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api, downloadPost, pollJob } from "../api.js";
 import { useApp } from "../state.jsx";
 import { usePlay, usePlayState } from "./playContext.jsx";
-import { Select, Num, Text, Disclose, Progress, Modal, Seg } from "../components/ui.jsx";
+import { Select, Num, Text, Disclose, Progress, Modal, Seg, Popover } from "../components/ui.jsx";
+import { DownloadIcon, TransferIcon } from "../components/icons.jsx";
 import UnetVisualizer from "../components/UnetVisualizer.jsx";
 import BendPipeline from "../components/BendPipeline.jsx";
 import BendEditor from "../components/BendEditor.jsx";
@@ -21,8 +22,10 @@ const VIEWS = [
   { id: "simple", label: "Simple", tip: "The model as a signal path: encoder, bottleneck, decoder" },
   { id: "structure", label: "Structure", tip: "The map of the network itself" },
 ];
+// "overview" is the stored id from before the label became Levels; keeping it
+// keeps everyone's saved choice.
 const GRAINS = [
-  { id: "overview", label: "Overview", tip: "One capsule per resolution level" },
+  { id: "overview", label: "Levels", tip: "One capsule per resolution level" },
   { id: "layers", label: "Layers", tip: "Every layer you can bend" },
 ];
 const VIEW_KEY = "kiln.bendMapView";
@@ -435,17 +438,63 @@ export function BendWorkspace({ stack, setStack }) {
 
   return (
     <div className="col">
-      <div className="card">
-        <div className="row between center wrap gap-2">
-          <h3 className="mb-0">Bend</h3>
+      {/* One row for what the screen is and how to look at it. The map's view
+          controls live here rather than on the map card, so changing them never
+          moves the map. */}
+      <div className="bend-toolbar">
+        <div className="bend-toolbar-id">
+          <h2 className="bend-title">Bend</h2>
           {graph?.model && (
-            <span className="pill">{graph.model.mtype} · {graph.model.mults?.join("-")}{graph.model.attn ? ` · ${graph.model.attn}` : ""}</span>
+            <span className="pill tnum">{graph.model.mtype} · {graph.model.mults?.join("-")}{graph.model.attn ? ` · ${graph.model.attn}` : ""}</span>
           )}
+          <span className="sub">
+            Rewrites activations at the layers you pick, mid-generation. The model file is untouched.
+          </span>
         </div>
-        <p className="hint mb-0 mt-1">
-          Rewrites activations mid-generation at the layers you pick. Changes the output, not the
-          model file. Save a stack to reuse it in Create.
-        </p>
+        <div className="bend-toolbar-tools">
+          <Seg ariaLabel="How to show the model" tabs={VIEWS} value={view}
+               onChange={setView} size="sm" />
+          {view === "structure" && (
+            <Seg ariaLabel="How much detail the map shows" tabs={GRAINS} value={grain}
+                 onChange={setGrain} size="sm" />
+          )}
+          <span className="bend-toolbar-sep" aria-hidden="true" />
+          <Popover
+            label="Share with other tools"
+            triggerLabel="Import or export bends as JSON"
+            triggerClass="btn icon"
+            trigger={<TransferIcon size={15} />}
+          >
+            {(close) => (
+              <div className="bend-share">
+                <div className="section-title">Share with other tools</div>
+                <p className="sub">
+                  The shared network-bending JSON, as other bending tools write it. Layer paths are
+                  per-architecture, so a file from elsewhere usually needs retargeting on the map.
+                </p>
+                <div className="row gap-2">
+                  <button type="button" className="btn sm" disabled={!stack.length}
+                    onClick={() => { close(); exportBends(); }}>
+                    <DownloadIcon /> Export JSON
+                  </button>
+                  <button type="button" className="btn sm"
+                    onClick={() => { importRef.current?.click(); close(); }}>
+                    Import JSON
+                  </button>
+                </div>
+              </div>
+            )}
+          </Popover>
+          {/* Outside the popover, which unmounts on close: the file picker
+              outlives it. */}
+          <input
+            ref={importRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden-file"
+            onChange={(e) => { importBends(e.target.files?.[0]); e.target.value = ""; }}
+          />
+        </div>
       </div>
 
       <div className="bend-work">
@@ -460,14 +509,6 @@ export function BendWorkspace({ stack, setStack }) {
               ) : (
                 <span className="pill">No bend selected</span>
               )}
-            </div>
-            <div className="row center gap-2">
-              {view === "structure" && (
-                <Seg ariaLabel="How much detail the map shows" tabs={GRAINS} value={grain}
-                     onChange={setGrain} size="sm" />
-              )}
-              <Seg ariaLabel="How to show the model" tabs={VIEWS} value={view}
-                   onChange={setView} size="sm" />
             </div>
           </div>
           {!focusedBend && <p className="hint mt-1 mb-0">{MAP_HINT[shown].empty}</p>}
@@ -584,31 +625,6 @@ export function BendWorkspace({ stack, setStack }) {
           <ComparePair plain={genPlain} bent={genBent} large />
         </Modal>
       )}
-
-      <Disclose
-        title="Share with other tools"
-        tip="The shared network-bending JSON, as other bending tools write it."
-      >
-        <p className="hint mb-2">
-          Layer paths are per-architecture, so a file imported from elsewhere usually needs
-          retargeting before it does what it did there.
-        </p>
-        <div className="row center wrap gap-2">
-          <button type="button" className="btn sm" onClick={exportBends} disabled={!stack.length}>
-            Export JSON
-          </button>
-          <button type="button" className="btn sm" onClick={() => importRef.current?.click()}>
-            Import JSON
-          </button>
-          <input
-            ref={importRef}
-            type="file"
-            accept="application/json,.json"
-            className="hidden-file"
-            onChange={(e) => { importBends(e.target.files?.[0]); e.target.value = ""; }}
-          />
-        </div>
-      </Disclose>
 
       <Disclose
         title="Sweep a bend parameter"

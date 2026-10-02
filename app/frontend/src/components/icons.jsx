@@ -219,6 +219,16 @@ export function DownloadIcon(props) {
   );
 }
 
+/** Out and in: one arrow up, one down. For import/export together. */
+export function TransferIcon(props) {
+  return (
+    <Icon {...props}>
+      <path d="M7 20V4M3 8l4-4 4 4" />
+      <path d="M17 4v16M13 16l4 4 4-4" />
+    </Icon>
+  );
+}
+
 export function CaptureIcon(props) {
   return (
     <Icon {...props}>
