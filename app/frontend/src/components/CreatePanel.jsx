@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api.js";
 import { useApp } from "../state.jsx";
 import { usePlay } from "../screens/playContext.jsx";
-import { Slider, Select, Num, Disclose, TipLabel, Tooltip } from "./ui.jsx";
+import { Slider, Select, Num, Seg, TipLabel, Tooltip } from "./ui.jsx";
 import { useFrameSize } from "./CanvasTools.jsx";
 import {
   buildSamplePayload, buildInpaintPayload, changeToParams, effectiveSteps, skippedSteps,
@@ -10,6 +10,8 @@ import {
   liveEditLabels, joinLabels } from "../sampleSettings.jsx";
 import { compositePostprocWithMask } from "../contrastMask.js";
 import { bendPresetSynopsis, bendPresetSummary } from "../bendSynopsis.js";
+
+const PANEL_KEY = "kiln.createPanelTab";
 
 const DEFAULT_PP = { contrast: 1, gamma: 1, saturation: 1, eqhist: 0, unsharp: 0, noise: 0 };
 
@@ -45,7 +47,7 @@ export default function CreatePanel() {
     getMaskDataUrl, applyContrastMask, frameCard, activeLayer,
     activeMask, maskPixels, hasMask, liveMasks, invertMask, clearMask, setMaskParam, nudgeMask,
     undo, canUndo, redo, canRedo, tab, setLivePreview, livePreviewOn,
-    job, genRunning, genPaused, canvasIsBlank, runs, trackRuns,
+    job, genRunning, genPaused, canvasIsBlank, runs, trackRuns, setSampleParam,
   } = usePlay();
   const layerName = activeLayer?.name || "the active layer";
 
@@ -64,6 +66,13 @@ export default function CreatePanel() {
   const [srSharpen, setSrSharpen] = useState(0.5);
   const [srBusy, setSrBusy] = useState(false);
   const [genChange, setGenChange] = useState(0.7);
+  // Generate or Finish. Remembered, so someone who is finishing a picture
+  // comes back to Finish.
+  const [panelTab, setPanelTabState] = useState(() => (loadStored(PANEL_KEY) === "finish" ? "finish" : "generate"));
+  const setPanelTab = (t) => {
+    setPanelTabState(t);
+    try { localStorage.setItem(PANEL_KEY, t); } catch { /* ignore */ }
+  };
 
   // Everything that scopes to a masked area lives on the mask itself, so there
   // is one Change slider rather than two that looked alike and took turns being
@@ -112,6 +121,8 @@ export default function CreatePanel() {
   // Job id -> the live settings it was started (or last resumed) with. Resume
   // sends only what differs, and with a queue each run has its own baseline.
   const snapshots = useRef({});
+  // The current run(), for the keyboard handler, which is bound once per tab.
+  const runRef = useRef(null);
   const ppSource = frame;
   const ppGen = useRef(0);
   // Region fill runs at the canvas's own resolution, so the user needs to see it.
@@ -125,6 +136,13 @@ export default function CreatePanel() {
     if (tab !== "create") return undefined;
     const ARROWS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
     const onKey = (e) => {
+      // Ctrl+Enter runs, from anywhere on the tab -- the prompt field included,
+      // so words can be typed and sent without reaching for the mouse.
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.altKey && !e.repeat) {
+        e.preventDefault();
+        runRef.current?.();
+        return;
+      }
       const t = e.target;
       const tag = t?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t?.isContentEditable) return;
@@ -423,6 +441,11 @@ export default function CreatePanel() {
     setSrBusy(false);
   };
 
+  runRef.current = () => {
+    if (hasMask && runs.length) { toast("A fill starts when nothing else is running", "error"); return; }
+    run();
+  };
+
   const setPpField = (k, v) => setPp((s) => ({ ...s, [k]: v }));
 
   const inFlight = runs.length > 0;
@@ -468,272 +491,337 @@ export default function CreatePanel() {
     return p ? `${base}\n\n${bendPresetSynopsis(p, ops)}` : base;
   };
 
+  // What the run will do and where it lands, in words, next to the button.
+  // This replaced a notice over the picture ("Inpaint Mask 1"), which said only
+  // half of it and pushed the picture down whenever a mask was on.
+  const what = genPaused
+    ? <>Paused · step {job?.detail?.step || "?"} / {job?.detail?.total || "?"}</>
+    : hasMask
+      ? <>Fills <strong>{liveMasks.length > 1 ? `${liveMasks.length} masks` : maskName}</strong> · {stepText}</>
+      : reworkCanvas
+        ? <>Reworks the <strong>whole canvas</strong>, keeping its layout · {stepText}</>
+        : <>A <strong>new image</strong> · {sampleParams.image_size}px · {stepText}</>;
+  const whatTip = hasMask
+    ? `Only the masked area changes; the rest of the canvas is kept exactly. When the fill lands the mask turns off, so the next run is the whole canvas again; turn it back on in Layers to try another setting on the same area.`
+    : canvasIsBlank
+      ? "Makes a new image. Mask an area to rework only that part instead."
+      : "Reworks the whole canvas by the amount of Change; at full Change it makes a new image. Mask an area to rework only that part instead.";
+
   return (
-    <div className="col create-panel">
-      {/* ——— 1. Generate ——————————————————————————————— */}
-      <div className="card">
-        <h3>
-          <TipLabel tip={hasMask
-            ? `${maskName} is on, so this reworks only that area and leaves the rest alone. `
-              + "When the fill lands, the mask turns off, so the next run is the whole canvas again; turn it back on to try another model or setting on the same area."
-            : canvasIsBlank
-              ? "Makes a new image. Mask an area below to rework only that part of the canvas instead."
-              : "Reworks the whole canvas by the amount of Change; at full Change it makes a new image. "
-                + "Mask an area below to rework only that part instead."}
+    <section className="card inspector-panel create-panel" aria-label="Make">
+      <div className="panel-tabs" role="tablist" aria-label="Make">
+        {[
+          { id: "generate", label: "Generate" },
+          { id: "finish", label: "Finish", extra: ppOn ? <span className="panel-tab-dot" title="Post-process is on" /> : null },
+        ].map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            role="tab"
+            aria-selected={panelTab === t.id}
+            className={panelTab === t.id ? "on" : ""}
+            onClick={() => setPanelTab(t.id)}
           >
-            Generate
-          </TipLabel>
-        </h3>
+            {t.label}{t.extra}
+          </button>
+        ))}
+      </div>
 
-        {/* One Change slider, scoped by whatever is selected. There used to be
-            two of these with the same name in different sections, only one of
-            which did anything at any moment. */}
-        {(hasMask || !canvasIsBlank) && (
-          <Slider
-            label={hasMask ? `Change · ${maskName}` : "Change · whole canvas"}
-            value={changeValue}
-            min={0}
-            max={1}
-            step={0.05}
-            disabled={fillLocked}
-            onChange={setChangeValue}
-            fmt={(v) => (fillLocked
-              ? `full · blank canvas · ${sampleParams.steps} steps`
-              : !hasMask && v >= 1
-                ? `new image · ${sampleParams.steps} steps`
-                : `${v < 0.3 ? "subtle" : v < 0.7 ? "medium" : "strong"} · ${effectiveSteps(v, sampleParams.steps, true)} steps`)}
-            tip={(hasMask
-              ? `How strongly the model restyles ${maskName}.`
-              : "How far to move from what is on the canvas. Subtle keeps more of it; strong "
-                + "invents more; at full the canvas is ignored and a new image is made.")
-              + "\n\nWhat it does is skip steps. The first steps of the schedule are the high-noise "
-              + "ones that would wipe out what is already there, so the run starts partway down "
-              + "instead: the lower the Change, the more of those steps are skipped and the less is "
-              + "altered. Right now it skips "
-              + `${skippedSteps(changeValue, sampleParams.steps, true)} of ${sampleParams.steps} steps`
-              + ", which is why the run is shorter than the Steps box says. It also sets how much "
-              + "extra noise is mixed in at each remaining step."
-              + (hasMask
-                ? "\n\nThis one belongs to the mask, and is remembered with it."
-                : "")
-              + (fillLocked
-                ? "\n\nThe canvas is blank, so there is nothing to keep and the fill runs the whole "
-                  + "schedule. The slider comes back once something is underneath."
-                : "")}
-          />
-        )}
-
-        <div className="row gap-2 wrap">
-          <div className="w-100">
-            <Num
-              label="Variations"
-              value={variations}
-              onChange={(v) => setVariations(Math.max(1, Math.min(4, Math.round(v) || 1)))}
-              min={1}
-              max={4}
-              step={1}
-              tip="How many seeds to sample in one GPU run (1–4). With a fixed Seed, uses seed, seed+1, …. All land together for comparison."
+      {panelTab === "generate" ? (
+        <div className="panel-body" role="tabpanel" aria-label="Generate">
+          {/* One Change slider, scoped by whatever is selected. There used to be
+              two of these with the same name in different sections, only one of
+              which did anything at any moment. */}
+          {(hasMask || !canvasIsBlank) && (
+            <Slider
+              label={hasMask ? `Change · ${maskName}` : "Change · whole canvas"}
+              value={changeValue}
+              min={0}
+              max={1}
+              step={0.05}
+              disabled={fillLocked}
+              onChange={setChangeValue}
+              fmt={(v) => (fillLocked
+                ? `full · blank canvas · ${sampleParams.steps} steps`
+                : !hasMask && v >= 1
+                  ? `new image · ${sampleParams.steps} steps`
+                  : `${v < 0.3 ? "subtle" : v < 0.7 ? "medium" : "strong"} · ${effectiveSteps(v, sampleParams.steps, true)} steps`)}
+              tip={(hasMask
+                ? `How strongly the model restyles ${maskName}.`
+                : "How far to move from what is on the canvas. Subtle keeps more of it; strong "
+                  + "invents more; at full the canvas is ignored and a new image is made.")
+                + "\n\nWhat it does is skip steps. The first steps of the schedule are the high-noise "
+                + "ones that would wipe out what is already there, so the run starts partway down "
+                + "instead: the lower the Change, the more of those steps are skipped and the less is "
+                + "altered. Right now it skips "
+                + `${skippedSteps(changeValue, sampleParams.steps, true)} of ${sampleParams.steps} steps`
+                + ", which is why the run is shorter than the Steps box says. It also sets how much "
+                + "extra noise is mixed in at each remaining step."
+                + (hasMask
+                  ? "\n\nThis one belongs to the mask, and is remembered with it."
+                  : "")
+                + (fillLocked
+                  ? "\n\nThe canvas is blank, so there is nothing to keep and the fill runs the whole "
+                    + "schedule. The slider comes back once something is underneath."
+                  : "")}
             />
-          </div>
+          )}
 
-          {bendPresets.length > 0 && (
-            <div className="grow">
-              <Select
-                label={hasMask ? `Bend preset · ${maskName}` : "Bend preset"}
-                value={bendValue}
-                onChange={setBendValue}
-                options={bendOptions}
-                tip={bendTip(
-                  bendValue,
-                  hasMask
-                    ? `Optional UNet tweaks saved in Create ▸ Bend, applied when filling ${maskName}. Remembered with it.`
-                    : "Optional layer tweaks saved in Create ▸ Bend, applied to the whole canvas.",
-                )}
+          {/* The prompt, where it is used. It is the same stored value as the
+              Prompt in Setup ▸ Advanced, which Bend, Merge and Sweep sample
+              with, so the two can never disagree. */}
+          <label className="field steer-words">
+            <TipLabel tip={"Steers the picture towards these words with CLIP guidance while it samples. "
+              + "Kiln's models are unconditional: the words nudge, they do not describe. Empty means no guidance."
+              + "\n\nThe same prompt as in Setup ▸ Advanced, where its strength and ramp live; Bend, Merge and Sweep use it too."}
+            >
+              <span>Steer with words</span>
+            </TipLabel>
+            <input
+              type="text"
+              value={sampleParams.text || ""}
+              placeholder="e.g. a rust-red coastline, aerial"
+              onChange={(e) => setSampleParam("text", e.target.value)}
+            />
+          </label>
+
+          <div className="row gap-2 wrap">
+            <div className="w-100">
+              <Num
+                label="Variations"
+                value={variations}
+                onChange={(v) => setVariations(Math.max(1, Math.min(4, Math.round(v) || 1)))}
+                min={1}
+                max={4}
+                step={1}
+                tip="How many seeds to sample in one GPU run (1–4). With a fixed Seed, uses seed, seed+1, …. All land together for comparison."
               />
             </div>
-          )}
-        </div>
-        {bendValue && presetByName(bendValue) && (
-          <p className="hint mb-2 mono-hint">
-            {bendPresetSynopsis(presetByName(bendValue), ops)}
-          </p>
-        )}
 
-        <div className="create-generate-box">
-          <span className="sub">
-            {genPaused
-              ? `Paused · step ${job?.detail?.step || "?"} / ${job?.detail?.total || "?"}`
-              : variations > 1
-                ? `${generateHint} · ${variations} variations`
-                : generateHint}
-          </span>
-          {/* Where the result lands, and at what size. The layer is chosen in
-              the Layers panel; this is only the consequence, said next to the
-              button, with the reasons a hover away. */}
-          <span className="sub block mt-1">
-            {queueing ? (
-              <TipLabel tip={
-                "While a queue exists, every run lands in Results and the layer is left alone: "
-                + "otherwise each run would replace the layer in turn, and which one stayed would "
-                + "depend on which finished last. Put any of them into a layer from Results."
-                + "\n\nEach image is also saved, with its recipe, to one folder per queue under "
-                + "captures, so a long queue cannot push its first images out of Results."
-              }
-              >
-                Into <strong>Results</strong> · saved to captures
-              </TipLabel>
-            ) : (
-            <TipLabel tip={[
-              hasMask
-                ? `The result lands in ${layerName}, over what that layer has in the masked area. `
-                  + "It starts from the canvas as shown: hide layers to start from what is under them."
-                : `The result lands in ${layerName}, replacing what it has. `
-                  + "Add or duplicate a layer first to keep this attempt apart.",
-              fill && canvasSize
-                ? (scaledFill
-                  ? `Fills at ${fill.w}×${fill.h} and is scaled back to the ${canvasSize.w}×${canvasSize.h} canvas on return.`
-                  : `Fills at ${fill.w}×${fill.h}, the canvas's own size.`)
-                : null,
-              stepsTrimmed
-                ? `Keeping part of the image means starting partway down the schedule, so ${sampleParams.steps - runSteps} early steps are skipped. Raise Change to use more.`
-                : null,
-            ].filter(Boolean).join("\n\n")}
-            >
-              Into <strong>{layerName}</strong>
-              {fill && canvasSize ? ` · ${fill.w}×${fill.h}` : ""}
-              {stepsTrimmed ? ` · ${sampleParams.steps - runSteps} steps skipped` : ""}
-            </TipLabel>
+            {bendPresets.length > 0 && (
+              <div className="grow">
+                <Select
+                  label={hasMask ? `Bend preset · ${maskName}` : "Bend preset"}
+                  value={bendValue}
+                  onChange={setBendValue}
+                  options={bendOptions}
+                  tip={bendTip(
+                    bendValue,
+                    hasMask
+                      ? `Optional UNet tweaks saved in Create ▸ Bend, applied when filling ${maskName}. Remembered with it.`
+                      : "Optional layer tweaks saved in Create ▸ Bend, applied to the whole canvas.",
+                  )}
+                />
+              </div>
             )}
-          </span>
-          {/* Generate never locks: while anything is in flight it queues the
-              settings as they are at the click. Fills are the exception, see run(). */}
-          <button
-            type="button"
-            className="btn primary w-full mt-2"
-            onClick={run}
-            disabled={!modelPath || (hasMask && inFlight)}
-            title={hasMask && inFlight ? "A fill starts when nothing else is running" : undefined}
-          >
-            {generateLabel}
-          </button>
-          {genRunning && (
-            <div className="row gap-2 mt-2">
-              {genPaused ? (
-                <button type="button" className="btn primary grow" onClick={resume}>Resume</button>
-              ) : (
-                <button type="button" className="btn grow" onClick={pause}>Pause</button>
-              )}
-              <button type="button" className="btn danger grow" onClick={stopAndSave}>Stop &amp; save</button>
-            </div>
+          </div>
+          {bendValue && presetByName(bendValue) && (
+            <p className="hint mb-0 mono-hint">
+              {bendPresetSynopsis(presetByName(bendValue), ops)}
+            </p>
           )}
+
           {/* The fill's edge belongs to the mask, but it is decided at the moment
               of filling, so it sits with the button that fills. */}
           {hasMask && !genRunning && (
-            <div className="fill-edge mt-2">
-          <div className="section-title">
-            <TipLabel tip="How the fill meets what is around it. Both settings belong to the mask and are remembered with it.">
-              Fill edge
-            </TipLabel>
-          </div>
-          <Slider
-            label="Feather"
-            value={feather}
-            min={0}
-            max={32}
-            step={1}
-            disabled={!activeMask}
-            onChange={(v) => setMaskParam(activeMask?.id, "feather", Math.round(v))}
-            tip={"Soft edge blend where the fill meets the rest of the canvas."
-              + (activeMask ? `\n\nRemembered with ${maskName}.` : "\n\nMask an area first.")}
-          />
-
-          <Slider
-            label={canResample ? "Harmonize" : "Harmonize — needs DDIM or DPM-Solver++"}
-            value={canResample ? resample : 1}
-            min={1}
-            max={8}
-            step={1}
-            onChange={(v) => setMaskParam(activeMask?.id, "harmonize", Math.round(v))}
-            disabled={!canResample || !activeMask}
-            fmt={(v) => (v <= 1 ? "off" : `${v} passes · about ${v}x slower`)}
-            tip={"Lets the fill settle into what is around it, instead of only matching at the "
-              + "edge. On at 2 passes by default; turn it off for the old single-pass behaviour, "
-              + "or when you need the speed."
-              + "\n\nEach pass is another trip over the same ground, so higher is slower."
-              + "\n\nNeeds the DDIM or DPM-Solver++ sampler."}
-          />
-          {!canResample && (
-            <p className="hint mb-0">
-              Switch the sampler to DDIM or DPM-Solver++ in Sample settings to enable this.
-            </p>
-          )}
+            <div className="fill-edge">
+              <div className="section-title">
+                <TipLabel tip="How the fill meets what is around it. Both settings belong to the mask and are remembered with it.">
+                  Fill edge
+                </TipLabel>
+              </div>
+              <Slider
+                label="Feather"
+                value={feather}
+                min={0}
+                max={32}
+                step={1}
+                disabled={!activeMask}
+                onChange={(v) => setMaskParam(activeMask?.id, "feather", Math.round(v))}
+                tip={"Soft edge blend where the fill meets the rest of the canvas."
+                  + (activeMask ? `\n\nRemembered with ${maskName}.` : "\n\nMask an area first.")}
+              />
+              <Slider
+                label={canResample ? "Harmonize" : "Harmonize — needs DDIM or DPM-Solver++"}
+                value={canResample ? resample : 1}
+                min={1}
+                max={8}
+                step={1}
+                onChange={(v) => setMaskParam(activeMask?.id, "harmonize", Math.round(v))}
+                disabled={!canResample || !activeMask}
+                fmt={(v) => (v <= 1 ? "off" : `${v} passes · about ${v}x slower`)}
+                tip={"Lets the fill settle into what is around it, instead of only matching at the "
+                  + "edge. On at 2 passes by default; turn it off for the old single-pass behaviour, "
+                  + "or when you need the speed."
+                  + "\n\nEach pass is another trip over the same ground, so higher is slower."
+                  + "\n\nNeeds the DDIM or DPM-Solver++ sampler."}
+              />
+              {!canResample && (
+                <p className="hint mb-0">
+                  Switch the sampler to DDIM or DPM-Solver++ in Setup to enable this.
+                </p>
+              )}
             </div>
           )}
-        </div>
-      </div>
 
-      {/* ——— 3. Finish ————————————————————————————————— */}
-      <Disclose
-        title="Finish"
-        defaultOpen
-        className="create-section"
-        extra={ppOn ? <span className="pill on">post-process on</span> : null}
-        tip={"Adjustments applied to the finished image, not to sampling. "
-          + "Post-process follows the mask when one is on; upscale always uses the whole canvas."}
-      >
-        <div className="row between center wrap gap-2 mb-2">
-          <span className="sub grow">
-            <TipLabel tip={hasMask
-              ? "With a mask on, the adjustments apply inside it only. They are a display stage over the layers, not an edit to them, so Download and Capture bake them in but the layers stay as they are."
-              : "Applied to the whole canvas as a display stage over the layers, not an edit to them: Download and Capture bake it in, the layers stay as they are."}
+        </div>
+      ) : null}
+      {/* The outcome and the button sit under the scrolling settings, never
+          inside them: a long Fill edge must not push the button out of view. */}
+      {panelTab === "generate" && (
+        <div className="panel-foot">
+          <div className="create-generate-box outcome">
+            <span className="outcome-what">
+              <TipLabel tip={whatTip}>
+                {what}{!genPaused && variations > 1 ? ` · ${variations} variations` : ""}
+              </TipLabel>
+            </span>
+            {/* Where the result lands, and at what size. The layer is chosen in
+                the Layers panel; this is only the consequence, said next to the
+                button, with the reasons a hover away. */}
+            <span className="sub">
+              {queueing ? (
+                <TipLabel tip={
+                  "While a queue exists, every run lands in Results and the layer is left alone: "
+                  + "otherwise each run would replace the layer in turn, and which one stayed would "
+                  + "depend on which finished last. Put any of them into a layer from Results."
+                  + "\n\nEach image is also saved, with its recipe, to one folder per queue under "
+                  + "captures, so a long queue cannot push its first images out of Results."
+                }
+                >
+                  Lands in <strong>Results</strong> · saved to captures
+                </TipLabel>
+              ) : (
+                <TipLabel tip={[
+                  hasMask
+                    ? `The result lands in ${layerName}, over what that layer has in the masked area. `
+                      + "It starts from the canvas as shown: hide layers to start from what is under them."
+                    : `The result lands in ${layerName}, replacing what it has. `
+                      + "Add or duplicate a layer first to keep this attempt apart.",
+                  fill && canvasSize
+                    ? (scaledFill
+                      ? `Fills at ${fill.w}×${fill.h} and is scaled back to the ${canvasSize.w}×${canvasSize.h} canvas on return.`
+                      : `Fills at ${fill.w}×${fill.h}, the canvas's own size.`)
+                    : null,
+                  stepsTrimmed
+                    ? `Keeping part of the image means starting partway down the schedule, so ${sampleParams.steps - runSteps} early steps are skipped. Raise Change to use more.`
+                    : null,
+                ].filter(Boolean).join("\n\n")}
+                >
+                  {hasMask ? "Outside stays as it is · lands in " : "Lands in "}
+                  <strong>{layerName}</strong>
+                  {fill && canvasSize ? ` · ${fill.w}×${fill.h}` : ""}
+                </TipLabel>
+              )}
+            </span>
+            {/* Generate never locks: while anything is in flight it queues the
+                settings as they are at the click. Fills are the exception, see run(). */}
+            <button
+              type="button"
+              className="btn primary w-full mt-1 generate-btn"
+              onClick={run}
+              disabled={!modelPath || (hasMask && inFlight)}
+              title={hasMask && inFlight ? "A fill starts when nothing else is running" : undefined}
             >
-              {hasMask ? `Inside ${maskName}` : "Whole canvas"}
-            </TipLabel>
-          </span>
-          <label className="row center gap-2">
-            <input
-              type="checkbox"
-              checked={ppOn}
-              onChange={(e) => setPpOn(e.target.checked)}
-            />
-            <span className="sub">Post-process</span>
-          </label>
-        </div>
-
-        <Slider label="Contrast" value={pp.contrast} min={0.5} max={2} step={0.05}
-          onChange={(v) => setPpField("contrast", v)} disabled={!ppOn}
-          tip="Boost or flatten contrast after sampling." />
-        <Slider label="Gamma" value={pp.gamma} min={0.5} max={2} step={0.05}
-          onChange={(v) => setPpField("gamma", v)} disabled={!ppOn}
-          tip="Brighten (lower) or darken (higher) midtones." />
-        <Slider label="Sharpen" value={pp.unsharp} min={0} max={4} step={0.1}
-          onChange={(v) => setPpField("unsharp", v)} disabled={!ppOn}
-          tip="Unsharp-mask strength on the finished image." />
-
-        <div className="section-title mt-2">
-          <TipLabel tip="Enlarges the finished image with Lanczos resampling. Ignores masks, and flattens the layer stack into one layer at the new size; the masks are kept.">
-            Upscale
-          </TipLabel>
-        </div>
-        <div className="row gap-2 center">
-          <div className="w-100">
-            <Num label="Scale" value={srFactor} onChange={setSrFactor} min={2} max={4} step={1}
-              tip="Upscale factor for the canvas image." />
+              {generateLabel}
+            </button>
+            {genRunning && (
+              <div className="row gap-2">
+                {genPaused ? (
+                  <button type="button" className="btn primary grow" onClick={resume}>Resume</button>
+                ) : (
+                  <button type="button" className="btn grow" onClick={pause}>Pause</button>
+                )}
+                <Tooltip text="Stop now and keep what it has so far, in the layer it was going to">
+                  <button type="button" className="btn danger grow" onClick={stopAndSave}>Stop &amp; keep</button>
+                </Tooltip>
+              </div>
+            )}
+            <span className="sub generate-keys">
+              Ctrl+Enter {hasMask ? "fills" : "generates"}{!hasMask ? " · clicking while one runs queues it" : ""}
+            </span>
           </div>
-          <div className="grow">
+        </div>
+      )}
+      {panelTab === "finish" && (
+        <div className="panel-body" role="tabpanel" aria-label="Finish">
+          <div className="row between center gap-2">
+            <span className="sub">
+              <TipLabel tip={hasMask
+                ? "With a mask on, the adjustments apply inside it only. They are a display stage over the layers, not an edit to them, so Download and Capture bake them in but the layers stay as they are."
+                : "Applied to the whole canvas as a display stage over the layers, not an edit to them: Download and Capture bake it in, the layers stay as they are."}
+              >
+                Applies to <strong>{hasMask ? `inside ${maskName}` : "the whole canvas"}</strong>
+              </TipLabel>
+            </span>
+          </div>
+
+          <div className="finish-block">
+            <div className="row between center">
+              <span className="finish-block-title">Post-process</span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={ppOn}
+                aria-label="Post-process"
+                className={`switch ${ppOn ? "on" : ""}`.trim()}
+                onClick={() => setPpOn(!ppOn)}
+              >
+                <span />
+              </button>
+            </div>
+            {ppOn ? (
+              <>
+                <Slider label="Contrast" value={pp.contrast} min={0.5} max={2} step={0.05}
+                  onChange={(v) => setPpField("contrast", v)}
+                  tip="Boost or flatten contrast after sampling." />
+                <Slider label="Gamma" value={pp.gamma} min={0.5} max={2} step={0.05}
+                  onChange={(v) => setPpField("gamma", v)}
+                  tip="Brighten (lower) or darken (higher) midtones." />
+                <Slider label="Sharpen" value={pp.unsharp} min={0} max={4} step={0.1}
+                  onChange={(v) => setPpField("unsharp", v)}
+                  tip="Unsharp-mask strength on the finished image." />
+                <p className="hint mb-0">Unprocessed, on the picture, shows the layers without it.</p>
+              </>
+            ) : (
+              <p className="hint mb-0">Contrast, gamma and sharpening over the finished picture. The layers are never changed.</p>
+            )}
+          </div>
+
+          <div className="finish-block">
+            <span className="finish-block-title">
+              <TipLabel tip="Enlarges the finished image with Lanczos resampling. Ignores masks, and flattens the layer stack into one layer at the new size; the masks are kept.">
+                Upscale
+              </TipLabel>
+            </span>
+            <div className="row between center gap-2">
+              <span className="sub">Scale</span>
+              <Seg
+                ariaLabel="Upscale factor"
+                size="sm"
+                value={String(srFactor)}
+                onChange={(v) => setSrFactor(Number(v))}
+                tabs={[2, 3, 4].map((f) => ({ id: String(f), label: `${f}×`, tip: `${f} times the size` }))}
+              />
+            </div>
             <Slider label="Sharpen" value={srSharpen} min={0} max={3} step={0.1} onChange={setSrSharpen}
               tip="Unsharp-mask strength applied after enlarging." />
+            <button
+              type="button"
+              className="btn sm w-full"
+              onClick={upscale}
+              disabled={srBusy || !frame}
+            >
+              {srBusy
+                ? "Upscaling…"
+                : canvasSize
+                  ? `Upscale to ${canvasSize.w * srFactor} × ${canvasSize.h * srFactor}`
+                  : "Upscale"}
+            </button>
+            <p className="hint mb-0">Flattens the layers into one; the masks are kept. The result also lands in Results.</p>
           </div>
-          <button
-            type="button"
-            className="btn sm self-end mb-2"
-            onClick={upscale}
-            disabled={srBusy || !frame}
-          >
-            {srBusy ? "…" : "Upscale"}
-          </button>
         </div>
-      </Disclose>
-    </div>
+      )}
+    </section>
   );
 }

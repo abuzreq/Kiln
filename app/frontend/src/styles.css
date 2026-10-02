@@ -379,14 +379,16 @@ body {
 .canvas-layout .canvas-card .hero img { max-width: 100cqw; max-height: 100cqh; }
 .canvas-inspector {
   display: flex; flex-direction: column; gap: var(--s-3);
-  min-width: 0; min-height: 0; overflow-y: auto; padding-right: 2px;
+  min-width: 0; min-height: 0; overflow: hidden;
 }
 @media (max-width: 1000px) {
   .play.fill { height: auto; }
   .play-body.canvas-layout { grid-template-columns: var(--toolrail-w) minmax(0, 1fr); }
   .canvas-inspector { grid-column: 1 / -1; }
   .canvas-layout .canvas-card .hero { flex: none; height: min(70vh, 620px); }
-  .canvas-inspector { overflow: visible; }
+  .canvas-inspector { overflow: visible; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+  .canvas-inspector .inspector-panel { max-height: none; min-height: 0; }
+  .canvas-inspector .panel-body { overflow: visible; }
 }
 
 /* Results: runs in flight, then this session's images, in one fixed-height
@@ -1311,9 +1313,60 @@ body {
   background: var(--bg-2);
 }
 
-.create-panel {
-  gap: var(--s-3);
+/* The two tabbed panels of the Canvas inspector: Generate | Finish over
+   Layers | Assets. Each scrolls its own body. The make panel takes what its
+   content needs, up to most of the column; the manage panel the rest. */
+.inspector-panel { padding: 0; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.create-panel { flex: 0 1 auto; max-height: 76%; }
+.manage-panel { flex: 1 1 200px; min-height: 160px; }
+.manage-panel.drop-on { outline: 2px dashed var(--accent); outline-offset: -2px; }
+.panel-tabs { display: flex; flex-shrink: 0; padding: 0 6px; border-bottom: 1px solid var(--line); }
+.panel-tabs button {
+  flex: 1; height: 40px; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  background: transparent; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px;
+  color: var(--text-dim); font: inherit; font-size: var(--fs-md); font-weight: 600; cursor: pointer;
 }
+.panel-tabs button:hover { color: var(--text); }
+.panel-tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
+.panel-tab-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+.panel-body {
+  display: flex; flex-direction: column; gap: var(--s-3);
+  padding: var(--s-3); overflow-y: auto; min-height: 0;
+}
+.panel-body > .slider-row, .panel-body .field { margin-bottom: 0; }
+.panel-foot { flex-shrink: 0; padding: 0 var(--s-3) var(--s-3); }
+.panel-body + .panel-foot { padding-top: 0; }
+.steer-words input { width: 100%; }
+.create-generate-box.outcome { display: flex; flex-direction: column; gap: 6px; }
+.outcome-what { font-size: var(--fs-sm); color: var(--text-dim); line-height: 1.4; }
+.outcome-what strong, .outcome strong { color: var(--text); }
+.generate-btn { padding: 9px 12px; font-size: var(--fs-md); }
+.generate-keys { font-size: var(--fs-xs); text-align: center; }
+.finish-block {
+  display: flex; flex-direction: column; gap: var(--s-2);
+  padding: var(--s-3); border: 1px solid var(--line); border-radius: var(--radius-sm);
+}
+.finish-block-title { font-size: var(--fs-sm); font-weight: 650; color: var(--text); }
+.finish-block .slider-row { margin-bottom: 0; }
+/* Layers | Assets */
+.manage-list { display: flex; flex-direction: column; gap: 4px; }
+.manage-group-head {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s-2);
+  font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim);
+  padding: 2px 2px 4px;
+}
+.manage-group-head .sub { text-transform: none; letter-spacing: 0; font-weight: 500; }
+.manage-group-head .btn { text-transform: none; letter-spacing: 0; }
+.manage-group-head .btn .ico, .layer-actions .btn .ico { margin-right: 4px; }
+.manage-sep { height: 1px; background: var(--line); margin: var(--s-2) 0; }
+.manage-panel .assets-grid { max-height: none; overflow: visible; }
+.asset-add {
+  aspect-ratio: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  border: 1px dashed var(--line); border-radius: var(--radius-sm); background: transparent;
+  color: var(--text-dim); font: inherit; font-size: var(--fs-xs); font-weight: 600; cursor: pointer;
+}
+.asset-add:hover { border-color: var(--accent); color: var(--accent); }
+.asset-add .ico { margin: 0; }
 .create-section {
   background: var(--bg-2);
   border-color: var(--line);

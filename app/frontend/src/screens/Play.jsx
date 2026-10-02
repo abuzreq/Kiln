@@ -7,7 +7,7 @@ import { useApp } from "../state.jsx";
 import { api, downloadPost, mediaUrl, thumbUrl } from "../api.js";
 import {
   EyeIcon, InvertIcon, ClearIcon, UpIcon, DownIcon, TrashIcon, DownloadIcon, CaptureIcon,
-  UndoIcon, RedoIcon, ChevronDownIcon,
+  UndoIcon, RedoIcon, ChevronDownIcon, AddIcon,
 } from "../components/icons.jsx";
 import { Progress, Slider, Tooltip, TipLabel, Popover } from "../components/ui.jsx";
 import { ToolRail, ToolOptions } from "../components/CanvasTools.jsx";
@@ -1239,8 +1239,7 @@ export default function Play() {
               </div>
               <aside className="canvas-inspector" aria-label="Generate, layers and assets">
                 <CreatePanel />
-                <AssetsPanel />
-                <LayersPanel />
+                <ManagePanel />
               </aside>
             </>
           )}
@@ -1526,21 +1525,6 @@ function PlayCanvas({ brushable }) {
               Dismiss
             </button>
           </div>
-        </div>
-      )}
-      {/* What the next run will do, stated beside the picture. The controls
-          for it live in the Layers panel; this is only the consequence, which
-          is the part that has to be legible at the instant you press the
-          button. */}
-      {hasMask && (
-        <div className="selection-bar" role="status">
-          <span className="sub grow">
-            <TipLabel tip="The next run changes only this area; the rest of the canvas is kept. Turn the mask off in the Layers panel to run on the whole canvas.">
-              <strong>{liveMasks.length > 1
-                ? `${liveMasks.length} masks on`
-                : activeMask?.name || "Mask on"}</strong>
-            </TipLabel>
-          </span>
         </div>
       )}
       <div
@@ -2414,84 +2398,126 @@ function EntityRow({
   );
 }
 
+const MANAGE_KEY = "kiln.canvasManageTab";
+
+/** What the canvas is made of, and the images kept at hand: Layers | Assets.
+ *
+ *  One panel with two tabs, where there were three cards (Assets, Layers,
+ *  Inpaint Masks) that took turns pushing each other below the fold. Files
+ *  dropped anywhere on it are kept as assets; the stage underneath would
+ *  otherwise open them as the canvas.
+ */
+function ManagePanel() {
+  const { rasterLayers, assets, addAssetFiles } = usePlay();
+  const [tab, setTabState] = useState(() => {
+    try { return localStorage.getItem(MANAGE_KEY) === "assets" ? "assets" : "layers"; } catch { return "layers"; }
+  });
+  const setTab = (t) => {
+    setTabState(t);
+    try { localStorage.setItem(MANAGE_KEY, t); } catch { /* ignore */ }
+  };
+  const [over, setOver] = useState(false);
+  const tabs = [
+    { id: "layers", label: <>Layers <span className="sub">· {rasterLayers.length}</span></> },
+    { id: "assets", label: <>Assets <span className="sub">· {assets.length}</span></> },
+  ];
+
+  return (
+    <section
+      className={`card inspector-panel manage-panel ${over ? "drop-on" : ""}`.trim()}
+      aria-label="Layers and assets"
+      onDragOver={(e) => {
+        if (![...(e.dataTransfer?.types || [])].includes("Files")) return;
+        e.preventDefault(); e.stopPropagation(); setOver(true);
+      }}
+      onDragLeave={() => setOver(false)}
+      onDrop={(e) => {
+        if (!e.dataTransfer?.files?.length) return;
+        e.preventDefault();
+        e.stopPropagation();
+        setOver(false);
+        addAssetFiles(e.dataTransfer.files);
+        setTab("assets");
+      }}
+    >
+      <div className="panel-tabs" role="tablist" aria-label="Layers and assets">
+        {tabs.map((t) => (
+          <button key={t.id} type="button" role="tab" aria-selected={tab === t.id}
+            className={tab === t.id ? "on" : ""} onClick={() => setTab(t.id)}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+      <div className="panel-body" role="tabpanel">
+        {tab === "layers" ? <LayersList /> : <AssetsGrid />}
+      </div>
+    </section>
+  );
+}
+
 /** Images the user keeps at hand: the workspace assets folder.
  *
  *  Anything opened onto the canvas lands here too, so a picture only ever has
  *  to be found in the file browser once. Click places into the active layer,
  *  fitted to the canvas; Open makes it the document at its own size.
  */
-function AssetsPanel() {
+function AssetsGrid() {
   const { assets, addAssetFiles, deleteAsset, placeAsset, openAsset, activeLayer } = usePlay();
-  const [over, setOver] = useState(false);
   const fileRef = useRef(null);
-
   return (
-    <aside
-      className={`card assets-panel ${over ? "drop-on" : ""}`}
-      aria-label="Assets"
-      onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setOver(true); }}
-      onDragLeave={() => setOver(false)}
-      onDrop={(e) => {
-        // Stop here: the stage underneath would open the file as the canvas.
-        e.preventDefault();
-        e.stopPropagation();
-        setOver(false);
-        addAssetFiles(e.dataTransfer.files);
-      }}
-    >
-      <div className="row between center mb-2">
-        <h3 className="mb-0">Assets <span className="sub">· {assets.length}</span></h3>
-        <Tooltip text="Keep images here to place on a layer later, without finding the file again. Dropping files on this panel does the same.">
-          <button type="button" className="btn ghost sm" onClick={() => fileRef.current?.click()}>Add…</button>
-        </Tooltip>
-        <input
-          ref={fileRef}
-          type="file"
-          accept="image/*"
-          multiple
-          className="hidden-file"
-          onChange={(e) => { addAssetFiles(e.target.files); e.target.value = ""; }}
-        />
-      </div>
-      {assets.length === 0 ? (
-        <p className="hint mb-0">Drop images here, or Add… — they stay for next time.</p>
-      ) : (
-        <div className="assets-grid">
-          {assets.map((a) => (
-            <div key={a.path} className="asset">
-              <button
-                type="button"
-                className="asset-thumb"
-                title={`${a.name}${a.size ? ` · ${a.size[0]}×${a.size[1]}` : ""} — click to place into ${activeLayer?.name || "the active layer"}`}
-                onClick={() => placeAsset(a)}
-              >
-                <img src={thumbUrl(a.path)} alt={a.name} loading="lazy" />
-              </button>
-              <div className="asset-actions">
-                <button type="button" className="btn xs ghost" title="Open as a new canvas at its own size"
-                  onClick={() => openAsset(a)}>Open</button>
-                <button type="button" className="btn xs ghost" title="Remove from assets" aria-label={`Remove ${a.name}`}
-                  onClick={() => deleteAsset(a)}>×</button>
-              </div>
+    <>
+      <div className="assets-grid">
+        {assets.map((a) => (
+          <div key={a.path} className="asset">
+            <button
+              type="button"
+              className="asset-thumb"
+              title={`${a.name}${a.size ? ` · ${a.size[0]}×${a.size[1]}` : ""} — click to place into ${activeLayer?.name || "the active layer"}`}
+              onClick={() => placeAsset(a)}
+            >
+              <img src={thumbUrl(a.path)} alt={a.name} loading="lazy" />
+            </button>
+            <div className="asset-actions">
+              <button type="button" className="btn xs ghost" title="Open as a new canvas at its own size"
+                onClick={() => openAsset(a)}>Open</button>
+              <button type="button" className="btn xs ghost" title="Remove from assets" aria-label={`Remove ${a.name}`}
+                onClick={() => deleteAsset(a)}>×</button>
             </div>
-          ))}
-        </div>
-      )}
-    </aside>
+          </div>
+        ))}
+        <button type="button" className="asset-add" onClick={() => fileRef.current?.click()}
+          title="Keep images here to place on a layer later, without finding the file again">
+          <AddIcon size={16} />
+          Add…
+        </button>
+      </div>
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="hidden-file"
+        onChange={(e) => { addAssetFiles(e.target.files); e.target.value = ""; }}
+      />
+      <p className="hint mb-0">
+        Drop images on this panel to keep them. Click one to place it in {activeLayer?.name || "the active layer"};
+        Open makes it the canvas.
+      </p>
+    </>
   );
 }
 
-/** Canvas entities, in the two groups InvokeAI splits them into.
+/** Canvas entities, in the two groups InvokeAI splits them into, in one list.
  *
  *  Masks come first because they decide what the next run does, so they have
  *  to stay in view. Raster layers are the picture: hiding, reordering or
  *  deleting one changes what the canvas is, and therefore what the next run
  *  starts from — and one of them is active, which is where the run lands.
  *  Layers are made by the user, never by a run. A mask is live for exactly as
- *  long as its row is shown — which is the answer to "should the mask survive
- *  a generation": it survives because nothing hid it.
+ *  long as it is used — which is the answer to "should the mask survive a
+ *  generation": it survives because nothing turned it off.
  */
-function LayersPanel() {
+function LayersList() {
   const {
     rasterLayers, inpaintMasks, setLayerOpacity, useLayerAsMask, activeLayer,
     addLayer, duplicateLayer, setEntityEnabled, setMaskVisible,
@@ -2499,15 +2525,67 @@ function LayersPanel() {
   } = usePlay();
 
   return (
-    <div className="layers-stack">
-    <aside className="card layers-panel" aria-label="Layers">
-      <div className="row between center mb-2">
-        <h3 className="mb-0">Layers <span className="sub panel-count">{rasterLayers.length}</span></h3>
+    <div className="manage-list">
+      <div className="manage-group-head">
+        <span>Masks <span className="sub">· {liveMasks.length ? `${liveMasks.length} used` : "none used"}</span></span>
+        <Tooltip text="A new empty mask, picked so strokes go into it. Every mask that is used counts for the next run.">
+          <button type="button" className="btn ghost xs" onClick={addMask}><AddIcon /> Mask</button>
+        </Tooltip>
       </div>
+      {inpaintMasks.length === 0 && (
+        <p className="hint mb-0">None yet. Paint one with the Brush (B), or take an area with Wand, Shape or Split.</p>
+      )}
+      {[...inpaintMasks].reverse().map((m) => (
+        <EntityRow
+          key={m.id}
+          entity={m}
+          thumb={<MaskThumb mask={m} w={canvasSize.w} h={canvasSize.h} version={maskVersion} />}
+          shown={maskShown(m)}
+          onShow={(v) => setMaskVisible(m.id, v)}
+          eyeTip={maskShown(m)
+            ? "Hide the hatching. Whether the next run uses the mask is Used / Off, not this."
+            : "Show the hatching"}
+          headExtra={(
+            <Tooltip text={!m.enabled
+              ? "Off: the next run ignores this area and it is not drawn. Click to use it."
+              : m.strokes.length
+                ? "Used: the next run changes this area. Click to turn it off; it is then not drawn either."
+                : "On, but empty: paint into it and the next run will change that area. Click to turn it off."}
+            >
+              <button
+                type="button"
+                className={`layer-onpill ${m.enabled ? "on" : ""}`}
+                aria-pressed={m.enabled}
+                aria-label={m.enabled ? `Stop using ${m.name}` : `Use ${m.name}`}
+                onClick={(e) => { e.stopPropagation(); setEntityEnabled(m.id, !m.enabled); }}
+              >
+                {!m.enabled ? "off" : m.strokes.length ? "used" : "empty"}
+              </button>
+            </Tooltip>
+          )}
+          actions={(
+            <>
+              <Tooltip text="Swap masked for unmasked (Ctrl+Shift+I)">
+                <button type="button" className="btn xs ghost"
+                  onClick={(e) => { e.stopPropagation(); invertMask(m.id); }}><InvertIcon /> Invert</button>
+              </Tooltip>
+              <Tooltip text="Empty it, keeping the row and its settings (Ctrl+D)">
+                <button type="button" className="btn xs ghost"
+                  onClick={(e) => { e.stopPropagation(); clearMask(m.id); }}
+                  disabled={!m.strokes.length}><ClearIcon /> Clear</button>
+              </Tooltip>
+            </>
+          )}
+        />
+      ))}
 
-      <Tooltip text="A new empty layer on top. Runs land in the active layer, so make one to keep the next attempt apart from what is here.">
-        <button type="button" className="btn sm w-full mb-2" onClick={addLayer}>Add layer</button>
-      </Tooltip>
+      <span className="manage-sep" aria-hidden="true" />
+      <div className="manage-group-head">
+        <span>Layers</span>
+        <Tooltip text="A new empty layer on top. Runs land in the active layer, so make one to keep the next attempt apart from what is here.">
+          <button type="button" className="btn ghost xs" onClick={addLayer}><AddIcon /> Layer</button>
+        </Tooltip>
+      </div>
       {/* Topmost first, which is how a stack reads. */}
       {[...rasterLayers].reverse().map((l) => (
         <EntityRow
@@ -2517,94 +2595,31 @@ function LayersPanel() {
           canDelete={rasterLayers.length > 1}
           thumb={l.image ? <img className="layer-thumb" src={l.image} alt="" /> : null}
           details={(
-            <>
-              <Slider
-                label="Opacity"
-                value={l.opacity ?? 1}
-                min={0}
-                max={1}
-                step={0.05}
-                onChange={(v) => setLayerOpacity(l.id, v)}
-                fmt={(v) => `${Math.round(v * 100)}%`}
-              />
-              <div className="layer-actions">
-                <Tooltip text="A copy of this layer above it, made active — try something else on the same ground and keep this one.">
-                  <button
-                    type="button"
-                    className="btn xs"
-                    onClick={(e) => { e.stopPropagation(); duplicateLayer(l.id); }}
-                  >
-                    Duplicate
-                  </button>
-                </Tooltip>
-                <Tooltip text="Select exactly the area this layer covers, and nothing else. On a layer that has only taken fills, that is the ground those fills covered.">
-                  <button
-                    type="button"
-                    className="btn xs ghost"
-                    onClick={(e) => { e.stopPropagation(); useLayerAsMask(l.id); }}
-                    disabled={!l.image}
-                  >
-                    Select area
-                  </button>
-                </Tooltip>
-              </div>
-            </>
-          )}
-        />
-      ))}
-
-    </aside>
-
-    <aside className="card layers-panel masks-panel" aria-label="Inpaint Masks">
-      <div className="row between center mb-2">
-        <h3 className="mb-0">Inpaint Masks</h3>
-        <span className="sub">{liveMasks.length ? `${liveMasks.length} on` : "none on"}</span>
-      </div>
-      <Tooltip text="A new empty mask, selected so the brush paints into it. Every mask that is on counts for the next run.">
-        <button type="button" className="btn sm w-full mb-2" onClick={addMask}>Add mask</button>
-      </Tooltip>
-      {[...inpaintMasks].reverse().map((m) => (
-        <EntityRow
-          key={m.id}
-          entity={m}
-          thumb={<MaskThumb mask={m} w={canvasSize.w} h={canvasSize.h} version={maskVersion} />}
-          shown={maskShown(m)}
-          onShow={(v) => setMaskVisible(m.id, v)}
-          eyeTip={maskShown(m)
-            ? "Hide the hatching. Whether the next run uses the mask is the on/off switch, not this."
-            : "Show the hatching"}
-          headExtra={(
-            <Tooltip text={m.enabled
-              ? "On — the next run changes this area. Click to turn it off; it is then not drawn either."
-              : "Off — the next run ignores this area and it is not drawn. Click to turn it on."}
-            >
-              <button
-                type="button"
-                className={`layer-onpill ${m.enabled ? "on" : ""}`}
-                aria-pressed={m.enabled}
-                aria-label={m.enabled ? `Turn ${m.name} off` : `Turn ${m.name} on`}
-                onClick={(e) => { e.stopPropagation(); setEntityEnabled(m.id, !m.enabled); }}
-              >
-                {m.enabled ? "on" : "off"}
-              </button>
-            </Tooltip>
+            <Slider
+              label="Opacity"
+              value={l.opacity ?? 1}
+              min={0}
+              max={1}
+              step={0.05}
+              onChange={(v) => setLayerOpacity(l.id, v)}
+              fmt={(v) => `${Math.round(v * 100)}%`}
+            />
           )}
           actions={(
             <>
-              <Tooltip text="Invert: swap masked for unmasked">
-                <button type="button" className="btn xs ghost icon" aria-label="Invert"
-                  onClick={(e) => { e.stopPropagation(); invertMask(m.id); }}><InvertIcon /></button>
+              <Tooltip text="A copy of this layer above it, made active — try something else on the same ground and keep this one.">
+                <button type="button" className="btn xs ghost"
+                  onClick={(e) => { e.stopPropagation(); duplicateLayer(l.id); }}>Duplicate</button>
               </Tooltip>
-              <Tooltip text="Clear: empty it, keep the row and its settings">
-                <button type="button" className="btn xs ghost icon" aria-label="Clear"
-                  onClick={(e) => { e.stopPropagation(); clearMask(m.id); }}
-                  disabled={!m.strokes.length}><ClearIcon /></button>
+              <Tooltip text="Select exactly the area this layer covers, and nothing else. On a layer that has only taken fills, that is the ground those fills covered.">
+                <button type="button" className="btn xs ghost"
+                  onClick={(e) => { e.stopPropagation(); useLayerAsMask(l.id); }}
+                  disabled={!l.image}>Select area</button>
               </Tooltip>
             </>
           )}
         />
       ))}
-    </aside>
     </div>
   );
 }
