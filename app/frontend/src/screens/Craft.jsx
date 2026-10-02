@@ -6,7 +6,7 @@ import { Select, Num, Text, Disclose, Progress, Modal, Seg, Popover } from "../c
 import { DownloadIcon, TransferIcon } from "../components/icons.jsx";
 import UnetVisualizer from "../components/UnetVisualizer.jsx";
 import BendPipeline from "../components/BendPipeline.jsx";
-import BendEditor from "../components/BendEditor.jsx";
+import BendEditor, { BendInspector } from "../components/BendEditor.jsx";
 import BendPresetList from "../components/BendPresetList.jsx";
 import { buildSamplePayload } from "../sampleSettings.jsx";
 import {
@@ -178,6 +178,8 @@ export function BendWorkspace({ stack, setStack }) {
   );
 
   const updateBend = (id, patch) => setStack(stack.map((b) => (b.id === id ? { ...b, ...patch } : b)));
+  // Focus moves on by itself: the effect above re-points it at the first bend.
+  const removeBend = (id) => setStack(stack.filter((b) => b.id !== id));
 
   const addBend = (targets) => {
     const op = ops[0];
@@ -498,49 +500,61 @@ export function BendWorkspace({ stack, setStack }) {
       </div>
 
       <div className="bend-work">
-        <div className="card">
-          <div className="row between center wrap gap-2">
-            <div className="row center wrap gap-2">
-              <h3 className="mb-0">Model map</h3>
-              {focusedBend ? (
-                <span className="pill accent">
-                  Editing #{focusIndex + 1} {opMap[focusedBend.op]?.label || focusedBend.op}
-                </span>
+        <div className="card bend-bench">
+          {/* The map and the settings of the bend it is editing, side by side:
+              the map sets where a bend acts, the panel everything else. They
+              wrap into one column when the card is too narrow for both. */}
+          <div className="bend-bench-top">
+            <div className="bend-bench-map">
+              <div className="row between center wrap gap-2">
+                <div className="row center wrap gap-2">
+                  <h3 className="mb-0">Model map</h3>
+                  {focusedBend ? (
+                    <span className="pill accent">
+                      Editing #{focusIndex + 1} {opMap[focusedBend.op]?.label || focusedBend.op}
+                    </span>
+                  ) : (
+                    <span className="pill">No bend selected</span>
+                  )}
+                </div>
+              </div>
+              <p className="hint mt-1 mb-2">{MAP_HINT[shown][focusedBend ? "focus" : "empty"]}</p>
+              {view === "simple" ? (
+                <BendPipeline
+                  graph={graph}
+                  focusTargets={focusTargets}
+                  otherTargets={otherTargets}
+                  hasFocus={!!focusedBend}
+                  activeGroups={(focusedBend?.targets || []).filter(isGroup)}
+                  onToggle={onMapToggle}
+                  onToggleGroup={toggleGroup}
+                  onCreateFromNode={onCreateFromNode}
+                />
               ) : (
-                <span className="pill">No bend selected</span>
+                <UnetVisualizer
+                  graph={graph}
+                  focusTargets={focusTargets}
+                  otherTargets={otherTargets}
+                  hasFocus={!!focusedBend}
+                  density={grain}
+                  onToggle={onMapToggle}
+                  onCreateFromNode={onCreateFromNode}
+                />
               )}
             </div>
-          </div>
-          {!focusedBend && <p className="hint mt-1 mb-0">{MAP_HINT[shown].empty}</p>}
-          <div className="row wrap gap-2 bend-map-chips">
-            {groups.map((g) => (
-              <button type="button" key={g}
-                className={`pill chip ${focusedBend?.targets.includes(g) ? "on" : ""}`}
-                onClick={() => toggleGroup(g)}>{g}</button>
-            ))}
-          </div>
-          {view === "simple" ? (
-            <BendPipeline
-              graph={graph}
-              focusTargets={focusTargets}
-              otherTargets={otherTargets}
-              hasFocus={!!focusedBend}
-              activeGroups={(focusedBend?.targets || []).filter(isGroup)}
-              onToggle={onMapToggle}
-              onToggleGroup={toggleGroup}
-              onCreateFromNode={onCreateFromNode}
+            <BendInspector
+              b={focusedBend}
+              index={focusIndex}
+              opDef={opMap[focusedBend?.op]}
+              ops={ops}
+              nodes={nodes}
+              groups={groups}
+              note={note?.bendId === focusedBendId ? note.groups : null}
+              update={updateBend}
+              remove={removeBend}
+              toggleGroup={toggleGroup}
             />
-          ) : (
-            <UnetVisualizer
-              graph={graph}
-              focusTargets={focusTargets}
-              otherTargets={otherTargets}
-              hasFocus={!!focusedBend}
-              density={grain}
-              onToggle={onMapToggle}
-              onCreateFromNode={onCreateFromNode}
-            />
-          )}
+          </div>
 
           {/* The stack lives in the same card as the map: the map is how you set
               the layers of whichever card below is focused. */}
@@ -554,7 +568,7 @@ export function BendWorkspace({ stack, setStack }) {
             setFocusedId={(id) => { setFocusedBendId(id); setNote(null); }}
             addBend={() => addBend()}
             updateBend={updateBend}
-            note={note}
+            removeBend={removeBend}
             headExtra={(
               <button type="button" className="btn sm" aria-expanded={presetsOpen}
                 onClick={() => setPresetsOpen((v) => !v)}>

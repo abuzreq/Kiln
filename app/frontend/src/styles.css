@@ -602,7 +602,9 @@ body {
    two samples beside them on the right where they have room to be looked at. */
 .bend-work {
   display: grid;
-  grid-template-columns: minmax(0, 1.6fr) minmax(340px, 1fr);
+  /* Compare is capped: past ~420px its images only get taller, while the map
+     and the settings panel beside it use every pixel they are given. */
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 420px);
   gap: var(--s-3);
   align-items: start;
 }
@@ -613,6 +615,79 @@ body {
   .bend-work > :last-child { position: sticky; top: var(--s-3); }
 }
 .bend-work-sep { border-top: 1px solid var(--line); margin: var(--s-3) 0 0; }
+
+/* The map and the focused bend's settings. Side by side while the card has
+   room for both; the panel drops under the map when it does not. */
+.bend-bench-top { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--s-3) var(--s-4); }
+.bend-bench-map { flex: 1 1 440px; min-width: 0; }
+.bend-inspector {
+  flex: 0 1 320px; min-width: 280px;
+  display: flex; flex-direction: column; gap: var(--s-3);
+  padding: var(--s-3); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--bg-2);
+}
+.bend-inspector.empty { align-self: stretch; justify-content: center; border-style: dashed; background: transparent; text-align: center; }
+.bend-inspector .slider-row { margin-bottom: 0; }
+.bend-inspector .callout { margin: 0; }
+.bend-inspector-head { display: flex; align-items: center; gap: var(--s-2); }
+.bend-inspector-head select { min-width: 0; font-weight: 600; }
+.bend-inspector-help { margin: 0; line-height: 1.5; }
+.bend-inspector-section { display: flex; flex-direction: column; gap: var(--s-2); }
+.bend-inspector-foot { display: flex; justify-content: flex-end; border-top: 1px solid var(--line); padding-top: var(--s-2); }
+.bend-cat {
+  display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 4px;
+  background: var(--bg-3); color: var(--text-dim);
+  font-size: var(--fs-xs); font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+}
+/* A bend's number is its place in the stack, which is also the order it runs. */
+.bend-badge {
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  width: 20px; height: 20px; border-radius: 50%;
+  background: var(--bg-3); border: 1px solid var(--line); color: var(--text-dim);
+  font-size: var(--fs-xs); font-weight: 700; font-variant-numeric: tabular-nums;
+}
+.bend-badge.on { background: var(--accent); border-color: var(--accent); color: #1a1206; }
+.switch {
+  flex-shrink: 0; width: 34px; height: 20px; padding: 2px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--bg-3); cursor: pointer;
+  display: inline-flex; align-items: center;
+}
+.switch span { width: 14px; height: 14px; border-radius: 50%; background: var(--text-dim); transition: transform 120ms ease; }
+.switch.on { background: var(--accent); border-color: var(--accent); }
+.switch.on span { background: #1a1206; transform: translateX(14px); }
+
+/* Run window (RunWindow.jsx): when during sampling a bend acts. */
+.run-window { display: flex; flex-direction: column; gap: 6px; }
+.run-window-val { font-size: var(--fs-sm); color: var(--text); }
+.run-window-track {
+  position: relative; height: 26px; margin: 0 7px; cursor: pointer; touch-action: none;
+  /* the bar, with quarter ticks */
+  background:
+    linear-gradient(var(--line), var(--line)) 25% 50% / 1px 14px no-repeat,
+    linear-gradient(var(--line), var(--line)) 50% 50% / 1px 14px no-repeat,
+    linear-gradient(var(--line), var(--line)) 75% 50% / 1px 14px no-repeat,
+    linear-gradient(var(--bg-1), var(--bg-1)) 0 50% / 100% 10px no-repeat;
+  border-radius: 5px;
+}
+.run-window-fill {
+  position: absolute; top: 8px; height: 10px; border-radius: 5px;
+  background: rgba(255, 122, 69, 0.55); /* where color-mix is missing */
+  background: color-mix(in srgb, var(--accent) 55%, transparent); border: 1px solid var(--accent);
+  box-sizing: border-box; pointer-events: none;
+}
+.run-window-handle {
+  position: absolute; top: 3px; width: 12px; height: 20px; margin-left: -6px;
+  border-radius: 4px; background: var(--text); cursor: ew-resize;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+.run-window-handle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.run-window-handle.end { z-index: 1; }
+.run-window-ends { display: flex; justify-content: space-between; font-size: var(--fs-xs); }
+.run-window-shortcuts { display: flex; gap: var(--s-1); }
+.run-window-shortcuts .btn { flex: 1; }
+.run-mini { position: relative; display: block; height: 4px; border-radius: 2px; background: var(--bg-1); }
+.run-mini > span { position: absolute; top: 0; bottom: 0; border-radius: 2px; background: var(--text-dim); }
+.run-mini.hot > span { background: var(--accent); }
 .bend-presets-panel {
   margin-top: var(--s-2);
   padding: var(--s-2);
@@ -641,11 +716,10 @@ body {
   padding-bottom: var(--s-2);
   margin-top: var(--s-2);
 }
-/* Wide enough for the op name to read in full next to its number and category
-   pill -- at 260px "Fourier amplify" clipped to a few letters. */
-.bend-stack .bend-card { flex: 0 0 380px; width: 380px; }
-.bend-stack .bend-card.focused { flex-basis: 420px; width: 420px; }
-.bend-card-body { max-height: min(46vh, 420px); overflow-y: auto; }
+/* A card only names its bend now (editing is beside the map), so it no longer
+   needs the width an open card did. 300px still fits "Fourier amplify" with
+   its amount next to the badge and the row buttons. */
+.bend-stack .bend-card { flex: 0 0 300px; width: 300px; }
 .bend-card {
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
@@ -667,7 +741,6 @@ body {
   white-space: nowrap;
   font-size: var(--fs-sm);
 }
-.bend-card-head select.grow { width: auto; min-width: 0; }
 
 /* Per-bend footprint: the U in miniature, lit where this bend hooks in. */
 .bend-footprint { display: flex; align-items: center; gap: 8px; padding-left: 2px; }
@@ -676,7 +749,6 @@ body {
 .bend-footprint-count.none { color: var(--text-dim); font-style: italic; }
 
 /* Group quick-select sits with the map, so every way of picking layers is together. */
-.bend-map-chips { margin-bottom: var(--s-2); }
 /* The signal path: the model as three stages you can bend whole, with the
    layers inside one of them on demand. Plain DOM, no geometry. */
 .bend-pipe { display: flex; align-items: stretch; flex-wrap: wrap; gap: var(--s-2); }
@@ -725,7 +797,6 @@ body {
 }
 .unet-capsule rect, .unet-region path { transition: opacity 120ms ease; }
 .unet-capsule g[role="button"]:hover rect, .unet-region:hover path { opacity: 0.9; }
-.bend-card-body { padding: 10px 12px 12px; border-top: 1px solid var(--line); }
 
 .mb-grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--card-min, 200px), 1fr));
@@ -1321,23 +1392,7 @@ input:disabled, select:disabled { opacity: 0.65; cursor: not-allowed; }
 .disclose-head:hover { background: var(--bg-2); }
 .disclose-head h3 { margin: 0; flex: 1; }
 .disclose-head .chev,
-.bend-card-chev {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 32px;
-  height: 32px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--line);
-  background: var(--bg-3);
-  color: var(--text);
-  font-size: var(--fs-lg);
-  line-height: 1;
-  font-weight: 700;
-}
-.disclose-head:hover .chev,
-.bend-card-head:hover .bend-card-chev {
+.disclose-head:hover .chev {
   border-color: var(--accent);
   color: var(--accent);
   background: var(--accent-soft);
