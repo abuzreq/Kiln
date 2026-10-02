@@ -1070,6 +1070,83 @@ body {
 }
 .model-lightbox-meta { width: 100%; }
 
+/* The setup bar and its drawer (PlaySetup.jsx). The bar keeps what decides
+   the next run in view; the drawer is the old row, floating over the page from
+   the bar or pinned into it. */
+.play-setup { position: relative; margin-bottom: var(--s-3); }
+.setup-bar {
+  display: flex; align-items: center; gap: var(--s-2); min-height: 44px; padding: 4px 6px;
+  background: var(--bg-1); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  overflow-x: auto;
+}
+.setup-model {
+  display: flex; align-items: center; gap: var(--s-2); flex-shrink: 1; min-width: 0; height: 34px;
+  padding: 0 10px 0 4px; border-radius: var(--radius-sm); border: 1px solid var(--line);
+  background: var(--bg-2); color: var(--text); font: inherit; cursor: pointer;
+}
+.setup-model:hover { border-color: var(--accent); }
+.setup-thumb {
+  width: 26px; height: 26px; flex-shrink: 0; border-radius: 5px; overflow: hidden; background: var(--bg-3);
+  display: inline-flex; align-items: center; justify-content: center; font-size: var(--fs-xs); color: var(--text-dim);
+}
+.setup-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.setup-model-name { font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.setup-model-type { font-size: var(--fs-xs); color: var(--text-faint); white-space: nowrap; }
+.setup-model-none { color: var(--accent); font-weight: 600; padding-left: 6px; }
+.setup-sep { width: 1px; height: 22px; background: var(--line); flex-shrink: 0; }
+.setup-field {
+  display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; height: 30px; padding: 0 4px 0 8px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg);
+  font-size: var(--fs-sm); color: var(--text-faint);
+}
+.setup-field:focus-within { border-color: var(--accent); }
+.setup-field input {
+  width: 46px; border: 0; background: transparent; color: var(--text); font: inherit; font-weight: 600;
+  font-variant-numeric: tabular-nums; padding: 0;
+}
+.setup-field input:focus { outline: none; }
+.setup-field input:disabled { color: var(--text-faint); }
+.setup-seed input { width: 92px; }
+.setup-icon {
+  display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--bg-2); color: var(--text-dim); cursor: pointer;
+}
+.setup-icon:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+.setup-icon .ico { margin: 0; }
+.setup-pin { width: 32px; height: 32px; flex-shrink: 0; }
+.setup-pin.on { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.setup-summary {
+  display: inline-flex; gap: var(--s-2); flex-shrink: 0; padding: 4px 6px; border: 0; border-radius: 6px;
+  background: transparent; color: var(--text-dim); font: inherit; font-size: var(--fs-sm); cursor: pointer;
+}
+.setup-summary:hover { color: var(--text); }
+.setup-value.swept { flex-shrink: 0; font-size: var(--fs-sm); color: var(--text-faint); text-decoration: line-through; }
+.setup-flag {
+  flex-shrink: 0; white-space: nowrap; font: inherit; font-size: var(--fs-xs); border-radius: 999px; padding: 3px 9px;
+  border: 1px solid transparent;
+}
+.setup-flag.warn { color: var(--warn); background: rgba(251, 191, 36, 0.1); border-color: rgba(251, 191, 36, 0.25); }
+.setup-flag.info { color: #8fb8ff; background: rgba(91, 155, 255, 0.1); border-color: rgba(91, 155, 255, 0.3); }
+.setup-flag.hot { color: var(--accent); background: var(--accent-soft); border-color: var(--accent); cursor: pointer; }
+.setup-spacer { flex: 1; min-width: var(--s-2); }
+.setup-toggle { flex-shrink: 0; }
+.setup-toggle kbd {
+  margin-left: 4px; padding: 0 5px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg);
+  font-size: 10.5px; font-weight: 600; color: var(--text-faint);
+}
+@media (max-width: 900px) {
+  .setup-toggle kbd, .setup-model-type { display: none; }
+}
+.setup-drawer { margin-top: var(--s-2); }
+.setup-drawer .play-top { margin-bottom: 0; }
+/* Floating: hangs from the bar over the page, which does not move. */
+.play-setup.floating .setup-drawer {
+  position: absolute; top: 100%; left: 0; right: 0; z-index: 140;
+  padding: var(--s-2); border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--bg); box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5);
+  max-height: calc(100vh - 160px); overflow-y: auto;
+}
+
 .play-top {
   display: flex;
   flex-direction: row;
