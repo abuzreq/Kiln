@@ -219,6 +219,16 @@ export function DownloadIcon(props) {
   );
 }
 
+/** A push pin: keep this panel in place. */
+export function PinIcon(props) {
+  return (
+    <Icon {...props}>
+      <path d="M12 17v5" />
+      <path d="M9 3h6l-1 6 3 3v2H7v-2l3-3z" />
+    </Icon>
+  );
+}
+
 export function CaptureIcon(props) {
   return (
     <Icon {...props}>

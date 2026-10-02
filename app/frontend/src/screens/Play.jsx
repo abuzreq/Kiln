@@ -15,6 +15,7 @@ import {
   LIVE_PARAM_KEYS,
 } from "../sampleSettings.jsx";
 import ModelPicker from "../components/ModelPicker.jsx";
+import PlaySetup from "../components/PlaySetup.jsx";
 import { buildContrastMask, floodFillMask, measureMask } from "../contrastMask.js";
 import {
   brushStroke, cachedStroke, invertStroke, moveStroke, alphaToCache, overlayToCache,
@@ -1175,34 +1176,47 @@ export default function Play() {
     runs, watchedId, watch, trackRuns, cancelRun, queueFolder,
   };
 
+  // Create maps its Change slider onto skip + noise_level and passes them as
+  // overrides, so whatever the panel shows for noise level is discarded on that
+  // tab. Saying so beats a slider that quietly does nothing.
+  const overriddenBy = tab === "create" ? { noise_level: "The Change slider in Create" } : null;
+  const sweptBy = tab === "sweep" ? sweptParams : null;
+  // While a run is paused, only the live keys stay editable; the rest dim, so
+  // what Resume will apply is what stands out. While one is running the whole
+  // panel stays open: whatever you change is what the next queued run is made with.
+  const editableKeys = genPaused ? LIVE_PARAM_KEYS : null;
+  const stepsMin = genPaused ? (job?.detail?.step || 1) : undefined;
+
   return (
     <PlayCtx.Provider value={value}>
       <div className="play">
-        <div className="play-top">
-          <div className="card play-model-picker">
-            <ModelPicker />
+        <PlaySetup
+          model={activeModel}
+          params={sampleParams}
+          setParam={setSampleParam}
+          sweptBy={sweptBy}
+          overriddenBy={overriddenBy}
+          editable={editableKeys}
+          stepsMin={stepsMin}
+        >
+          <div className="play-top">
+            <div className="card play-model-picker">
+              <ModelPicker />
+            </div>
+            <div className="play-sample-settings">
+              <SampleSettingsPanel
+                params={sampleParams}
+                setParam={setSampleParam}
+                model={activeModel}
+                overriddenBy={overriddenBy}
+                sweptBy={sweptBy}
+                editable={editableKeys}
+                running={false}
+                stepsMin={stepsMin}
+              />
+            </div>
           </div>
-          <div className="play-sample-settings">
-            <SampleSettingsPanel
-              params={sampleParams}
-              setParam={setSampleParam}
-              model={activeModel}
-              // Create maps its Change slider onto skip + noise_level and passes
-              // them as overrides, so whatever the panel shows for noise level
-              // is discarded on that tab. Saying so beats a slider that quietly
-              // does nothing.
-              overriddenBy={tab === "create" ? { noise_level: "The Change slider in Create" } : null}
-              sweptBy={tab === "sweep" ? sweptParams : null}
-              // While a run is paused, only the live keys stay editable; the
-              // rest dim, so what Resume will apply is what stands out. While
-              // one is running the whole panel stays open: whatever you change
-              // is what the next queued run is made with.
-              editable={genPaused ? LIVE_PARAM_KEYS : null}
-              running={false}
-              stepsMin={genPaused ? (job?.detail?.step || 1) : undefined}
-            />
-          </div>
-        </div>
+        </PlaySetup>
         <div className={`play-body ${CANVAS_TABS.has(tab) ? "" : "solo"}`}>
           {tab === "create" && <div className="play-tools"><CreatePanel /></div>}
           {CANVAS_TABS.has(tab) && (
