@@ -1025,6 +1025,11 @@ body {
 .unet-node { cursor: pointer; outline: none; }
 .unet-node:focus-visible circle:last-of-type { stroke: var(--accent); stroke-width: 2.5; }
 .unet-marquee { fill: var(--accent); opacity: 0.14; pointer-events: none; }
+/* Skip arcs are targets: the wide transparent path is what you hit. */
+.unet-skip { cursor: pointer; outline: none; }
+.unet-skip:focus-visible path:nth-of-type(2) { stroke: var(--accent); stroke-width: 2.5; opacity: 1; }
+.unet-sat { cursor: pointer; }
+.bend-footprint-extra { color: var(--accent-2); }
 .unet-band line { pointer-events: none; }
 .unet-gutter, .unet-capsule g[role="button"], .unet-region, .unet-expand { cursor: pointer; outline: none; }
 .unet-gutter:hover text:first-of-type, .unet-expand:hover text { fill: var(--accent); }
