@@ -45,6 +45,7 @@
   --canvas-max-h: 960px;
   --rail-w: 232px;
   --inspector-w: 340px;
+  --toolrail-w: 52px;
   font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
 }
 
@@ -168,7 +169,7 @@ body {
   width: 100%; margin-inline: auto;
   max-width: calc(var(--sidebar-w) + var(--canvas-max-w) + var(--rail-w) + 2 * var(--s-3));
 }
-.play.fill { max-width: calc(var(--canvas-max-w) + var(--inspector-w) + var(--s-3)); }
+.play.fill { max-width: calc(var(--toolrail-w) + var(--canvas-max-w) + var(--inspector-w) + 2 * var(--s-3)); }
 .play-body { display: grid; grid-template-columns: minmax(260px, var(--sidebar-w)) minmax(0, 1fr); gap: var(--s-3); align-items: start; }
 @media (max-width: 900px) {
   .play-body { grid-template-columns: 1fr; }
@@ -229,17 +230,6 @@ body {
 }
 .hero.pan-ready, .hero.pan-ready .mask-overlay { cursor: grab; }
 .hero.panning, .hero.panning .mask-overlay { cursor: grabbing; }
-.hero-zoom {
-  position: absolute; top: 6px; right: 6px; z-index: 3;
-  display: flex; align-items: center; gap: 1px; padding: 2px;
-  background: rgba(20, 22, 30, .85); border: 1px solid var(--line); border-radius: 999px;
-}
-.hero-zoom button {
-  background: transparent; border: none; color: var(--text-dim); cursor: pointer;
-  font: inherit; font-size: var(--fs-sm); line-height: 1; padding: 3px 7px; border-radius: 999px;
-}
-.hero-zoom button:hover { background: var(--bg-3); color: var(--text); }
-.hero-zoom .zoom-pct { font-size: var(--fs-xs); min-width: 44px; text-align: center; }
 
 /* A strip directly above the picture saying what the next run will do. The
    controls for it live in the Layers panel; this is only the consequence, which
@@ -373,12 +363,14 @@ body {
 .play.fill { height: 100%; }
 .play-body.canvas-layout {
   flex: 1; min-height: 0;
-  grid-template-columns: minmax(0, 1fr) var(--inspector-w);
+  grid-template-columns: var(--toolrail-w) minmax(0, 1fr) var(--inspector-w);
   align-items: stretch;
 }
 .canvas-col { display: flex; flex-direction: column; gap: var(--s-3); min-width: 0; min-height: 0; }
-.canvas-col > .canvas-wrap { flex: 1; min-height: 0; gap: 0; }
-.canvas-layout .canvas-card { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+/* The picture's column: the bar, any notice, then the stage. No card around
+   the stage: the picture sits straight on the ground. */
+.canvas-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: var(--s-2); }
+.canvas-wrap .callout, .canvas-wrap .selection-bar { margin: 0; }
 /* The picture fits the stage both ways. The stage is a size container, so the
    image's caps are the stage's own box rather than a guess from 100vh. */
 .canvas-layout .canvas-card .hero {
@@ -391,7 +383,8 @@ body {
 }
 @media (max-width: 1000px) {
   .play.fill { height: auto; }
-  .play-body.canvas-layout { grid-template-columns: minmax(0, 1fr); }
+  .play-body.canvas-layout { grid-template-columns: var(--toolrail-w) minmax(0, 1fr); }
+  .canvas-inspector { grid-column: 1 / -1; }
   .canvas-layout .canvas-card .hero { flex: none; height: min(70vh, 620px); }
   .canvas-inspector { overflow: visible; }
 }
@@ -2174,9 +2167,6 @@ a { color: var(--accent); }
 .layer-actions .btn.icon .ico { width: 13px; height: 13px; }
 
 /* Under the canvas: one bar, two groups. */
-.canvas-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
-.canvas-bar-group { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
-.canvas-bar .tip-wrap { display: inline-flex; }
 .mask-thumb {
   background: repeating-conic-gradient(var(--bg-3) 0 25%, var(--bg-2) 0 50%) 0 0 / 8px 8px;
   border: 1px solid var(--line);
@@ -2198,3 +2188,101 @@ a { color: var(--accent); }
 .attn-level > .lbl { min-width: 190px; font-size: var(--fs-sm); color: var(--text-dim); }
 .attn-level > .lbl b { color: var(--text); font-weight: 600; }
 .attn-level label.field { flex: 1; min-width: 140px; margin: 0; }
+
+/* Canvas tools (CanvasTools.jsx). The rail holds the mask tools against the
+   picture's left edge, each with its key in the corner; the stage bar over the
+   picture holds the document menu, the active tool's settings, and what acts
+   on the whole picture. */
+.tool-rail {
+  display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px;
+  background: var(--bg-1); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  min-height: 0;
+}
+.tool-rail .tip-wrap { display: flex; }
+.tool-rail-btn {
+  position: relative; width: 40px; height: 40px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: transparent; border: 1px solid transparent; border-radius: 9px;
+  color: var(--text-dim); cursor: pointer;
+}
+.tool-rail-btn:hover:not(:disabled) { color: var(--text); background: var(--bg-3); }
+.tool-rail-btn.on { color: var(--accent); background: var(--accent-soft); border-color: rgba(255, 122, 69, 0.5); }
+.tool-rail-btn:disabled { opacity: 0.4; cursor: default; }
+.tool-rail-btn .ico { margin: 0; }
+.tool-rail-btn kbd {
+  position: absolute; right: 3px; bottom: 1px; font: 600 8.5px/1 inherit; font-family: inherit;
+  color: var(--text-dim); opacity: 0.8;
+}
+.tool-rail-sep { width: 26px; height: 1px; background: var(--line); margin: 6px 0; }
+
+.stage-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px;
+  min-height: 44px; padding: 5px 8px;
+  background: var(--bg-1); border: 1px solid var(--line); border-radius: var(--radius-sm);
+}
+.stage-bar .tip-wrap { display: inline-flex; }
+.stage-bar .btn.icon .ico { margin: 0; }
+.bar-sep { width: 1px; height: 20px; background: var(--line); flex-shrink: 0; }
+.tool-options { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; flex: 1 1 0; min-width: 260px; }
+.stage-bar-end { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.bar-into {
+  display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 8px;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 7px;
+  color: var(--text-dim); font: inherit; font-size: var(--fs-sm); white-space: nowrap; cursor: pointer;
+}
+.bar-into strong { color: var(--text); font-weight: 600; }
+.bar-into:hover, .bar-into.on { border-color: var(--accent); }
+.bar-into .ico { margin: 0; }
+.bar-range {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: var(--fs-sm); color: var(--text-dim); white-space: nowrap;
+}
+.bar-range input { accent-color: var(--accent); margin: 0; }
+.bar-range b { min-width: 26px; color: var(--text); font-weight: 600; }
+.bar-hint { flex: 1 1 0; min-width: 0; font-size: var(--fs-sm); color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bar-menu { display: flex; flex-direction: column; gap: 2px; min-width: 200px; }
+.bar-menu-title {
+  font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-dim); padding: 2px 8px 4px;
+}
+.bar-menu-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 8px;
+  background: transparent; border: 0; border-radius: 6px; color: var(--text);
+  font: inherit; font-size: var(--fs-sm); text-align: left; cursor: pointer;
+}
+.bar-menu-item:hover { background: var(--bg-3); }
+.bar-menu-item.on { color: var(--accent); background: var(--accent-soft); }
+.bar-menu-item.danger { color: var(--bad); }
+.bar-menu-item .ico { margin: 0; }
+.bar-menu-item .grow { flex: 1; }
+.bar-menu-sep { height: 1px; background: var(--line); margin: 6px 0; }
+.doc-menu { width: 280px; gap: 8px; }
+.doc-menu .bar-menu-title { padding-left: 0; }
+.doc-menu .bar-menu-item { margin: 0 -8px; width: calc(100% + 16px); }
+.doc-menu-btn { gap: 6px; }
+.doc-menu-btn .ico { margin: 0; }
+.bar-pop { width: 360px; }
+.bar-pop-body { display: flex; flex-direction: column; gap: var(--s-2); }
+.bar-pop-body .gen-panel { margin: 0; }
+.zoom-group { display: inline-flex; align-items: center; }
+.zoom-btn { min-width: 64px; justify-content: center; }
+
+/* On the picture: progress along its top edge, what it is at the top left,
+   how it is shown at the top right. The chips take the pointer; the strip
+   they sit in does not, so painting and panning reach the picture. */
+.hero-progress { position: absolute; left: 0; right: 0; top: 0; z-index: 4; }
+.hero-progress .progress { margin: 0; border-radius: 0; }
+.hero-chips {
+  position: absolute; top: 8px; z-index: 3; display: flex; gap: 6px; pointer-events: none;
+}
+.hero-chips.start { left: 8px; }
+.hero-chips.end { right: 8px; }
+.hero-chips .tip-wrap { display: inline-flex; }
+.hero-chip {
+  pointer-events: auto; display: inline-flex; align-items: center; gap: 6px;
+  font-size: var(--fs-xs); color: var(--text-dim);
+  background: rgba(20, 22, 30, 0.88); border: 1px solid var(--line); border-radius: 999px;
+  padding: 3px 9px; white-space: nowrap;
+}
+.hero-switch { cursor: pointer; }
+.hero-switch input { margin: 0; accent-color: var(--accent); }

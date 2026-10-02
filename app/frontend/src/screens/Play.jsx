@@ -7,8 +7,10 @@ import { useApp } from "../state.jsx";
 import { api, downloadPost, mediaUrl, thumbUrl } from "../api.js";
 import {
   EyeIcon, InvertIcon, ClearIcon, UpIcon, DownIcon, TrashIcon, DownloadIcon, CaptureIcon,
+  UndoIcon, RedoIcon, ChevronDownIcon,
 } from "../components/icons.jsx";
-import { Progress, Slider, Tooltip, TipLabel } from "../components/ui.jsx";
+import { Progress, Slider, Tooltip, TipLabel, Popover } from "../components/ui.jsx";
+import { ToolRail, ToolOptions } from "../components/CanvasTools.jsx";
 import { PlayCtx, usePlay, fileToDataUrl } from "./playContext.jsx";
 import {
   loadSampleParams, saveSampleParams, SampleSettingsPanel, paramsFromCard, cardLabel,
@@ -99,7 +101,8 @@ export default function Play() {
   const [brushSize, setBrushSize] = useState(48);
   const [brushHard, setBrushHard] = useState(false);
   const [eraser, setEraser] = useState(false);
-  const [maskTool, setMaskTool] = useState("brush");
+  // Move by default: a stray click on the picture then never paints.
+  const [maskTool, setMaskTool] = useState("move");
   // The Shape tool's kind, and the Generate panel's settings; both live here
   // so a tab switch does not reset them.
   const [shapeKind, setShapeKind] = useState("rect");
@@ -1224,6 +1227,7 @@ export default function Play() {
         <div className={`play-body ${CANVAS_TABS.has(tab) ? "canvas-layout" : "solo"}`}>
           {CANVAS_TABS.has(tab) && (
             <>
+              <ToolRail />
               <div
                 className={`play-stage canvas-col ${dragOver ? "drop-on" : ""}`}
                 onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
@@ -1259,7 +1263,8 @@ function PlayCanvas({ brushable }) {
     livePreviewOn, setLivePreviewOn,
     frameCard, pendingCard, setPendingCard, applyCard, activeSeed,
     clearCanvas, canvasSize, setCanvasSize, newCanvas, loadFile,
-    activeMask, maskPixels, hasMask, liveMasks,
+    activeMask, maskPixels, hasMask, liveMasks, activeLayer,
+    undo, canUndo, redo, canRedo,
   } = usePlay();
   const shown = canvasImage;
   const [busy, setBusy] = useState(false);
@@ -1346,7 +1351,7 @@ function PlayCanvas({ brushable }) {
    *  ground around the picture. Runs in the capture phase so the overlay
    *  never sees the press as a stroke. */
   const onHeroPointerDown = (e) => {
-    if (e.target.closest?.(".hero-zoom")) return;
+    if (e.target.closest?.(".hero-chips")) return;
     const onGround = e.target === heroRef.current || e.target === viewRef.current;
     if (!(e.button === 1 || spaceRef.current || onGround)) return;
     e.preventDefault();
@@ -1378,148 +1383,212 @@ function PlayCanvas({ brushable }) {
     setBusy(false);
   };
 
+  // The picture's size on screen at 100% of the view, as a share of its real
+  // pixels. The zoom read-out is in real pixels, so "100%" means one image
+  // pixel per screen pixel, and Fit says how far the stage has shrunk it.
+  const imgRef = useRef(null);
+  const [fit, setFit] = useState(1);
+  const [natural, setNatural] = useState(null);
+  const measureFit = useCallback(() => {
+    const im = imgRef.current;
+    if (!im || !im.naturalWidth) return;
+    setFit(im.offsetWidth / im.naturalWidth);
+    setNatural({ w: im.naturalWidth, h: im.naturalHeight });
+  }, []);
+  useEffect(() => {
+    const hero = heroRef.current;
+    if (!hero || typeof ResizeObserver === "undefined") return undefined;
+    const ro = new ResizeObserver(measureFit);
+    ro.observe(hero);
+    return () => ro.disconnect();
+  }, [heroRef, measureFit]);
+  const atFit = view.s === 1 && view.x === 0 && view.y === 0;
+  const pct = Math.round(view.s * fit * 100);
+  const zoomText = atFit ? `Fit · ${pct}%` : `${pct}%`;
+  const zoomTo = (p) => zoomStep((p / 100 / fit) / view.s);
+  const size = natural || canvasSize;
+
   return (
-    <div className="col canvas-wrap">
-      <div className="card canvas-card">
-        <div className="row between center mb-2">
-          <h3 className="mb-0">Canvas</h3>
-          <div className="row center gap-2">
-            {progress && <span className="sub">{progress.message}</span>}
-            {activeSeed != null && !progress && (
-              <span className="pill mono" title="Seed that produced this image">seed {activeSeed}</span>
-            )}
-            <Tooltip text="Show the picture while it is being made. The preview is the raw image; Finish is applied to the result only. Turn it off to keep the current picture on the canvas until the result lands, which saves a little time per run.">
-              <label className="row center gap-1 has-tip">
-                <input type="checkbox" checked={livePreviewOn} onChange={(e) => setLivePreviewOn(e.target.checked)} />
-                <span className="sub">Live preview</span>
+    <div className="canvas-card canvas-wrap">
+      {/* One bar over the picture: the document on the left, the active tool's
+          settings in the middle, and what acts on the whole picture on the
+          right -- undo, zoom, and getting it out. */}
+      <div className="stage-bar" role="toolbar" aria-label="Canvas">
+        <Popover
+          label="Canvas"
+          triggerClass="btn ghost sm doc-menu-btn"
+          align="start"
+          triggerLabel={`Canvas, ${size.w} × ${size.h}: new, open, clear`}
+          trigger={<><span className="tnum">{size.w} × {size.h}</span><ChevronDownIcon /></>}
+        >
+          {(close) => (
+            <div className="bar-menu doc-menu">
+              <div className="bar-menu-title">New canvas</div>
+              <div className="row center gap-2">
+                <span className="canvas-size-pair">
+                  <input
+                    type="number" className="canvas-size-input" aria-label="Canvas width"
+                    value={canvasSize.w} min={CANVAS_MIN} max={CANVAS_MAX} step={64}
+                    onChange={(e) => setCanvasSize({ w: e.target.value })}
+                  />
+                  <span className="sub">×</span>
+                  <input
+                    type="number" className="canvas-size-input" aria-label="Canvas height"
+                    value={canvasSize.h} min={CANVAS_MIN} max={CANVAS_MAX} step={64}
+                    onChange={(e) => setCanvasSize({ h: e.target.value })}
+                  />
+                </span>
+                <button type="button" className="btn sm primary" onClick={() => { newCanvas(canvasSize.w, canvasSize.h); close(); }}>
+                  New
+                </button>
+              </div>
+              <p className="sub mb-0">A blank canvas at this size. What is on it now stays in Results.</p>
+              <span className="bar-menu-sep" />
+              <button type="button" className="bar-menu-item" onClick={() => { openRef.current?.click(); close(); }}>
+                <span className="grow">Open an image…</span><span className="sub">or drop, or paste</span>
+              </button>
+              {shown && (
+                <button type="button" className="bar-menu-item danger" onClick={() => { clearCanvas(); close(); }}
+                  title="Back to blank at the current size, dropping every layer and mask. The image itself stays in Results.">
+                  <TrashIcon /> <span className="grow">Clear canvas</span>
+                </button>
+              )}
+            </div>
+          )}
+        </Popover>
+        {/* Outside the menu, which unmounts on close: the file picker outlives it. */}
+        <input
+          ref={openRef}
+          type="file"
+          accept="image/*"
+          className="hidden-file"
+          onChange={(e) => { loadFile(e.target.files?.[0]); e.target.value = ""; }}
+        />
+        <span className="bar-sep" aria-hidden="true" />
+        <ToolOptions />
+        <div className="stage-bar-end">
+          <Tooltip text="Step back one edit: a fill, a stroke, a delete, a reorder (Ctrl+Z)">
+            <button type="button" className="btn ghost sm icon" onClick={undo} disabled={!canUndo} aria-label="Undo">
+              <UndoIcon />
+            </button>
+          </Tooltip>
+          <Tooltip text="Put back what Undo took away (Ctrl+Shift+Z)">
+            <button type="button" className="btn ghost sm icon" onClick={redo} disabled={!canRedo} aria-label="Redo">
+              <RedoIcon />
+            </button>
+          </Tooltip>
+          {shown && (
+            <>
+              <span className="bar-sep" aria-hidden="true" />
+              <div className="zoom-group" role="group" aria-label="Zoom">
+                <button type="button" className="btn ghost sm icon" onClick={() => zoomStep(1 / 1.25)} aria-label="Zoom out" title="Zoom out">−</button>
+                <Popover label="Zoom" triggerClass="btn ghost sm zoom-btn tnum" trigger={zoomText}
+                  triggerLabel={`Zoom: ${zoomText}. The wheel over the picture zooms too; drag the ground, the middle button, or Space to pan.`}>
+                  {(close) => (
+                    <div className="bar-menu">
+                      <button type="button" className={`bar-menu-item ${atFit ? "on" : ""}`}
+                        onClick={() => { setView({ s: 1, x: 0, y: 0 }); close(); }}>
+                        <span className="grow">Fit</span><span className="sub tnum">{Math.round(fit * 100)}%</span>
+                      </button>
+                      {[50, 100, 200, 400].map((p) => (
+                        <button key={p} type="button" className={`bar-menu-item ${!atFit && pct === p ? "on" : ""}`}
+                          onClick={() => { zoomTo(p); close(); }}>
+                          <span className="grow tnum">{p}%</span>
+                          {p === 100 && <span className="sub">actual pixels</span>}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </Popover>
+                <button type="button" className="btn ghost sm icon" onClick={() => zoomStep(1.25)} aria-label="Zoom in" title="Zoom in">+</button>
+              </div>
+              <span className="bar-sep" aria-hidden="true" />
+              <CaptureButton image={shown} card={frameCard} label={<><CaptureIcon /> Capture</>} />
+              <Tooltip text="Download the canvas as a PNG. The settings that made it are written into the file, so dropping it back into Kiln restores them.">
+                <button type="button" className="btn sm icon" onClick={download} disabled={busy} aria-label="Download">
+                  {busy ? "…" : <DownloadIcon />}
+                </button>
+              </Tooltip>
+            </>
+          )}
+        </div>
+      </div>
+      {pendingCard && (
+        <div className="callout row between center wrap gap-2">
+          <span>
+            This image carries Kiln settings{cardLabel(pendingCard) ? ` — ${cardLabel(pendingCard)}` : ""}.
+          </span>
+          <div className="row gap-2">
+            <button type="button" className="btn sm primary" onClick={() => applyCard(pendingCard)}>
+              Restore settings
+            </button>
+            <button type="button" className="btn ghost sm" onClick={() => setPendingCard(null)}>
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+      {/* What the next run will do, stated beside the picture. The controls
+          for it live in the Layers panel; this is only the consequence, which
+          is the part that has to be legible at the instant you press the
+          button. */}
+      {hasMask && (
+        <div className="selection-bar" role="status">
+          <span className="sub grow">
+            <TipLabel tip="The next run changes only this area; the rest of the canvas is kept. Turn the mask off in the Layers panel to run on the whole canvas.">
+              <strong>{liveMasks.length > 1
+                ? `${liveMasks.length} masks on`
+                : activeMask?.name || "Mask on"}</strong>
+            </TipLabel>
+          </span>
+        </div>
+      )}
+      <div
+        className={`hero ${brushable ? "brushable" : ""} ${spaceHeld ? "pan-ready" : ""} ${panning ? "panning" : ""}`}
+        ref={heroRef}
+        onPointerDownCapture={onHeroPointerDown}
+        onPointerMove={onHeroPointerMove}
+        onPointerUp={endPan}
+        onPointerCancel={endPan}
+      >
+        {progress && <div className="hero-progress"><Progress value={progress.value} /></div>}
+        {shown ? (
+          <div
+            className="hero-view"
+            ref={viewRef}
+            style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.s})` }}
+          >
+            <img ref={imgRef} src={shown} alt="canvas" draggable={false} onLoad={measureFit} />
+            <MaskOverlay active={brushable} />
+          </div>
+        ) : (
+          <span className="sub">Generate, drop, or paste an image.</span>
+        )}
+        {/* What the picture is, and how it is being shown, on the picture
+            itself rather than in a header above it. */}
+        <div className="hero-chips start">
+          {progress ? (
+            <span className="hero-chip">{progress.message}</span>
+          ) : activeSeed != null ? (
+            <span className="hero-chip mono" title="Seed that produced this image">
+              seed {activeSeed}{activeLayer ? ` · ${activeLayer.name}` : ""}
+            </span>
+          ) : null}
+        </div>
+        <div className="hero-chips end">
+          <Tooltip text="Show the picture while it is being made. The preview is the raw image; Finish is applied to the result only. Turn it off to keep the current picture on the canvas until the result lands, which saves a little time per run.">
+            <label className="hero-chip hero-switch">
+              <input type="checkbox" checked={livePreviewOn} onChange={(e) => setLivePreviewOn(e.target.checked)} />
+              Live preview
+            </label>
+          </Tooltip>
+          {postFrame && (
+            <Tooltip text="Show the layer stack as it is, before post-processing. Useful for judging what the models actually produced.">
+              <label className="hero-chip hero-switch">
+                <input type="checkbox" checked={showRaw} onChange={(e) => setShowRaw(e.target.checked)} />
+                Unprocessed
               </label>
             </Tooltip>
-            {postFrame && (
-              <Tooltip text="Show the layer stack as it is, before post-processing. Useful for judging what the models actually produced.">
-                <label className="row center gap-1 has-tip">
-                  <input type="checkbox" checked={showRaw} onChange={(e) => setShowRaw(e.target.checked)} />
-                  <span className="sub">Unprocessed</span>
-                </label>
-              </Tooltip>
-            )}
-          </div>
-        </div>
-        {progress && <Progress value={progress.value} />}
-        {pendingCard && (
-          <div className="callout row between center wrap gap-2">
-            <span>
-              This image carries Kiln settings{cardLabel(pendingCard) ? ` — ${cardLabel(pendingCard)}` : ""}.
-            </span>
-            <div className="row gap-2">
-              <button type="button" className="btn sm primary" onClick={() => applyCard(pendingCard)}>
-                Restore settings
-              </button>
-              <button type="button" className="btn ghost sm" onClick={() => setPendingCard(null)}>
-                Dismiss
-              </button>
-            </div>
-          </div>
-        )}
-        {/* What the next run will do, stated beside the picture. The controls
-            for it live in the Layers panel; this is only the consequence, which
-            is the part that has to be legible at the instant you press the
-            button. */}
-        {hasMask && (
-          <div className="selection-bar" role="status">
-            <span className="sub grow">
-              <TipLabel tip="The next run changes only this area; the rest of the canvas is kept. Turn the mask off in the Layers panel to run on the whole canvas.">
-                <strong>{liveMasks.length > 1
-                  ? `${liveMasks.length} masks on`
-                  : activeMask?.name || "Mask on"}</strong>
-              </TipLabel>
-            </span>
-          </div>
-        )}
-        <div
-          className={`hero ${brushable ? "brushable" : ""} ${spaceHeld ? "pan-ready" : ""} ${panning ? "panning" : ""}`}
-          ref={heroRef}
-          onPointerDownCapture={onHeroPointerDown}
-          onPointerMove={onHeroPointerMove}
-          onPointerUp={endPan}
-          onPointerCancel={endPan}
-        >
-          {shown ? (
-            <div
-              className="hero-view"
-              ref={viewRef}
-              style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.s})` }}
-            >
-              <img src={shown} alt="canvas" draggable={false} />
-              <MaskOverlay active={brushable} />
-            </div>
-          ) : (
-            <span className="sub">Generate, drop, or paste an image.</span>
-          )}
-          {shown && (
-            <div className="hero-zoom" role="group" aria-label="Zoom">
-              <Tooltip text="Zoom out. The wheel over the picture zooms too.">
-                <button type="button" onClick={() => zoomStep(1 / 1.25)} aria-label="Zoom out">−</button>
-              </Tooltip>
-              <Tooltip text="Back to 100%, centred. Pan by dragging the ground around the picture, with the middle button, or with Space held.">
-                <button type="button" className="zoom-pct mono" onClick={() => setView({ s: 1, x: 0, y: 0 })}>
-                  {Math.round(view.s * 100)}%
-                </button>
-              </Tooltip>
-              <Tooltip text="Zoom in">
-                <button type="button" onClick={() => zoomStep(1.25)} aria-label="Zoom in">+</button>
-              </Tooltip>
-            </div>
-          )}
-        </div>
-        {/* One bar under the picture: the canvas itself on the left (size, new,
-            open), what to do with the picture on the right (download, capture,
-            clear). Words where the action is a verb people scan for; the
-            destructive one is an icon with a tooltip, out at the end. */}
-        <div className="canvas-bar mt-2">
-          <div className="canvas-bar-group">
-            <Tooltip text="Canvas size in pixels. Changing it starts a new blank canvas with New.">
-              <span className="sub has-tip">Canvas</span>
-            </Tooltip>
-            <span className="canvas-size-pair">
-              <input
-                type="number" className="canvas-size-input" aria-label="Canvas width"
-                value={canvasSize.w} min={CANVAS_MIN} max={CANVAS_MAX} step={64}
-                onChange={(e) => setCanvasSize({ w: e.target.value })}
-              />
-              <span className="sub">×</span>
-              <input
-                type="number" className="canvas-size-input" aria-label="Canvas height"
-                value={canvasSize.h} min={CANVAS_MIN} max={CANVAS_MAX} step={64}
-                onChange={(e) => setCanvasSize({ h: e.target.value })}
-              />
-            </span>
-            <Tooltip text="Start again on a blank canvas at this size. Whatever is on the canvas now stays in Results, so this does not lose it.">
-              <button type="button" className="btn sm" onClick={() => newCanvas(canvasSize.w, canvasSize.h)}>New</button>
-            </Tooltip>
-            <Tooltip text="Open an image from disk. Dropping one onto the canvas, or pasting it, does the same thing.">
-              <button type="button" className="btn sm ghost" onClick={() => openRef.current?.click()}>Open…</button>
-            </Tooltip>
-            <input
-              ref={openRef}
-              type="file"
-              accept="image/*"
-              className="hidden-file"
-              onChange={(e) => { loadFile(e.target.files?.[0]); e.target.value = ""; }}
-            />
-          </div>
-          <div className="spacer" />
-          {shown && (
-            <div className="canvas-bar-group">
-              <Tooltip text="Download the canvas as a PNG. The sampling settings that made it are written into the file, so dropping it back into Kiln restores them.">
-                <button type="button" className="btn sm" onClick={download} disabled={busy}>
-                  <DownloadIcon /> {busy ? "Preparing…" : "Download"}
-                </button>
-              </Tooltip>
-              <CaptureButton image={shown} card={frameCard} label={<><CaptureIcon /> Capture</>} />
-              <Tooltip text="Clear the canvas: back to blank at the current size, dropping every layer and mask. The image itself stays in Results.">
-                <button type="button" className="btn sm danger" onClick={clearCanvas}><TrashIcon /> Clear canvas</button>
-              </Tooltip>
-            </div>
           )}
         </div>
       </div>
@@ -2426,7 +2495,7 @@ function LayersPanel() {
   const {
     rasterLayers, inpaintMasks, setLayerOpacity, useLayerAsMask, activeLayer,
     addLayer, duplicateLayer, setEntityEnabled, setMaskVisible,
-    addMask, clearMask, invertMask, liveMasks, undo, canUndo, redo, canRedo, canvasSize, maskVersion,
+    addMask, clearMask, invertMask, liveMasks, canvasSize, maskVersion,
   } = usePlay();
 
   return (
@@ -2434,14 +2503,6 @@ function LayersPanel() {
     <aside className="card layers-panel" aria-label="Layers">
       <div className="row between center mb-2">
         <h3 className="mb-0">Layers <span className="sub panel-count">{rasterLayers.length}</span></h3>
-        <div className="row gap-1">
-          <Tooltip text="Step back one edit — a fill, a painted stroke, a delete, a reorder. (Ctrl+Z)">
-            <button type="button" className="btn ghost sm" onClick={undo} disabled={!canUndo}>Undo</button>
-          </Tooltip>
-          <Tooltip text="Put back what Undo took away. (Ctrl+Shift+Z)">
-            <button type="button" className="btn ghost sm" onClick={redo} disabled={!canRedo}>Redo</button>
-          </Tooltip>
-        </div>
       </div>
 
       <Tooltip text="A new empty layer on top. Runs land in the active layer, so make one to keep the next attempt apart from what is here.">

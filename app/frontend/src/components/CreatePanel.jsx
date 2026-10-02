@@ -3,50 +3,15 @@ import { api } from "../api.js";
 import { useApp } from "../state.jsx";
 import { usePlay } from "../screens/playContext.jsx";
 import { Slider, Select, Num, Disclose, TipLabel, Tooltip } from "./ui.jsx";
-import {
-  BrushIcon, WandIcon, ShapeIcon, ContrastIcon, MoveIcon, PaintIcon, EraseIcon,
-  RectIcon, EllipseIcon, PolygonIcon, PatternIcon, UndoIcon, InvertIcon, ClearIcon,
-  NewMaskIcon, AddIcon,
-} from "./icons.jsx";
+import { useFrameSize } from "./CanvasTools.jsx";
 import {
   buildSamplePayload, buildInpaintPayload, changeToParams, effectiveSteps, skippedSteps,
   fillSizeFor, solverCanResample, LIVE_PARAM_KEYS,
   liveEditLabels, joinLabels } from "../sampleSettings.jsx";
-import { contrastPreview, compositePostprocWithMask } from "../contrastMask.js";
-import { cachedStroke } from "../selection.js";
-import { maskUrlToCache } from "../layers.js";
+import { compositePostprocWithMask } from "../contrastMask.js";
 import { bendPresetSynopsis, bendPresetSummary } from "../bendSynopsis.js";
 
-// The mask tools and the Shape tool's kinds. Icons only in the rows (five
-// tools would not fit a sidebar with their words); the label is the tooltip,
-// the aria-label, and the name shown beside the row for the one that is on.
-const MASK_TOOLS = [
-  { id: "brush", label: "Brush", Icon: BrushIcon, tip: "Brush: paint freehand" },
-  { id: "wand", label: "Wand", Icon: WandIcon, tip: "Wand: click a colour on the canvas to select everything like it nearby" },
-  { id: "shape", label: "Shape", Icon: ShapeIcon, tip: "Shape: rectangles, ellipses, polygons, or a pattern" },
-  { id: "contrast", label: "Contrast", Icon: ContrastIcon, tip: "Contrast: split the canvas in two by brightness or by local contrast, and take one side" },
-  { id: "move", label: "Move", Icon: MoveIcon, tip: "Move: drag the mask around, or nudge it with the arrow keys" },
-];
-const SHAPE_KINDS = [
-  { id: "rect", label: "Rectangle", Icon: RectIcon, tip: "Rectangle: drag on the canvas; Shift for a square" },
-  { id: "ellipse", label: "Ellipse", Icon: EllipseIcon, tip: "Ellipse: drag on the canvas; Shift for a circle" },
-  { id: "polygon", label: "Polygon", Icon: PolygonIcon, tip: "Polygon: click corners on the canvas; Enter or double-click closes" },
-  { id: "pattern", label: "Pattern", Icon: PatternIcon, tip: "Pattern: blobs, cells, stripes, a split, or scattered shapes, from a seed" },
-];
-
 const DEFAULT_PP = { contrast: 1, gamma: 1, saturation: 1, eqhist: 0, unsharp: 0, noise: 0 };
-
-const SPLIT_METHODS = [
-  { value: "luminance", label: "Brightness" },
-  { value: "contrast", label: "Local contrast" },
-];
-
-// The two sides of a split. "Foreground/Background" claimed more than the maths
-// delivers — a luminance split separates dark from light, nothing more.
-const SPLIT_SIDES = [
-  { id: "foreground", label: "Side A", luminance: "Darker", contrast: "Detailed" },
-  { id: "background", label: "Side B", luminance: "Lighter", contrast: "Flat" },
-];
 
 function isIdentityPostproc(pp) {
   if (!pp) return true;
@@ -144,36 +109,13 @@ export default function CreatePanel() {
     hasMask ? setMaskParam(activeMask?.id, "bendPreset", v) : setGenBendPreset(v)
   );
   const [variations, setVariations] = useState(1);
-  const [splitMethod, setSplitMethod] = useState("luminance");
-  const [brightnessThreshold, setBrightnessThreshold] = useState(128);
-  const [contrastThreshold, setContrastThreshold] = useState(0);
-  const [splitSoften, setSplitSoften] = useState(2);
-  const [smoothOn, setSmoothOn] = useState(false);
-  const [smoothRadius, setSmoothRadius] = useState(2);
-  const [maskSide, setMaskSide] = useState("foreground");
-  const [splitPreview, setSplitPreview] = useState(null);
-  const [splitBusy, setSplitBusy] = useState(false);
-  // Recompute the split whenever the picture being worked on changes: after a
-  // generation, and when an init image is set or swapped. A flag rather than a
-  // direct call, because both of those commit new state during the same render
-  // and calculating inline would still see the previous image.
-  const [splitPending, setSplitPending] = useState(false);
   // Job id -> the live settings it was started (or last resumed) with. Resume
   // sends only what differs, and with a queue each run has its own baseline.
   const snapshots = useRef({});
   const ppSource = frame;
   const ppGen = useRef(0);
-  const [canvasSize, setCanvasSize] = useState(null);
-
   // Region fill runs at the canvas's own resolution, so the user needs to see it.
-  useEffect(() => {
-    if (!frame) { setCanvasSize(null); return undefined; }
-    let live = true;
-    const im = new Image();
-    im.onload = () => { if (live) setCanvasSize({ w: im.naturalWidth, h: im.naturalHeight }); };
-    im.src = frame;
-    return () => { live = false; };
-  }, [frame]);
+  const canvasSize = useFrameSize(frame);
 
   useEffect(() => {
     api.get("/library/bends").then(setBendPresets).catch(() => {});
@@ -228,18 +170,6 @@ export default function CreatePanel() {
     localStorage.setItem("kiln.genBendPreset", genBendPreset);
   }, [genBendPreset]);
 
-  const splitOpts = useMemo(() => {
-    const base = splitMethod === "luminance"
-      ? { method: "luminance", autoThreshold: false, threshold: brightnessThreshold, soften: splitSoften }
-      : { method: "contrast", autoThreshold: true, thresholdBias: contrastThreshold, soften: splitSoften };
-    return { ...base, presmooth: smoothOn ? smoothRadius : 0 };
-  }, [splitMethod, brightnessThreshold, contrastThreshold, splitSoften, smoothOn, smoothRadius]);
-
-  // Invalidate calculated preview when inputs change so Apply requires Calculate again.
-  useEffect(() => {
-    setSplitPreview(null);
-  }, [frame, splitOpts]);
-
   // Post-process reads the flattened stack and writes to a display slot beside
   // it, rather than editing the stack. So it can never feed on its own output,
   // Unprocessed is just the stack itself, and turning it off is free.
@@ -260,66 +190,6 @@ export default function CreatePanel() {
     }, 220);
     return () => clearTimeout(t);
   }, [pp, ppOn, ppSource, setPostFrame, getMaskDataUrl, maskPixels]);
-
-  const regionForSide = (side) => {
-    if (splitMethod === "contrast") {
-      return side === "foreground" ? "high" : "low";
-    }
-    return side === "foreground" ? "dark" : "light";
-  };
-
-  // The split reads the stack, not the screen: with post-process on the two
-  // differ, and the fill this selects for reads the stack.
-  const applySplit = async (side = maskSide, target = "active") => {
-    if (!frame) { toast("Put an image on the canvas first", "error"); return; }
-    if (!splitPreview) { toast("Calculate contrast regions first", "error"); return; }
-    setSplitBusy(true);
-    try {
-      const def = SPLIT_SIDES.find((x) => x.id === side);
-      const label = splitMethod === "luminance" ? def?.luminance : def?.contrast;
-      const ok = await applyContrastMask(
-        frame, { ...splitOpts, region: regionForSide(side) }, { target, name: label || "Contrast" },
-      );
-      if (ok) {
-        setMaskSide(side);
-        toast(target === "new"
-          ? `Made a mask of the ${(label || side).toLowerCase()} side`
-          : `Selected the ${(label || side).toLowerCase()} side`, "success");
-      } else {
-        toast("Could not build the selection", "error");
-      }
-    } catch (e) {
-      toast(e.message, "error");
-    } finally {
-      setSplitBusy(false);
-    }
-  };
-
-  // A generation replaces the canvas, which invalidates any split that was on
-  // screen. Recomputing it here means the contrast tiles are ready to use
-  // straight away instead of needing a manual Calculate after every run.
-  useEffect(() => {
-    if (!splitPending || !frame || splitBusy) return;
-    setSplitPending(false);
-    calculateSplit();
-    // calculateSplit is recreated every render; the flag is cleared above, so
-    // this cannot re-enter.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [splitPending, frame]);
-
-  const calculateSplit = async () => {
-    if (!frame) { toast("Put an image on the canvas first", "error"); return; }
-    setSplitBusy(true);
-    try {
-      const p = await contrastPreview(frame, splitOpts);
-      setSplitPreview(p);
-    } catch (e) {
-      setSplitPreview(null);
-      toast(e.message || "Contrast calculate failed", "error");
-    } finally {
-      setSplitBusy(false);
-    }
-  };
 
   /** Every frame a finished job produced, oldest first. */
   const framesOf = (done) => {
@@ -356,7 +226,6 @@ export default function CreatePanel() {
       return;
     }
     setLivePreview(null);
-    if (done.status === "done") setSplitPending(true);
     if (done.status === "done" || done.status === "cancelled") {
       const out = framesOf(done);
       out.forEach((f, i) => {
@@ -398,7 +267,6 @@ export default function CreatePanel() {
   const finishFill = async (done, maskSrc, maskIds = []) => {
     delete snapshots.current[done.id];
     if (done.status === "error") toast(done.message, "error");
-    if (done.status === "done") setSplitPending(true);
     if (done.status === "done" || done.status === "cancelled") {
       const out = framesOf(done);
       for (let i = 0; i < out.length - 1; i += 1) pushHistory(out[i].img, out[i].raw, out[i].card);
@@ -804,222 +672,6 @@ export default function CreatePanel() {
         </div>
       </div>
 
-      {/* ——— 2. Mask —————————————————————————————————— */}
-      <Disclose
-        title="Mask"
-        defaultOpen
-        className="create-section"
-        tip="Paint where a run may change things. Masks are rows in the Layers panel and stay until you hide or delete them."
-      >
-        <div className="row between center wrap gap-2 mb-2">
-          <span className="sub grow">
-            <TipLabel tip="Strokes go into this mask. Pick another mask row in the Layers panel to paint into that one instead; with no row picked, the topmost mask that is on takes them. Painting into a mask turns it on and shows it.">
-              Into <strong>{maskName}</strong>
-            </TipLabel>
-          </span>
-          <div className="row center gap-2">
-            <Tooltip text="Step back one edit (Ctrl+Z)">
-              <button type="button" className="btn ghost sm icon" onClick={undo} disabled={!canUndo} aria-label="Undo">
-                <UndoIcon />
-              </button>
-            </Tooltip>
-            <Tooltip text="Swap masked for unmasked (Ctrl+Shift+I)">
-              <button type="button" className="btn ghost sm icon" onClick={() => invertMask(activeMask?.id)} aria-label="Invert">
-                <InvertIcon />
-              </button>
-            </Tooltip>
-            <Tooltip text="Empty the mask, keeping its row and settings (Ctrl+D)">
-              <button type="button" className="btn ghost sm icon" onClick={() => activeMask && clearMask(activeMask.id)} disabled={!activeMask?.strokes.length} aria-label="Clear">
-                <ClearIcon />
-              </button>
-            </Tooltip>
-          </div>
-        </div>
-
-        {/* How the mask gets made: one row of tools, one at a time, icons only
-            so five fit a sidebar; the name of the one that is on sits beside
-            the row, and every button says what it is on hover. What follows
-            the row is that tool's own controls, and nothing else. */}
-        <div className="row center gap-2 mb-2 tool-row">
-          <div className="seg seg-icons" role="group" aria-label="Mask tool">
-            {MASK_TOOLS.map((t) => (
-              <Tooltip key={t.id} text={t.tip}>
-                <button type="button" className={maskTool === t.id ? "on" : ""} onClick={() => setMaskTool(t.id)} aria-label={t.label} aria-pressed={maskTool === t.id}>
-                  <t.Icon />
-                </button>
-              </Tooltip>
-            ))}
-          </div>
-          <span className="tool-name">
-            {MASK_TOOLS.find((t) => t.id === maskTool)?.label}
-            {maskTool === "shape" && <span className="sub"> · {SHAPE_KINDS.find((k) => k.id === shapeKind)?.label}</span>}
-          </span>
-        </div>
-
-        {(maskTool === "brush" || maskTool === "wand" || maskTool === "shape") && (
-          <div className="row gap-2 mb-2 wrap center">
-            {maskTool === "shape" && (
-              <div className="seg seg-icons" role="group" aria-label="Shape kind">
-                {SHAPE_KINDS.map((k) => (
-                  <Tooltip key={k.id} text={k.tip}>
-                    <button type="button" className={shapeKind === k.id ? "on" : ""} onClick={() => setShapeKind(k.id)} aria-label={k.label} aria-pressed={shapeKind === k.id}>
-                      <k.Icon />
-                    </button>
-                  </Tooltip>
-                ))}
-              </div>
-            )}
-            <div className="seg seg-sm" role="group" aria-label="Paint or erase">
-              <button type="button" className={!eraser ? "on" : ""} onClick={() => setEraser(false)} title="Add to the mask"><PaintIcon /> Paint</button>
-              <button type="button" className={eraser ? "on" : ""} onClick={() => setEraser(true)} title="Cut out of the mask"><EraseIcon /> Erase</button>
-            </div>
-            {maskTool === "brush" && (
-              <div className="seg seg-sm" role="group" aria-label="Brush edge">
-                <button type="button" className={!brushHard ? "on" : ""} onClick={() => setBrushHard(false)}>Soft</button>
-                <button type="button" className={brushHard ? "on" : ""} onClick={() => setBrushHard(true)}>Hard</button>
-              </div>
-            )}
-          </div>
-        )}
-
-        {maskTool === "brush" && (
-          <Slider label="Size" value={brushSize} min={8} max={160} step={2} onChange={setBrushSize}
-            tip="Brush diameter in canvas pixels." />
-        )}
-
-        {maskTool === "wand" && (
-          <Slider
-            label="Tolerance"
-            value={wandTolerance}
-            min={0}
-            max={100}
-            step={1}
-            onChange={setWandTolerance}
-            tip="How similar a neighboring pixel's color must be to join the mask. Click the canvas to add it."
-          />
-        )}
-
-        {maskTool === "move" && (
-          <p className="hint mb-2">
-            <TipLabel tip={`Drag anywhere on the canvas to move ${maskName}, or press the arrow keys: 1 px, or 10 with Shift. With any tool, the label on the mask's box drags it too.`}>
-              Drag the mask, or use the arrow keys
-            </TipLabel>
-          </p>
-        )}
-
-        {maskTool === "shape" && (
-          shapeKind === "pattern" ? (
-            <PatternPanel
-              genShape={genShape}
-              setGenShape={setGenShape}
-              canvasSize={canvasSize}
-              eraser={eraser}
-              addStroke={addStroke}
-              addMaskWithStroke={addMaskWithStroke}
-              maskName={maskName}
-            />
-          ) : (
-            <p className="hint mb-2">
-              <TipLabel tip={shapeKind === "polygon"
-                ? "Each click places a corner. Enter, a double-click, or a click on the first corner closes it; Backspace removes the last corner; Esc abandons it. Erase makes a polygon that cuts out of the mask instead."
-                : "Press and drag on the canvas. Shift keeps it square or round. Erase makes a shape that cuts out of the mask instead. Shapes are hard-edged: Feather softens the fill at its edge."}
-              >
-                {shapeKind === "polygon"
-                  ? (polyCount ? `${polyCount} corner${polyCount === 1 ? "" : "s"} placed — Enter closes, Esc cancels` : "Click on the canvas to place corners")
-                  : `Drag on the canvas to draw ${shapeKind === "ellipse" ? "an ellipse" : "a rectangle"}`}
-              </TipLabel>
-            </p>
-          )
-        )}
-
-        {maskTool === "contrast" && (
-          <div className="contrast-arm">
-            <div className="row gap-2">
-              <div className="grow">
-                <Select label="Split by" value={splitMethod} onChange={setSplitMethod} options={SPLIT_METHODS}
-                  tip="Brightness splits light from dark; local contrast splits busy areas from flat ones." />
-              </div>
-              <div className="grow">
-                {splitMethod === "luminance" ? (
-                  <Slider label="Threshold" value={brightnessThreshold} min={1} max={255} step={1}
-                    onChange={setBrightnessThreshold}
-                    tip="Brightness level (1–255) that separates the two sides." />
-                ) : (
-                  <Slider label="Threshold" value={contrastThreshold} min={-40} max={40} step={1}
-                    onChange={setContrastThreshold}
-                    tip="Nudge the auto-detected local-contrast split." />
-                )}
-              </div>
-            </div>
-            <div className="row gap-2">
-              <div className="grow">
-                <Slider label="Edge soften" value={splitSoften} min={0} max={8} step={1} onChange={setSplitSoften}
-                  tip="Softens the edge of the generated region mask." />
-              </div>
-              <div className="grow">
-                <label className="row center gap-2 mb-2 mt-2">
-                  <input type="checkbox" checked={smoothOn} onChange={(e) => setSmoothOn(e.target.checked)} />
-                  <span className="sub">Blur first (fewer speckles)</span>
-                </label>
-                {smoothOn && (
-                  <Slider label="Blur radius" value={smoothRadius} min={1} max={6} step={1} onChange={setSmoothRadius}
-                    tip="Blur the canvas before calculating the split, to reduce speckles." />
-                )}
-              </div>
-            </div>
-            <div className="row gap-2 mb-2 center">
-              <button
-                type="button"
-                className="btn sm"
-                onClick={calculateSplit}
-                // splitPreview is cleared by the effect above whenever the canvas or
-                // any split setting changes, so "we have a preview" is exactly "and
-                // nothing has moved since". No second piece of state to keep in sync.
-                disabled={!frame || splitBusy || !!splitPreview}
-              >
-                {splitBusy ? "Calculating…" : splitPreview ? "Up to date" : "Calculate"}
-              </button>
-              {splitPreview && (
-                <span className="sub">Split at {splitPreview.cut}{splitMethod === "luminance" ? " brightness" : " contrast"}</span>
-              )}
-              {!frame && <span className="sub">Put an image on the canvas first</span>}
-            </div>
-            <div className="contrast-split-previews">
-              {SPLIT_SIDES.map((side) => (
-                <button
-                  key={side.id}
-                  type="button"
-                  className={`contrast-split-tile ${maskSide === side.id ? "on" : ""}`}
-                  onClick={() => setMaskSide(side.id)}
-                  disabled={!splitPreview}
-                >
-                  {splitPreview?.[side.id]
-                    ? <img src={splitPreview[side.id]} alt={`${side.label} preview`} />
-                    : <span className="sub">{side.label}</span>}
-                  <span className="contrast-split-label">
-                    {splitMethod === "luminance" ? side.luminance : side.contrast}
-                  </span>
-                </button>
-              ))}
-            </div>
-            <AddToMaskButtons
-              thing="side"
-              maskName={maskName}
-              eraser={false}
-              busy={splitBusy && !!splitPreview}
-              disabled={!splitPreview || splitBusy}
-              onAdd={() => applySplit(maskSide, "active")}
-              onNew={() => applySplit(maskSide, "new")}
-              addTip="Replaces any earlier contrast side in this mask; brush and shape strokes stay."
-            />
-          </div>
-        )}
-
-        {!hasMask && (
-          <p className="hint mb-0 mt-2">Paint a mask to fill an area.</p>
-        )}
-      </Disclose>
-
       {/* ——— 3. Finish ————————————————————————————————— */}
       <Disclose
         title="Finish"
@@ -1082,156 +734,6 @@ export default function CreatePanel() {
           </button>
         </div>
       </Disclose>
-    </div>
-  );
-}
-
-
-// The shape generator's kinds and the one or two settings each exposes. The
-// backend does the work (app/core/tools/masks.py); this only names the knobs.
-const GEN_KINDS = [
-  { id: "blobs", label: "Blobs", tip: "Organic islands from layered noise",
-    params: [{ key: "scale", label: "Scale", min: 2, max: 8, step: 1, def: 4, tip: "Bigger numbers, smaller blobs" }] },
-  { id: "cells", label: "Cells", tip: "A patchwork of cells, some of them selected",
-    params: [
-      { key: "cells", label: "Cells", min: 4, max: 32, step: 1, def: 14, tip: "How many cells the canvas is cut into" },
-      { key: "jitter", label: "Wobble", min: 0, max: 1, step: 0.05, def: 0.35, tip: "How much the cell borders wander" },
-    ] },
-  { id: "stripes", label: "Stripes", tip: "Parallel bands at an angle",
-    params: [
-      { key: "angle", label: "Angle", min: 0, max: 179, step: 1, def: 45 },
-      { key: "count", label: "Bands", min: 1, max: 12, step: 1, def: 5 },
-      { key: "wobble", label: "Wobble", min: 0, max: 1, step: 0.05, def: 0.5, tip: "How much the band edges wander" },
-    ] },
-  { id: "split", label: "Split", tip: "The canvas cut into two or three pieces along a wavy line",
-    params: [
-      { key: "pieces", label: "Pieces", min: 2, max: 3, step: 1, def: 2 },
-      { key: "wave", label: "Wave", min: 0, max: 1, step: 0.05, def: 0.6, tip: "How much the cut wanders" },
-      { key: "orientation", label: "Cut", options: [{ value: "v", label: "Left to right" }, { value: "h", label: "Top to bottom" }], def: "v" },
-    ] },
-  { id: "shapes", label: "Scatter", tip: "Scattered circles and stars, some with holes",
-    params: [
-      { key: "count", label: "Shapes", min: 1, max: 12, step: 1, def: 6 },
-      { key: "holes", label: "Holes", options: [{ value: "yes", label: "Some" }, { value: "no", label: "None" }], def: "yes" },
-    ] },
-];
-
-const randomSeed31 = () => Math.floor(Math.random() * 2 ** 31);
-
-/** The Pattern arm of the Shape tool: a kind, its knobs, a seed, a live
- *  preview, and Add to mask. Every Add is one stroke; Shuffle rerolls. */
-function PatternPanel({ genShape, setGenShape, canvasSize, eraser, addStroke, addMaskWithStroke, maskName }) {
-  const { toast } = useApp();
-  const [preview, setPreview] = useState(null);
-  const [busy, setBusy] = useState(false);
-  const kind = GEN_KINDS.find((k) => k.id === genShape.kind) || GEN_KINDS[0];
-  const w = canvasSize?.w || 512;
-  const h = canvasSize?.h || 512;
-  const params = { ...Object.fromEntries(kind.params.map((p) => [p.key, p.def])), ...(genShape.params || {}) };
-  // What the backend takes: the same keys, with the select-style knobs decoded.
-  const backendParams = () => {
-    const out = { ...params };
-    if ("holes" in out) out.holes = out.holes !== "no";
-    return out;
-  };
-  const body = (pw, ph) => ({
-    kind: genShape.kind, width: pw, height: ph, seed: genShape.seed,
-    coverage: genShape.coverage, soften: genShape.soften, invert: false, params: backendParams(),
-  });
-  const set = (patch) => setGenShape({ ...genShape, ...patch });
-  const setParam = (key, v) => set({ params: { ...params, [key]: v } });
-
-  useEffect(() => {
-    let live = true;
-    const scale = 256 / Math.max(w, h);
-    const t = setTimeout(() => {
-      api.post("/tools/mask", body(Math.max(16, Math.round(w * scale)), Math.max(16, Math.round(h * scale))))
-        .then((d) => { if (live) setPreview(d.mask); })
-        .catch(() => { if (live) setPreview(null); });
-    }, 200);
-    return () => { live = false; clearTimeout(t); };
-  }, [genShape.kind, genShape.seed, genShape.coverage, genShape.soften, JSON.stringify(params), w, h]);
-
-  const add = async (target = "active") => {
-    setBusy(true);
-    try {
-      const d = await api.post("/tools/mask", body(w, h));
-      const { cache } = await maskUrlToCache(d.mask);
-      const stroke = {
-        ...cachedStroke("generated", cache, eraser && target === "active" ? "subtract" : "add"),
-        gen: { kind: genShape.kind, seed: genShape.seed, coverage: genShape.coverage, soften: genShape.soften, params: backendParams() },
-      };
-      if (target === "new") addMaskWithStroke(stroke, kind.label);
-      else addStroke(stroke);
-    } catch (e) { toast(e.message, "error"); }
-    setBusy(false);
-  };
-
-  return (
-    <div className="gen-panel">
-      <div className="seg seg-sm mb-2" role="group" aria-label="Pattern">
-        {GEN_KINDS.map((k) => (
-          <button key={k.id} type="button" className={genShape.kind === k.id ? "on" : ""} title={k.tip}
-            onClick={() => set({ kind: k.id, params: {} })}>{k.label}</button>
-        ))}
-      </div>
-      <div className="gen-body">
-        <div className="gen-knobs">
-          <Slider label="Coverage" value={Math.round(genShape.coverage * 100)} min={5} max={80} step={1}
-            onChange={(v) => set({ coverage: v / 100 })} fmt={(v) => `${v} %`}
-            tip="Roughly how much of the canvas the shape covers." />
-          <Slider label="Soften" value={genShape.soften} min={0} max={24} step={1}
-            onChange={(v) => set({ soften: v })}
-            tip="Blur the shape's edge, so it selects at partial strength there, like a soft brush." />
-          {kind.params.map((p) => (p.options ? (
-            <Select key={p.key} label={p.label} value={String(params[p.key])} options={p.options}
-              onChange={(v) => setParam(p.key, v)} tip={p.tip} />
-          ) : (
-            <Slider key={p.key} label={p.label} value={Number(params[p.key])} min={p.min} max={p.max} step={p.step}
-              onChange={(v) => setParam(p.key, v)} tip={p.tip} />
-          )))}
-          <div className="row center gap-2">
-            <Num label="Seed" value={genShape.seed} onChange={(v) => set({ seed: Math.max(0, Math.round(Number(v) || 0)) })}
-              tip="The same seed and settings give the same shape." />
-            <button type="button" className="btn sm" onClick={() => set({ seed: randomSeed31() })} title="A different shape with the same settings">Shuffle</button>
-          </div>
-        </div>
-        <div className="gen-preview" title="What Add to mask will add, white where the mask goes">
-          {preview ? <img src={preview} alt="" /> : <span className="sub">…</span>}
-        </div>
-      </div>
-      <AddToMaskButtons
-        thing="shape"
-        maskName={maskName}
-        eraser={eraser}
-        busy={busy}
-        onAdd={() => add("active")}
-        onNew={() => add("new")}
-      />
-    </div>
-  );
-}
-
-/** The pair every way of producing an area ends in: into the mask being
- *  painted, or into a mask of its own. Other masks are left as they are --
- *  a composition is several masks on at once, and the bar already says so. */
-function AddToMaskButtons({ onAdd, onNew, eraser, busy, disabled, maskName, thing, addTip }) {
-  const addText = eraser ? `Cut this ${thing} out of ${maskName}` : `Add this ${thing} to ${maskName}`;
-  return (
-    <div className="add-pair mt-2">
-      <Tooltip text={addTip ? `${addText}. ${addTip}` : addText}>
-        <button type="button" className="btn sm primary" onClick={onAdd} disabled={busy || disabled}>
-          <AddIcon /> {busy ? "Working…" : eraser ? "Cut from mask" : "Add to mask"}
-        </button>
-      </Tooltip>
-      <Tooltip text={eraser
-        ? "Erase cuts out of a mask; there is nothing to cut from a new one"
-        : `Put this ${thing} in a mask of its own, on and selected. Other masks stay as they are.`}
-      >
-        <button type="button" className="btn sm" onClick={onNew} disabled={busy || disabled || eraser}>
-          <NewMaskIcon /> New mask
-        </button>
-      </Tooltip>
     </div>
   );
 }
