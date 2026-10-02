@@ -46,10 +46,10 @@ export default function BendPipeline({
       { id: "late", label: "late", ids: stage.ids.slice(half) },
       ...(attn.length ? [{ id: "attn", label: "attention", ids: attn.map((n) => n.id) }] : []),
     ];
-    // The pick that says exactly what this bend holds in this stage, if any.
-    const held = stage.ids.filter((id) => focusTargets?.has(id));
-    const matches = (q) => q.ids.length === held.length && q.ids.every((id) => focusTargets?.has(id));
-    const current = held.length ? quick.find(matches)?.id : null;
+    // A pick is a toggle: when the bend already holds all of its layers, the
+    // same click takes them away again. So "all" on reads as early and late on
+    // too, and clicking early then leaves just the late half.
+    const holds = (q) => q.ids.length > 0 && q.ids.every((id) => focusTargets?.has(id));
     return (
       <div className="bend-pipe-layers" key={`${stage.group}-layers`}>
         <div className="row wrap gap-2">
@@ -73,12 +73,16 @@ export default function BendPipeline({
         </div>
         <div className="row wrap gap-2 mt-1">
           <span className="sub">take</span>
-          {quick.map((q) => (
-            <button type="button" key={q.id}
-              className={`btn ghost sm ${current === q.id ? "on" : ""}`.trim()}
-              aria-pressed={current === q.id}
-              onClick={() => pick(q.ids, { force: true })}>{q.label}</button>
-          ))}
+          {quick.map((q) => {
+            const on = holds(q);
+            return (
+              <button type="button" key={q.id}
+                className={`btn ghost sm ${on ? "on" : ""}`.trim()}
+                aria-pressed={on}
+                title={on ? `Drop the ${q.label} layers from this bend` : `Add the ${q.label} layers to this bend`}
+                onClick={() => pick(q.ids, { force: !on })}>{q.label}</button>
+            );
+          })}
           <span className="sub">
             {layers.length === 1 ? "1 layer" : `${layers.length} layers, numbered in order`}
           </span>

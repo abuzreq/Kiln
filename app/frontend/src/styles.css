@@ -686,6 +686,21 @@ body {
 .num-field input:focus { outline: none; }
 .bend-inspector-help { margin: 0; line-height: 1.5; }
 .bend-inspector-section { display: flex; flex-direction: column; gap: var(--s-2); }
+/* Where: chips never widen the panel -- a long layer name truncates, and a long
+   list of single layers scrolls inside its own box. */
+.bend-inspector { max-width: 360px; }
+.where { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.where-chip { max-width: 100%; min-width: 0; padding: 4px 10px; }
+.where-chip > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.where-count { opacity: 0.8; font-weight: 400; }
+.where-toggle { align-self: flex-start; }
+.where-list {
+  display: flex; flex-direction: column; gap: 6px; max-height: 180px; overflow-y: auto;
+  padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg-1);
+}
+.where-level { display: grid; grid-template-columns: 74px minmax(0, 1fr); gap: 6px; align-items: start; }
+.where-level-name { font-size: var(--fs-xs); color: var(--text-faint); padding-top: 5px; }
+.where-level-chips { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
 .bend-inspector-foot { display: flex; justify-content: flex-end; gap: var(--s-2); border-top: 1px solid var(--line); padding-top: var(--s-2); }
 .bend-cat {
   display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 4px;
@@ -757,7 +772,12 @@ body {
    that lead with what they do, then your own as rows. */
 .bend-presets-pop { width: min(720px, calc(100vw - 32px)); max-height: min(78vh, 760px); overflow-y: auto; }
 .bend-presets { display: flex; flex-direction: column; gap: var(--s-3); }
-.bend-presets section { display: flex; flex-direction: column; gap: var(--s-2); }
+.preset-tabs { gap: var(--s-2); flex-wrap: wrap; }
+.preset-filter {
+  flex: 1 1 160px; max-width: 260px; padding: 5px 10px; border-radius: var(--radius-sm);
+  border: 1px solid var(--line); background: var(--bg-1); color: var(--text); font: inherit; font-size: var(--fs-sm);
+}
+.preset-filter:focus { outline: none; border-color: var(--accent); }
 .preset-save { display: flex; gap: var(--s-2); }
 .preset-save-field {
   flex: 1; display: flex; align-items: center; gap: var(--s-2); min-width: 0;
@@ -768,7 +788,6 @@ body {
 .preset-save-field input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--text); padding: 7px 0; }
 .preset-save-field input:focus { outline: none; }
 .preset-note { margin: calc(-1 * var(--s-2)) 0 0; font-size: var(--fs-xs); }
-.preset-head { margin-bottom: 0; }
 .preset-grid {
   list-style: none; margin: 0; padding: 0;
   display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: var(--s-2);
@@ -789,11 +808,10 @@ body {
 .preset-stages span.on { background: var(--stage); }
 .preset-rows {
   list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: var(--radius-sm);
-  max-height: 220px; overflow-y: auto;
 }
 .preset-rows li { display: flex; align-items: center; gap: var(--s-2); padding: 6px 10px; }
 .preset-rows li + li { border-top: 1px solid var(--line); }
-.preset-row-name { font-weight: 600; white-space: nowrap; }
+.preset-row-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; flex-shrink: 0; }
 .preset-row-sum { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* Compare (BendCompare.jsx). */

@@ -83,7 +83,6 @@ export function BendWorkspace({ stack, setStack }) {
   const { toast, modelPath, ops: sharedOps, setPlayTab, bendCompare, setBendCompare } = useApp();
   const { sampleParams, commitFrame, applyCard } = usePlay();
   const [graph, setGraph] = useState(null);
-  const [groups, setGroups] = useState([]);
   // The focused bend is the one the map edits. Focus and expansion are the same
   // thing, so there is always exactly one bend the map is talking about.
   const [focusedBendId, setFocusedBendId] = useState(null);
@@ -116,8 +115,6 @@ export function BendWorkspace({ stack, setStack }) {
   const [gifBusy, setGifBusy] = useState(false);
 
   useEffect(() => {
-    // groups only ever come from this endpoint; the op list is shared via context
-    api.get("/craft/ops").then((d) => setGroups(d.groups || [])).catch(() => {});
     api.get("/craft/bends").then(setPresets).catch(() => {});
   }, []);
 
@@ -646,12 +643,10 @@ export function BendWorkspace({ stack, setStack }) {
               opDef={opMap[focusedBend?.op]}
               ops={ops}
               nodes={nodes}
-              groups={groups}
               note={note?.bendId === focusedBendId ? note.groups : null}
               update={updateBend}
               remove={removeBend}
               duplicate={duplicateBend}
-              toggleGroup={toggleGroup}
             />
           </div>
 

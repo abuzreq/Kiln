@@ -5,6 +5,7 @@ import RunWindow, { RunWindowMini } from "./RunWindow.jsx";
 import DualRange from "./DualRange.jsx";
 import OpPicker from "./OpPicker.jsx";
 import { explicitTargets, isGroup, resolveTargets } from "../bendTargets.js";
+import { depthOf } from "./unetLayout.js";
 import { bendAmount } from "../bendSynopsis.js";
 
 function defaultsFor(opDef) {
@@ -138,6 +139,109 @@ function PairControl({ kind, a, b, opDef, params, setParam, setParams }) {
   );
 }
 
+// Past this many single layers, Where sums them up by stage instead: eighteen
+// chips ("the whole network minus one layer per stage") buried the panel.
+const LIST_EACH_MAX = 6;
+const STAGE_NAME = { encoder: "encoder", mid: "bottleneck", decoder: "decoder" };
+
+/** The level a layer sits on, named as the Levels map names its capsules. */
+function levelOf(n) {
+  if (n.stage === "mid") return { key: "mid", label: "bottleneck" };
+  const side = n.stage === "encoder" ? "enc" : n.stage === "decoder" ? "dec" : n.stage;
+  return { key: `${n.stage}:${depthOf(n)}`, label: `${side} ${depthOf(n)}` };
+}
+
+/** Buckets of `nodes` by `keyOf`, in network order, with the chosen ids in each. */
+function bucket(nodes, chosen, keyOf) {
+  const out = [];
+  const byKey = new Map();
+  (nodes || []).forEach((n) => {
+    const k = keyOf(n);
+    let entry = byKey.get(k.key);
+    if (!entry) { entry = { ...k, ids: [], total: 0 }; byKey.set(k.key, entry); out.push(entry); }
+    entry.total += 1;
+    if (chosen.has(n.id)) entry.ids.push(n.id);
+  });
+  return out.filter((e) => e.ids.length);
+}
+
+/** Where a bend acts, as chips that each take their layers away on click:
+ *  whole groups first, then single layers -- one by one while there are few,
+ *  as one chip per stage when there are many, with every layer (by level)
+ *  one click away in a box of its own. */
+function WhereChips({ targets, nodes, onChange }) {
+  const [listEach, setListEach] = useState(false);
+  const labels = Object.fromEntries((nodes || []).map((n) => [n.id, n.label || n.id]));
+  const groups = targets.filter(isGroup);
+  const explicit = explicitTargets({ targets }, nodes);
+  const drop = (ids) => onChange(targets.filter((t) => !ids.includes(t)));
+  const many = explicit.length > LIST_EACH_MAX;
+  const chosen = new Set(explicit);
+  const stages = many
+    ? bucket(nodes, chosen, (n) => ({ key: n.stage, label: STAGE_NAME[n.stage] || n.stage }))
+    : [];
+  const levels = many && listEach ? bucket(nodes, chosen, levelOf) : [];
+  const names = (ids) => ids.map((id) => labels[id] || id).join(", ");
+
+  // Under a level heading the chip only needs the layer's role in it:
+  // "enc 1 · down" under "enc 2" reads as "down" (its output is at that level).
+  const single = (t, short = false) => {
+    const full = labels[t] || t;
+    const text = short && full.includes(" · ") ? full.split(" · ").slice(1).join(" · ") : full;
+    return (
+      <button type="button" key={t} className="pill chip on where-chip" title={`${full} (${t}) — click to drop`}
+        onClick={() => drop([t])}>
+        <span>{text}</span> ✕
+      </button>
+    );
+  };
+
+  if (!groups.length && !explicit.length) return null;
+  return (
+    <div className="where">
+      <div className="row wrap gap-1">
+        {groups.map((g) => (
+          <button type="button" key={g} className="pill chip on where-chip"
+            title={`Every ${g === "all" ? "" : `${g} `}layer, as a group — click to drop`}
+            onClick={() => drop([g])}>
+            <span>{g}</span> ✕
+          </button>
+        ))}
+        {!many && explicit.map((t) => single(t))}
+        {stages.map((st) => (
+          <button type="button" key={st.key} className="pill chip on where-chip"
+            title={`${names(st.ids)} — click to drop all ${st.ids.length}`}
+            onClick={() => drop(st.ids)}>
+            <span>{st.label}</span>
+            <span className="tnum where-count">
+              {st.ids.length === st.total ? `all ${st.total}` : `${st.ids.length}/${st.total}`}
+            </span>
+            ✕
+          </button>
+        ))}
+      </div>
+      {many && (
+        <>
+          <button type="button" className="btn ghost xs where-toggle" aria-expanded={listEach}
+            onClick={() => setListEach((v) => !v)}>
+            {listEach ? "Hide single layers ▾" : `Show all ${explicit.length} layers ▸`}
+          </button>
+          {listEach && (
+            <div className="where-list">
+              {levels.map((lv) => (
+                <div key={lv.key} className="where-level">
+                  <span className="where-level-name tnum">{lv.label}</span>
+                  <span className="where-level-chips">{lv.ids.map((t) => single(t, true))}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 /** One bend in the stack. It only says what the bend is -- op, amount, where
  *  it hooks in, when it acts -- and picks it; editing happens in the panel
  *  beside the map, which has room the card never did. Its states are the
@@ -209,7 +313,7 @@ function BendCard({ b, i, opDef, nodes, focused, dragging, onFocus, onKeyMove, d
  *  workspace's, so taking a group here behaves exactly as it did on the chips
  *  that used to sit above the map. */
 export function BendInspector({
-  b, index, opDef, ops, nodes, groups, note, update, remove, duplicate, toggleGroup,
+  b, index, opDef, ops, nodes, note, update, remove, duplicate,
 }) {
   if (!b) {
     return (
@@ -224,8 +328,6 @@ export function BendInspector({
   const amountKey = opDef?.amount_param;
   const amountDef = amountKey ? (opDef?.params || []).find((p) => p.name === amountKey) : null;
   const extraParams = (opDef?.params || []).filter((p) => p.name !== amountKey);
-  const labels = Object.fromEntries((nodes || []).map((n) => [n.id, n.label || n.id]));
-  const explicit = explicitTargets(b, nodes);
   const targets = b.targets || [];
   const hit = resolveTargets(targets, nodes).size;
   const setParam = (name, v) => update(b.id, { params: { ...b.params, [name]: v } });
@@ -305,35 +407,15 @@ export function BendInspector({
         {targets.length === 0 && (
           <p className="callout mb-0">
             No layers chosen yet — this bend has no effect until you pick at least one. Click the
-            map, or take a group below.
+            map to choose where it acts.
           </p>
         )}
-        {explicit.length > 0 && (
-          <div className="row wrap gap-1">
-            {explicit.map((t) => (
-              <button type="button" key={t} className="pill chip on" title={t}
-                onClick={() => update(b.id, { targets: targets.filter((x) => x !== t) })}>
-                {labels[t] || t} ✕
-              </button>
-            ))}
-          </div>
-        )}
+        <WhereChips key={b.id} targets={targets} nodes={nodes}
+          onChange={(next) => update(b.id, { targets: next })} />
         {note?.length > 0 && (
           <p className="sub mb-0">
             Expanded <b>{note.join(", ")}</b> into single layers so you could switch one off.
-            Take the group again to fold it back.
           </p>
-        )}
-        {groups?.length > 0 && (
-          <div className="row wrap center gap-1">
-            <span className="sub">Take</span>
-            {groups.map((g) => (
-              <button type="button" key={g}
-                className={`pill chip ${targets.includes(g) ? "on" : ""}`.trim()}
-                aria-pressed={targets.includes(g)}
-                onClick={() => toggleGroup(g)}>{g}</button>
-            ))}
-          </div>
         )}
       </div>
 

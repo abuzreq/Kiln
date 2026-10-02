@@ -1,4 +1,5 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useState } from "react";
+import { Seg } from "./ui.jsx";
 import { RunWindowMini } from "./RunWindow.jsx";
 import { resolveTargets } from "../bendTargets.js";
 import {
@@ -75,9 +76,35 @@ function StarterCard({ p, ops, nodes, onLoad, onAdd }) {
   );
 }
 
+// Saved and Starters are tabs. Shown together, six starter cards filled the
+// first screen and a long saved list became a scroll box inside a scrolling
+// popover. Someone with saved stacks of their own is mostly after those.
+const TAB_KEY = "kiln.bendPresetsTab";
+// A filter box appears once the saved list is longer than a glance.
+const FILTER_FROM = 7;
+
+function loadTab(hasSaved) {
+  try {
+    const v = localStorage.getItem(TAB_KEY);
+    if (v === "saved" || v === "starters") return v;
+  } catch { /* private window */ }
+  return hasSaved ? "saved" : "starters";
+}
+
 export default function BendPresets({
   starters, saved, ops, nodes, saveName, setSaveName, canSave, onSave, onLoad, onAdd,
 }) {
+  const [tab, setTabState] = useState(() => loadTab(saved.length > 0));
+  const [filter, setFilter] = useState("");
+  const setTab = (t) => {
+    setTabState(t);
+    try { localStorage.setItem(TAB_KEY, t); } catch { /* the session keeps it */ }
+  };
+  const q = filter.trim().toLowerCase();
+  const shown = q
+    ? saved.filter((p) => `${p.name} ${bendPresetSummary(p, ops)}`.toLowerCase().includes(q))
+    : saved;
+
   return (
     <div className="bend-presets">
       <form
@@ -97,38 +124,57 @@ export default function BendPresets({
       </form>
       <p className="sub preset-note">Saved stacks show up in Create too.</p>
 
-      {starters.length > 0 && (
-        <section>
-          <div className="row between center preset-head">
-            <div className="section-title mb-0">Starters</div>
-            <span className="sub">each changes one thing · load it, compare, then edit</span>
-          </div>
-          <ul className="preset-grid">
-            {starters.map((p) => (
-              <StarterCard key={p.name} p={p} ops={ops} nodes={nodes} onLoad={onLoad} onAdd={onAdd} />
-            ))}
-          </ul>
-        </section>
+      <div className="row between center preset-tabs">
+        <Seg
+          ariaLabel="Which presets"
+          size="sm"
+          value={tab}
+          onChange={setTab}
+          tabs={[
+            { id: "saved", label: `Saved (${saved.length})`, tip: "Stacks you saved" },
+            { id: "starters", label: `Starters (${starters.length})`, tip: "Kiln's recipes: each changes one thing" },
+          ]}
+        />
+        {tab === "starters" && <span className="sub">load one, compare, then edit</span>}
+        {tab === "saved" && saved.length >= FILTER_FROM && (
+          <input
+            className="preset-filter"
+            type="search"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder={`Filter ${saved.length} saved…`}
+            aria-label="Filter saved presets by name or what they do"
+          />
+        )}
+      </div>
+
+      {tab === "starters" && (
+        <ul className="preset-grid">
+          {starters.map((p) => (
+            <StarterCard key={p.name} p={p} ops={ops} nodes={nodes} onLoad={onLoad} onAdd={onAdd} />
+          ))}
+        </ul>
       )}
 
-      <section>
-        <div className="section-title preset-head">Saved</div>
-        {saved.length === 0 ? (
-          <p className="sub mb-0">Nothing saved yet. Name the stack above to keep it.</p>
-        ) : (
-          <ul className="preset-rows">
-            {saved.map((p) => (
-              <li key={p.name} title={bendPresetSynopsis(p, ops)}>
-                <span className="preset-row-name">{p.name}</span>
-                <span className="sub preset-row-sum">{bendPresetSummary(p, ops)}</span>
-                <button type="button" className="btn xs ghost" onClick={() => onAdd(p.name)}
-                  aria-label={`Add ${p.name} to the stack`} title="Add to stack">+</button>
-                <button type="button" className="btn xs" onClick={() => onLoad(p.name)}>Load</button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+      {tab === "saved" && (saved.length === 0 ? (
+        <p className="sub mb-0">
+          Nothing saved yet. Name the stack above to keep it, or start from a starter.
+        </p>
+      ) : shown.length === 0 ? (
+        <p className="sub mb-0">No saved preset matches “{filter.trim()}”.</p>
+      ) : (
+        <ul className="preset-rows">
+          {shown.map((p) => (
+            <li key={p.name} title={`${p.name}\n\n${bendPresetSynopsis(p, ops)}`}>
+              <span className="preset-row-name">{p.name}</span>
+              <span className="sub preset-row-sum">{bendPresetSummary(p, ops)}</span>
+              <button type="button" className="btn xs ghost" onClick={() => onAdd(p.name)}
+                aria-label={`Add ${p.name} to the stack`} title="Add to stack">+</button>
+              <button type="button" className="btn xs" onClick={() => onLoad(p.name)}>Load</button>
+            </li>
+          ))}
+        </ul>
+      ))}
     </div>
   );
 }
