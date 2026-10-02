@@ -7,9 +7,12 @@
 
 export const GROUPS = ["all", "encoder", "mid", "decoder", "attention", "blocks"];
 
-/** Node ids a single group name expands to, in map order. */
+/** Node ids a single group name expands to, in map order.
+ *
+ *  Only the main points: skips and the layers inside blocks (`extra`) are
+ *  targets you pick one by one, as the backend's groups never include them. */
 export function expandGroup(group, nodes) {
-  const all = nodes || [];
+  const all = (nodes || []).filter((n) => !n.extra);
   switch (group) {
     case "all": return all.map((n) => n.id);
     case "encoder":

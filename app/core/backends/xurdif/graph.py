@@ -305,9 +305,14 @@ def layer_graph(model: nn.Module, image_size: int = 64) -> dict:
         dst = by_id.get(s["to"])
         if not src or not dst:
             continue
+        # Named by resolution, not by block index: "dec 2" in a layer label
+        # counts decoder blocks from the bottom, while the map names levels by
+        # resolution, so "enc 1 → dec 2" read as a skip to the wrong level.
+        df = src["down_factor"]
+        res = "full res" if not df or df <= 1 else f"1/{round(df)} res"
         skip_nodes.append({
             "id": s["id"],
-            "label": f"skip {src['label'].split(' · ')[0]} → {dst['label'].split(' · ')[0]}",
+            "label": f"skip · {res}",
             "type": "skip",
             "stage": "skip",
             "from": s["from"],

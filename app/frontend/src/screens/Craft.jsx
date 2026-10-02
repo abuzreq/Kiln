@@ -36,6 +36,7 @@ const COMPARE_MODE_KEY = "kiln.bendCompareMode";
 // Earlier tries kept for the session. Each holds two small images and a stack.
 const HISTORY_MAX = 6;
 const GRAIN_KEY = "kiln.bendMapDensity";
+const INNER_KEY = "kiln.bendMapInner";
 
 function loadPref(key, list, fallback) {
   try {
@@ -46,15 +47,15 @@ function loadPref(key, list, fallback) {
 
 const MAP_HINT = {
   simple: {
-    focus: "Click a stage to bend all of it, or + to pick single layers inside it.",
+    focus: "Click a stage to bend all of it, or pick single layers inside it.",
     empty: "Click a stage to start a bend on it.",
   },
   overview: {
-    focus: "Click a level to target its layers, + to open it up. Solid rings: this bend. Dashed: the rest.",
+    focus: "Click a level to target its layers, + to open it up, a dashed arc to bend that skip alone. Solid rings: this bend. Numbers: the others.",
     empty: "Click a level to start a bend on it.",
   },
   layers: {
-    focus: "Click to target, shift+click for a range through the network, drag a box (alt+drag removes). Solid rings: this bend. Dashed: the rest.",
+    focus: "Click to target, shift+click for a range, drag a box (alt+drag removes), click a dashed arc to bend that skip alone. Solid rings: this bend. Numbers: the others.",
     empty: "Click a layer to start a bend on it.",
   },
 };
@@ -123,6 +124,11 @@ export function BendWorkspace({ stack, setStack }) {
   };
   const setView = (v) => { setViewState(v); remember(VIEW_KEY, v); };
   const setGrain = (g) => { setGrainState(g); remember(GRAIN_KEY, g); };
+  // The layers inside blocks, for those who want them: off unless asked for.
+  const [showInner, setShowInnerState] = useState(() => {
+    try { return localStorage.getItem(INNER_KEY) === "1"; } catch { return false; }
+  });
+  const setShowInner = (v) => { setShowInnerState(v); remember(INNER_KEY, v ? "1" : "0"); };
   const setCompareMode = (m) => { setCompareModeState(m); remember(COMPARE_MODE_KEY, m); };
   const shown = view === "simple" ? "simple" : grain;
 
@@ -170,19 +176,27 @@ export function BendWorkspace({ stack, setStack }) {
   }, [stack, focusedBendId]);
 
   const nodes = graph?.nodes || [];
+  // Everything a bend can target: the main points, plus each skip connection
+  // and the layers inside blocks (`extra`). Lookups and highlights use all of
+  // them; counts, groups and the map's geometry stay on the main points.
+  const points = useMemo(() => [
+    ...nodes,
+    ...(graph?.skips || []).map((s) => ({ ...s, extra: "skip" })),
+    ...(graph?.inner || []).map((n) => ({ ...n, extra: "inner" })),
+  ], [graph]);
   const focusedBend = stack.find((b) => b.id === focusedBendId) || null;
   const focusIndex = stack.findIndex((b) => b.id === focusedBendId);
 
   const focusTargets = useMemo(
-    () => resolveTargets(focusedBend?.targets, nodes),
-    [focusedBend, nodes],
+    () => resolveTargets(focusedBend?.targets, points),
+    [focusedBend, points],
   );
   // Which other bend holds each layer, by its number in the stack, so editing
   // one bend never hides the others -- and the map can say which one it is.
   // Bends that are off are included and flagged, and drawn faded.
   const holders = useMemo(
-    () => holdersOf(stack, nodes, focusedBendId),
-    [stack, focusedBendId, nodes],
+    () => holdersOf(stack, points, focusedBendId),
+    [stack, focusedBendId, points],
   );
 
   const updateBend = (id, patch) => setStack(stack.map((b) => (b.id === id ? { ...b, ...patch } : b)));
@@ -229,7 +243,7 @@ export function BendWorkspace({ stack, setStack }) {
   // The map is the picker: clicking layers writes straight into the focused bend.
   const onMapToggle = (ids, opts) => {
     if (!focusedBend) return;
-    const { targets, expanded } = toggleNodeTargets(focusedBend, ids, nodes, opts);
+    const { targets, expanded } = toggleNodeTargets(focusedBend, ids, points, opts);
     updateBend(focusedBend.id, { targets });
     setNote(expanded.length ? { bendId: focusedBend.id, groups: expanded } : null);
   };
@@ -296,7 +310,7 @@ export function BendWorkspace({ stack, setStack }) {
   const exportBends = async () => {
     if (!stack.length) { toast("Nothing to export", "error"); return; }
     const resolved = stack.filter((b) => b.active).map((b) => ({
-      ...b, targets: [...resolveTargets(b.targets, nodes)],
+      ...b, targets: [...resolveTargets(b.targets, points)],
     }));
     if (!resolved.length) { toast("No active bends to export", "error"); return; }
     try {
@@ -308,8 +322,13 @@ export function BendWorkspace({ stack, setStack }) {
       }, `${name}.json`);
       let report = null;
       try { report = JSON.parse(headers?.get("X-Kiln-Export") || "null"); } catch { /* optional */ }
+      // Skips and q/k/v parts are Kiln's own: no other tool has a path for them.
+      const left = report?.kiln_only_targets?.length || 0;
+      const leftOut = left ? ` — left out ${left} skip/q·k·v target${left === 1 ? "" : "s"} no other tool can address` : "";
       if (report?.schedule_flattened) {
-        toast(`Exported ${report.bends_written} layer bends — the format has one schedule for the whole file, so the per-bend windows were merged`, "warn");
+        toast(`Exported ${report.bends_written} layer bends — the format has one schedule for the whole file, so the per-bend windows were merged${leftOut}`, "warn");
+      } else if (left) {
+        toast(`Exported ${report.bends_written} layer bends${leftOut}`, "warn");
       } else {
         toast(`Exported ${report?.bends_written ?? resolved.length} layer bends`, "success");
       }
@@ -321,7 +340,7 @@ export function BendWorkspace({ stack, setStack }) {
     try {
       const doc = JSON.parse(await file.text());
       const { bends, report } = await api.post("/craft/bends/import", {
-        doc, layers: nodes.map((n) => n.id),
+        doc, layers: points.map((n) => n.id),
       });
       if (!bends.length) { toast("That file had no bends this build understands", "error"); return; }
       const loaded = bends.map((b) => ({ ...b, id: newBendId() }));
@@ -534,6 +553,14 @@ export function BendWorkspace({ stack, setStack }) {
             <Seg ariaLabel="How much detail the map shows" tabs={GRAINS} value={grain}
                  onChange={setGrain} size="sm" />
           )}
+          {view === "structure" && grain === "layers" && graph?.inner?.length > 0 && (
+            <button type="button" className={`btn sm ${showInner ? "on" : ""}`.trim()}
+              aria-pressed={showInner}
+              title="Show the layers inside each block and attention: conv, norm, film, q, k, v"
+              onClick={() => setShowInner(!showInner)}>
+              Inside blocks
+            </button>
+          )}
           <span className="bend-toolbar-sep" aria-hidden="true" />
           <Popover
             label="Bend presets"
@@ -632,6 +659,7 @@ export function BendWorkspace({ stack, setStack }) {
                   holders={holders}
                   hasFocus={!!focusedBend}
                   density={grain}
+                  showInner={showInner}
                   onToggle={onMapToggle}
                   onCreateFromNode={onCreateFromNode}
                 />
@@ -643,6 +671,7 @@ export function BendWorkspace({ stack, setStack }) {
               opDef={opMap[focusedBend?.op]}
               ops={ops}
               nodes={nodes}
+              points={points}
               note={note?.bendId === focusedBendId ? note.groups : null}
               update={updateBend}
               remove={removeBend}
@@ -656,6 +685,7 @@ export function BendWorkspace({ stack, setStack }) {
           <BendEditor
             ops={ops}
             nodes={nodes}
+            points={points}
             stack={stack}
             setStack={setStack}
             focusedId={focusedBendId}

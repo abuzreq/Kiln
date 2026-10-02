@@ -146,9 +146,26 @@ const STAGE_NAME = { encoder: "encoder", mid: "bottleneck", decoder: "decoder" }
 
 /** The level a layer sits on, named as the Levels map names its capsules. */
 function levelOf(n) {
+  if (n.extra === "skip") return { key: "skip", label: "skips" };
   if (n.stage === "mid") return { key: "mid", label: "bottleneck" };
   const side = n.stage === "encoder" ? "enc" : n.stage === "decoder" ? "dec" : n.stage;
   return { key: `${n.stage}:${depthOf(n)}`, label: `${side} ${depthOf(n)}` };
+}
+
+/** The targets beyond the main layers, said briefly: "+1 skip +2 inner". */
+export function extrasText(targets, nodes, points) {
+  if (!points?.length) return "";
+  const main = new Set((nodes || []).map((n) => n.id));
+  const kind = Object.fromEntries(points.filter((p) => p.extra).map((p) => [p.id, p.extra]));
+  let skips = 0;
+  let inner = 0;
+  resolveTargets(targets, points).forEach((id) => {
+    if (main.has(id)) return;
+    if (kind[id] === "skip") skips += 1;
+    else if (kind[id] === "inner") inner += 1;
+  });
+  return [skips && `+${skips} skip${skips === 1 ? "" : "s"}`, inner && `+${inner} inner`]
+    .filter(Boolean).join(" ");
 }
 
 /** Buckets of `nodes` by `keyOf`, in network order, with the chosen ids in each. */
@@ -178,7 +195,9 @@ function WhereChips({ targets, nodes, onChange }) {
   const many = explicit.length > LIST_EACH_MAX;
   const chosen = new Set(explicit);
   const stages = many
-    ? bucket(nodes, chosen, (n) => ({ key: n.stage, label: STAGE_NAME[n.stage] || n.stage }))
+    ? bucket(nodes, chosen, (n) => (n.extra === "skip" ? { key: "skip", label: "skips" }
+      : n.extra === "inner" ? { key: "inner", label: "inside blocks" }
+        : { key: n.stage, label: STAGE_NAME[n.stage] || n.stage }))
     : [];
   const levels = many && listEach ? bucket(nodes, chosen, levelOf) : [];
   const names = (ids) => ids.map((id) => labels[id] || id).join(", ");
@@ -246,10 +265,10 @@ function WhereChips({ targets, nodes, onChange }) {
  *  it hooks in, when it acts -- and picks it; editing happens in the panel
  *  beside the map, which has room the card never did. Its states are the
  *  ones that change what a run does: off, and on but hooked into nothing. */
-function BendCard({ b, i, opDef, nodes, focused, dragging, onFocus, onKeyMove, dragProps }) {
+function BendCard({ b, i, opDef, nodes, points, focused, dragging, onFocus, onKeyMove, dragProps }) {
   const amount = bendAmount(b, opDef);
   const targets = b.targets || [];
-  const hits = resolveTargets(targets, nodes).size;
+  const hits = resolveTargets(targets, points || nodes).size;
   // Before the graph loads every bend resolves to nothing; only warn once the
   // layers are known, or when there is genuinely nothing chosen.
   const idle = targets.length === 0 || (nodes?.length > 0 && hits === 0);
@@ -299,7 +318,8 @@ function BendCard({ b, i, opDef, nodes, focused, dragging, onFocus, onKeyMove, d
         {idle && b.active ? (
           <span className="bend-card-warn">No layers yet — no effect</span>
         ) : (
-          <BendFootprint nodes={nodes} targets={targets} label={where} />
+          <BendFootprint nodes={nodes} targets={targets} label={where}
+            extra={extrasText(targets, nodes, points)} />
         )}
         <RunWindowMini start={b.step_start ?? 0} end={b.step_end ?? 1} hot={focused} />
       </div>
@@ -313,7 +333,7 @@ function BendCard({ b, i, opDef, nodes, focused, dragging, onFocus, onKeyMove, d
  *  workspace's, so taking a group here behaves exactly as it did on the chips
  *  that used to sit above the map. */
 export function BendInspector({
-  b, index, opDef, ops, nodes, note, update, remove, duplicate,
+  b, index, opDef, ops, nodes, points, note, update, remove, duplicate,
 }) {
   if (!b) {
     return (
@@ -396,7 +416,9 @@ export function BendInspector({
         <div className="row between center">
           <div className="section-title mb-0">Where</div>
           <div className="row center gap-2">
-            <span className="sub tnum">{hit} / {nodes?.length || 0} layers</span>
+            <span className="sub tnum">
+              {hit} / {nodes?.length || 0} layers {extrasText(targets, nodes, points)}
+            </span>
             {targets.length > 0 && (
               <button type="button" className="btn ghost xs" onClick={() => update(b.id, { targets: [] })}>
                 Clear
@@ -410,7 +432,7 @@ export function BendInspector({
             map to choose where it acts.
           </p>
         )}
-        <WhereChips key={b.id} targets={targets} nodes={nodes}
+        <WhereChips key={b.id} targets={targets} nodes={points || nodes}
           onChange={(next) => update(b.id, { targets: next })} />
         {note?.length > 0 && (
           <p className="sub mb-0">
@@ -439,7 +461,7 @@ export function BendInspector({
 }
 
 export default function BendEditor({
-  ops, nodes, stack, setStack, focusedId, setFocusedId, addBend,
+  ops, nodes, points, stack, setStack, focusedId, setFocusedId, addBend,
   headExtra, beforeStack,
 }) {
   const opMap = Object.fromEntries(ops.map((o) => [o.name, o]));
@@ -527,6 +549,7 @@ export default function BendEditor({
               i={i}
               opDef={opMap[b.op]}
               nodes={nodes}
+              points={points}
               focused={focusedId === b.id}
               dragging={drag?.from === i}
               onFocus={setFocusedId}

@@ -11,7 +11,7 @@ const SMALL = { colW: 8, rowH: 6, marginX: 5, top: 5, bottom: 6, rMin: 2, rMax: 
 
 /** `label` replaces the layer count, for a bend whose targets have a name
  *  (one whole group) that says more than a number does. */
-export default function BendFootprint({ nodes, targets, label }) {
+export default function BendFootprint({ nodes, targets, label, extra }) {
   const layout = useMemo(() => layoutNodes(nodes, SMALL), [nodes]);
   const hit = useMemo(() => resolveTargets(targets, nodes), [targets, nodes]);
   if (!layout) return null;
@@ -36,7 +36,8 @@ export default function BendFootprint({ nodes, targets, label }) {
         ))}
       </svg>
       <span className={`sub bend-footprint-count ${n ? "" : "none"}`}>
-        {label || (n === 0 ? "no layers" : n === 1 ? "1 layer" : `${n} layers`)}
+        {label || (n === 0 ? (extra ? "" : "no layers") : n === 1 ? "1 layer" : `${n} layers`)}
+        {extra && <span className="bend-footprint-extra"> {extra}</span>}
       </span>
     </div>
   );

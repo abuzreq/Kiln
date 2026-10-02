@@ -30,9 +30,26 @@ const DRAG_SLOP = 4;
 // may scale up this far to finish filling the card, and no further -- beyond
 // it the labels start to look like a different typeface from the rest of Kiln.
 const MAX_SCALE = 1.4;
+// The layers inside a block, drawn as small dots fanned out just under it.
+const SAT_R = 3.4;
+const SAT_STEP = 9;
+const SAT_GAP = 11;
+// Room the satellites need between bands, so they never touch the next row.
+const INNER_ROWS = { rowH: 58, wrapStep: 44 };
+
+/** Greedy word wrap for the hover card: SVG text does not wrap by itself. */
+function wrapText(text, max = 36) {
+  const lines = [];
+  let cur = "";
+  (text || "").split(" ").forEach((w) => {
+    if (cur && `${cur} ${w}`.length > max) { lines.push(cur); cur = w; } else cur = cur ? `${cur} ${w}` : w;
+  });
+  if (cur) lines.push(cur);
+  return lines;
+}
 
 export default function UnetVisualizer({
-  graph, focusTargets, holders, hasFocus, density = "overview",
+  graph, focusTargets, holders, hasFocus, density = "overview", showInner = false,
   onToggle, onCreateFromNode,
 }) {
   const [hover, setHover] = useState(null);
@@ -68,13 +85,65 @@ export default function UnetVisualizer({
     return () => ro.disconnect();
   }, []);
 
+  // The layers inside blocks are an advanced, Layers-only view: they open the
+  // rows up a little so their dots fit under each block.
+  const innerOn = !!(showInner && density === "layers" && graph?.inner?.length);
   const layout = useMemo(
-    () => layoutStructured(graph?.nodes, avail ? { available: avail } : undefined),
-    [graph, avail],
+    () => layoutStructured(graph?.nodes, {
+      ...(avail ? { available: avail } : {}),
+      ...(innerOn ? INNER_ROWS : {}),
+    }),
+    [graph, avail, innerOn],
   );
   const capsules = useMemo(() => (density === "overview" ? collapseBands(layout) : []), [layout, density]);
   const spine = useMemo(() => (density === "layers" ? runPaths(layout?.placed || []) : null), [layout, density]);
-  const skips = useMemo(() => skipPaths(layout), [layout]);
+  // Skips the backend can bend on their own become targets, drawn as arcs from
+  // the encoder point that feeds them to the decoder block that takes them. A
+  // backend without them (Diffusers, for now) keeps the plain decorative arcs.
+  const skipArcs = useMemo(() => {
+    if (!layout || !graph?.skips?.length) return [];
+    const at = new Map(layout.placed.map((n) => [n.id, n]));
+    return graph.skips.map((sk) => {
+      const a = at.get(sk.from);
+      const b = at.get(sk.to);
+      if (!a || !b) return null;
+      const cx = (a.x + b.x) / 2;
+      const cy = Math.min(a.y, b.y) - 14;
+      return {
+        ...sk, d: `M${a.x},${a.y} Q${cx},${cy} ${b.x},${b.y}`,
+        mx: 0.25 * a.x + 0.5 * cx + 0.25 * b.x, my: 0.25 * a.y + 0.5 * cy + 0.25 * b.y,
+      };
+    }).filter(Boolean);
+  }, [layout, graph]);
+  const skips = useMemo(() => (skipArcs.length ? [] : skipPaths(layout)), [layout, skipArcs]);
+
+  const innerPlaced = useMemo(() => {
+    if (!innerOn || !layout) return [];
+    const byParent = new Map();
+    graph.inner.forEach((p) => {
+      const list = byParent.get(p.parent) || [];
+      list.push(p);
+      byParent.set(p.parent, list);
+    });
+    const out = [];
+    layout.placed.forEach((n) => {
+      const kids = byParent.get(n.id);
+      if (!kids) return;
+      kids.forEach((p, k) => out.push({
+        ...p, extra: "inner", side: n.side, depth: n.depth,
+        x: n.x + (k - (kids.length - 1) / 2) * SAT_STEP, y: n.y + n.r + SAT_GAP, r: SAT_R,
+        px: n.x, py: n.y + n.r,
+      }));
+    });
+    return out;
+  }, [innerOn, layout, graph]);
+  // What a box drag can take: the main points, and the inner ones when shown.
+  const selectable = useMemo(
+    () => (layout ? [...layout.placed, ...innerPlaced] : []),
+    [layout, innerPlaced],
+  );
+  const selectableRef = useRef(selectable);
+  selectableRef.current = selectable;
 
   // With a viewBox, client pixels and drawing units are not the same thing:
   // everything that compares a mouse position to a node has to come through here.
@@ -103,7 +172,7 @@ export default function UnetVisualizer({
       if (Math.max(Math.abs(p.x - d.x0), Math.abs(p.y - d.y0)) < DRAG_SLOP) return;
       const [lo, hi] = p.x < d.x0 ? [p.x, d.x0] : [d.x0, p.x];
       const [top, bot] = p.y < d.y0 ? [p.y, d.y0] : [d.y0, p.y];
-      const ids = layout.placed
+      const ids = selectableRef.current
         .filter((n) => n.x >= lo && n.x <= hi && n.y >= top && n.y <= bot)
         .map((n) => n.id);
       if (ids.length) toggleRef.current?.(ids, { force: !d.remove });
@@ -170,7 +239,7 @@ export default function UnetVisualizer({
   // What letting go of the box would change: the layers it would add (or, with
   // alt, drop), outlined before the release, with their count beside it.
   const preview = marquee
-    ? new Set(placed
+    ? new Set(selectable
       .filter((n) => n.x >= marquee.x && n.x <= marquee.x + marquee.w
         && n.y >= marquee.y && n.y <= marquee.y + marquee.h)
       .filter((n) => (drag.remove ? focusTargets?.has(n.id) : !focusTargets?.has(n.id)))
@@ -236,6 +305,85 @@ export default function UnetVisualizer({
         })}
         {/* The dots are small now, so the thing you actually click is not. */}
         <circle r={Math.max(n.r, 12)} fill="transparent" />
+      </g>
+    );
+  };
+
+  const satsOf = new Map();
+  innerPlaced.forEach((p) => {
+    const list = satsOf.get(p.parent) || [];
+    list.push(p);
+    satsOf.set(p.parent, list);
+  });
+
+  /** A layer inside a block: clicks and box-selects like any point. Kept
+   *  right after its block in the DOM, so Tab steps from a block into its
+   *  layers and on to the next block. */
+  const satellite = (p) => {
+    const isFocus = focusTargets?.has(p.id);
+    const isOther = !isFocus && heldByActive(holders, p.id);
+    const fill = c[p.stage] || c[SIDE_STAGE[p.side]] || c.other;
+    const toggle = () => pick([p.id], { force: !isFocus });
+    return (
+      <g
+        key={p.id}
+        tabIndex={0}
+        role="button"
+        aria-pressed={!!isFocus}
+        aria-label={`${p.label} — ${isFocus ? "targeted" : "not targeted"}`}
+        transform={`translate(${p.x},${p.y})`}
+        className="unet-node unet-sat"
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={toggle}
+        onKeyDown={keyActivate(toggle)}
+        onMouseEnter={() => setHover(p)}
+        onMouseLeave={() => setHover(null)}
+      >
+        {isFocus && <circle r={p.r + 3} fill="none" stroke="var(--accent)" strokeWidth="2" />}
+        {isOther && (
+          <circle r={p.r + 3} fill="none" stroke="var(--accent)" strokeWidth="1.2" strokeDasharray="2 2" opacity="0.5" />
+        )}
+        {preview?.has(p.id) && (
+          <circle r={p.r + 5} fill="none" stroke="var(--accent)" strokeWidth="1.2" strokeDasharray="2 2" />
+        )}
+        <circle r={p.r} fill={fill} opacity={isFocus ? 1 : 0.6}
+                stroke={hover?.id === p.id ? "#fff" : "transparent"} strokeWidth="1.5" />
+        <circle r="4.5" fill="transparent" />
+      </g>
+    );
+  };
+
+  /** A skip connection: click the arc to bend that skip alone. */
+  const skipArc = (sk) => {
+    const on = focusTargets?.has(sk.id);
+    const other = !on && heldByActive(holders, sk.id);
+    const offOnly = !on && !other && holders?.has(sk.id);
+    const hot = hover?.id === sk.id;
+    const toggle = () => pick([sk.id], { force: !on });
+    return (
+      <g
+        key={sk.id}
+        className={`unet-skip ${on ? "on" : ""}`.trim()}
+        role="button"
+        tabIndex={0}
+        aria-pressed={!!on}
+        aria-label={`${sk.label} — ${on ? "targeted" : "not targeted"}`}
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={toggle}
+        onKeyDown={keyActivate(toggle)}
+        onMouseEnter={() => setHover({ ...sk, extra: "skip", x: sk.mx, y: sk.my, r: 5 })}
+        onMouseLeave={() => setHover(null)}
+      >
+        <path d={sk.d} fill="none" stroke="transparent" strokeWidth="14" />
+        <path
+          d={sk.d} fill="none"
+          stroke={on || other || hot ? "var(--accent)" : c.dim}
+          strokeWidth={on ? 2.5 : 1.5}
+          strokeDasharray={on ? undefined : "4 4"}
+          opacity={on ? 1 : hot ? 0.85 : other ? 0.6 : offOnly ? 0.25 : 0.5}
+        />
+        <circle cx={sk.mx} cy={sk.my} r={on ? 4 : 2.5} fill={on || hot ? "var(--accent)" : c.dim}
+                opacity={on || hot ? 1 : 0.7} />
       </g>
     );
   };
@@ -392,6 +540,12 @@ export default function UnetVisualizer({
           <path key={`skip-${i}`} d={d} fill="none" stroke={c.line} strokeWidth="1.5"
                 strokeDasharray="4 4" opacity="0.3" />
         ))}
+        {skipArcs.map(skipArc)}
+        {skipArcs.flatMap((sk) => badges([sk.id], sk.mx, sk.my - 12, 1, `skipb-${sk.id}`))}
+        {innerPlaced.map((p) => (
+          <line key={`hair-${p.id}`} x1={p.px} y1={p.py} x2={p.x} y2={p.y - p.r}
+                stroke={c.line} strokeWidth="1" opacity="0.8" />
+        ))}
 
         {density === "layers" && (
           <>
@@ -411,7 +565,7 @@ export default function UnetVisualizer({
 
         {density === "overview" && capsules.filter((cap) => !expanded.has(cap.key)).map(capsule)}
         {density === "overview" && expandedKeys.map((key) => collapser(key, expandedNodes.filter((n) => `${n.depth}:${n.side}` === key)))}
-        {(density === "layers" ? placed : expandedNodes).map(node)}
+        {(density === "layers" ? placed : expandedNodes).flatMap((n) => [node(n), ...(satsOf.get(n.id) || []).map(satellite)])}
         {sideBadges(density === "layers" ? placed : expandedNodes)}
 
         {marquee && preview.size > 0 && (
@@ -425,26 +579,30 @@ export default function UnetVisualizer({
         )}
 
         {hover && (() => {
-          // What this layer is, then what a click on it will do, then who else
-          // is here -- the last two being why you hover before clicking.
+          // What this point is, what bending it touches (inside blocks), what
+          // a click will do, and who else is here.
           const also = holdersIn(holders, [hover.id]);
           const mine = focusTargets?.has(hover.id);
           const act = !hasFocus ? "click to start a bend here"
             : mine ? "in this bend · click to drop" : "click to add to this bend";
-          const h = also.length ? 62 : 49;
+          const lines = [
+            { text: hover.extra === "skip" || hover.extra === "inner" ? hover.label : `${hover.label} · ${hover.type}`, fill: c.text },
+            { text: `${hover.channels}ch · ${hover.h}×${hover.w} · ${resLabel(hover)}`, fill: c.dim },
+            ...(hover.extra === "skip" ? [{ text: "bends the skip alone, not the path down", fill: c.dim }] : []),
+            ...wrapText(hover.about).map((t) => ({ text: t, fill: c.dim })),
+            { text: act, fill: mine ? "var(--accent)" : c.text },
+            ...(also.length ? [{ text: `also in ${holdersText(also)}`, fill: c.dim }] : []),
+          ];
+          const cardW = 214;
+          const h = 10 + lines.length * 13;
           const top = hover.y - h - 12 < 4 ? hover.y + hover.r + 8 : hover.y - h - 12;
           return (
-            <g transform={`translate(${Math.max(4, Math.min(hover.x - 95, width - 194))},${top})`}
+            <g transform={`translate(${Math.max(4, Math.min(hover.x - cardW / 2, width - cardW - 4))},${top})`}
                pointerEvents="none">
-              <rect width="190" height={h} rx="5" fill={c.panel} stroke={c.line} />
-              <text x="8" y="15" fontSize="11" fill={c.text}>{hover.label} · {hover.type}</text>
-              <text x="8" y="28" fontSize="11" fill={c.dim}>
-                {hover.channels}ch · {hover.h}×{hover.w} · {resLabel(hover)}
-              </text>
-              <text x="8" y="42" fontSize="11" fill={mine ? "var(--accent)" : c.text}>{act}</text>
-              {also.length > 0 && (
-                <text x="8" y="55" fontSize="11" fill={c.dim}>also in {holdersText(also)}</text>
-              )}
+              <rect width={cardW} height={h} rx="5" fill={c.panel} stroke={c.line} />
+              {lines.map((ln, k) => (
+                <text key={k} x="8" y={15 + k * 13} fontSize="11" fill={ln.fill}>{ln.text}</text>
+              ))}
             </g>
           );
         })()}
@@ -456,6 +614,23 @@ export default function UnetVisualizer({
           </span>
         ))}
         <span className="row center" style={{ gap: 6, fontSize: 12, color: "var(--text-dim)" }}>◆ attention</span>
+        {skipArcs.length > 0 && (
+          <span className="row center" style={{ gap: 6, fontSize: 12, color: "var(--text-dim)" }}>
+            <svg width="20" height="9" aria-hidden="true">
+              <path d="M1 8 Q10 0 19 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeDasharray="3 3" />
+            </svg>
+            skip — click to bend it alone
+          </span>
+        )}
+        {innerOn && (
+          <span className="row center" style={{ gap: 6, fontSize: 12, color: "var(--text-dim)" }}>
+            <svg width="20" height="9" aria-hidden="true">
+              <circle cx="4" cy="5" r="2.5" fill="currentColor" /><circle cx="10" cy="5" r="2.5" fill="currentColor" />
+              <circle cx="16" cy="5" r="2.5" fill="currentColor" />
+            </svg>
+            inside blocks
+          </span>
+        )}
         <span className="row center unet-legend-this" style={{ gap: 6, fontSize: 12, color: "var(--text-dim)" }}>
           <span className="unet-legend-ring" /> this bend
         </span>

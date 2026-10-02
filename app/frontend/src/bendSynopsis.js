@@ -8,7 +8,12 @@ const GROUP_LABELS = {
 };
 
 function formatTarget(t) {
-  return GROUP_LABELS[t] || t;
+  if (GROUP_LABELS[t]) return GROUP_LABELS[t];
+  const skip = /^skip:(\d+)$/.exec(t);
+  if (skip) return `skip ${skip[1]}`;
+  // "mid_attn.qkv:v" -> "mid_attn v"
+  const part = /^(.*)\.(?:to_)?qkv:([qkv])$/.exec(t);
+  return part ? `${part[1]} ${part[2]}` : t;
 }
 
 /** Where a bend acts, in a few words: group names, or the first few layers. */
