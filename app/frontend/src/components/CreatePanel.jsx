@@ -47,7 +47,7 @@ export default function CreatePanel() {
     getMaskDataUrl, applyContrastMask, frameCard, activeLayer,
     activeMask, maskPixels, hasMask, liveMasks, invertMask, clearMask, setMaskParam, nudgeMask,
     undo, canUndo, redo, canRedo, tab, setLivePreview, livePreviewOn,
-    job, genRunning, genPaused, canvasIsBlank, runs, trackRuns, setSampleParam,
+    job, genRunning, genPaused, canvasIsBlank, runs, trackRuns, setSampleParam, generateRef,
   } = usePlay();
   const layerName = activeLayer?.name || "the active layer";
 
@@ -445,6 +445,7 @@ export default function CreatePanel() {
     if (hasMask && runs.length) { toast("A fill starts when nothing else is running", "error"); return; }
     run();
   };
+  generateRef.current = runRef.current;
 
   const setPpField = (k, v) => setPp((s) => ({ ...s, [k]: v }));
 
@@ -789,13 +790,12 @@ export default function CreatePanel() {
           </div>
 
           <div className="finish-block">
-            <span className="finish-block-title">
-              <TipLabel tip="Enlarges the finished image with Lanczos resampling. Ignores masks, and flattens the layer stack into one layer at the new size; the masks are kept.">
-                Upscale
-              </TipLabel>
-            </span>
             <div className="row between center gap-2">
-              <span className="sub">Scale</span>
+              <span className="finish-block-title">
+                <TipLabel tip="Enlarges the finished image with Lanczos resampling. Ignores masks, and flattens the layer stack into one layer at the new size; the masks are kept.">
+                  Upscale
+                </TipLabel>
+              </span>
               <Seg
                 ariaLabel="Upscale factor"
                 size="sm"

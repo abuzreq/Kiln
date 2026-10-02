@@ -381,11 +381,14 @@ body {
   display: flex; flex-direction: column; gap: var(--s-3);
   min-width: 0; min-height: 0; overflow: hidden;
 }
+@media (max-width: 1180px) {
+  .play-body.canvas-layout { --inspector-w: 300px; }
+}
 @media (max-width: 1000px) {
   .play.fill { height: auto; }
   .play-body.canvas-layout { grid-template-columns: var(--toolrail-w) minmax(0, 1fr); }
   .canvas-inspector { grid-column: 1 / -1; }
-  .canvas-layout .canvas-card .hero { flex: none; height: min(70vh, 620px); }
+  .canvas-layout .canvas-card .hero { flex: none; height: min(70vh, 620px); min-height: 420px; }
   .canvas-inspector { overflow: visible; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
   .canvas-inspector .inspector-panel { max-height: none; min-height: 0; }
   .canvas-inspector .panel-body { overflow: visible; }
@@ -1335,7 +1338,9 @@ body {
 }
 .panel-body > .slider-row, .panel-body .field { margin-bottom: 0; }
 .panel-foot { flex-shrink: 0; padding: 0 var(--s-3) var(--s-3); }
-.panel-body + .panel-foot { padding-top: 0; }
+/* A rule above the footer, so settings scrolled under it never seem to run
+   into the outcome. */
+.panel-body + .panel-foot { padding-top: var(--s-3); border-top: 1px solid var(--line); }
 .steer-words input { width: 100%; }
 .create-generate-box.outcome { display: flex; flex-direction: column; gap: 6px; }
 .outcome-what { font-size: var(--fs-sm); color: var(--text-dim); line-height: 1.4; }
@@ -1343,11 +1348,20 @@ body {
 .generate-btn { padding: 9px 12px; font-size: var(--fs-md); }
 .generate-keys { font-size: var(--fs-xs); text-align: center; }
 .finish-block {
-  display: flex; flex-direction: column; gap: var(--s-2);
+  display: flex; flex-direction: column; gap: 6px;
   padding: var(--s-3); border: 1px solid var(--line); border-radius: var(--radius-sm);
 }
 .finish-block-title { font-size: var(--fs-sm); font-weight: 650; color: var(--text); }
 .finish-block .slider-row { margin-bottom: 0; }
+/* Finish's sliders are one line each -- label, track, value -- so post-process
+   and upscale fit the panel together without it scrolling at 900px. */
+.finish-block .slider-row {
+  display: grid; grid-template-columns: 74px minmax(0, 1fr) 34px; align-items: center; gap: 8px;
+}
+.finish-block .slider-row .lab { display: contents; }
+.finish-block .slider-row .lab > :first-child { grid-column: 1; grid-row: 1; font-size: var(--fs-sm); color: var(--text-dim); }
+.finish-block .slider-row .val { grid-column: 3; grid-row: 1; text-align: right; font-size: var(--fs-sm); }
+.finish-block .slider-row input { grid-column: 2; grid-row: 1; width: 100%; margin: 0; }
 /* Layers | Assets */
 .manage-list { display: flex; flex-direction: column; gap: 4px; }
 .manage-group-head {
@@ -2339,3 +2353,33 @@ a { color: var(--accent); }
 }
 .hero-switch { cursor: pointer; }
 .hero-switch input { margin: 0; accent-color: var(--accent); }
+
+@media (max-width: 720px) {
+  .canvas-inspector { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* A blank canvas: what it is and what to do, over the checkerboard. The strip
+   it sits in lets the pointer through; only the card takes it. */
+.hero-blank {
+  position: absolute; inset: 0; z-index: 2; pointer-events: none;
+  display: flex; align-items: center; justify-content: center; padding: var(--s-4);
+}
+.hero-blank-card {
+  pointer-events: auto; max-width: 340px; text-align: center;
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  padding: 22px 24px; border: 1px dashed var(--text-faint); border-radius: var(--radius);
+  background: rgba(14, 15, 19, 0.85);
+}
+.hero-blank-card b { font-size: var(--fs-lg); }
+.hero-blank-card .sub { line-height: 1.5; }
+
+/* Short windows: smaller result tiles, so the height goes to the picture. */
+@media (max-height: 820px) {
+  .results-strip { height: 112px; padding: 8px 10px; }
+  .strip-tile { flex-basis: 72px; width: 72px; }
+  .strip-thumb { width: 72px; height: 72px; }
+  .strip-actions { top: 46px; }
+  .strip-actions .btn.xs { padding: 1px 3px; font-size: 10px; }
+  .queue-ring.big { width: 30px; height: 30px; }
+  .results-strip-head > .sub { display: none; }
+}

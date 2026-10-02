@@ -51,6 +51,8 @@ const CANVAS_TABS = new Set(["create"]);
 // Canvas bounds. The floor is a size a brush can still be aimed inside; the
 // ceiling is well past what these models sample at, and a fill is scaled down
 // to MAX_FILL_SIDE anyway, so nothing is gained by going bigger.
+// Which tab the Layers | Assets panel shows, remembered per browser.
+const MANAGE_KEY = "kiln.canvasManageTab";
 const CANVAS_MIN = 64;
 const CANVAS_MAX = 2048;
 // An opened image sets the canvas to its own size. Bigger than the typed-in
@@ -144,6 +146,19 @@ export default function Play() {
   const setLivePreviewOn = useCallback((on) => {
     setLivePreviewOnState(on);
     try { localStorage.setItem("kiln.livePreview", on ? "on" : "off"); } catch { /* not fatal */ }
+  }, []);
+
+  // The Create panel's run, so the blank canvas's own Generate button can
+  // start the same run the panel would. Set by CreatePanel on every render.
+  const generateRef = useRef(null);
+  // Which tab the Layers | Assets panel shows. Here rather than in the panel
+  // so the blank canvas can point at Assets. Remembered per browser.
+  const [manageTab, setManageTabState] = useState(() => {
+    try { return localStorage.getItem(MANAGE_KEY) === "assets" ? "assets" : "layers"; } catch { return "layers"; }
+  });
+  const setManageTab = useCallback((t) => {
+    setManageTabState(t);
+    try { localStorage.setItem(MANAGE_KEY, t); } catch { /* not fatal */ }
   }, []);
 
   // --- Generation queue --------------------------------------------------
@@ -1147,6 +1162,7 @@ export default function Play() {
   }, [loadFile]);
 
   const value = {
+    generateRef, manageTab, setManageTab,
     tab, frame, postFrame, setPostFrame, showRaw, setShowRaw, canvasImage,
     clearCanvas,
     frameCard, pendingCard, setPendingCard, applyCard, lockSeed, activeSeed,
@@ -1256,14 +1272,14 @@ const ZOOM_MIN = 0.25;
 const ZOOM_MAX = 8;
 
 function PlayCanvas({ brushable }) {
-  const { toast } = useApp();
+  const { toast, modelPath } = useApp();
   const {
     postFrame, showRaw, setShowRaw, progress, heroRef, canvasImage, syncMaskOverlayRef, tab,
     livePreviewOn, setLivePreviewOn,
     frameCard, pendingCard, setPendingCard, applyCard, activeSeed,
     clearCanvas, canvasSize, setCanvasSize, newCanvas, loadFile,
     activeMask, maskPixels, hasMask, liveMasks, activeLayer,
-    undo, canUndo, redo, canRedo,
+    undo, canUndo, redo, canRedo, canvasIsBlank, runs, generateRef, setManageTab,
   } = usePlay();
   const shown = canvasImage;
   const [busy, setBusy] = useState(false);
@@ -1350,7 +1366,7 @@ function PlayCanvas({ brushable }) {
    *  ground around the picture. Runs in the capture phase so the overlay
    *  never sees the press as a stroke. */
   const onHeroPointerDown = (e) => {
-    if (e.target.closest?.(".hero-chips")) return;
+    if (e.target.closest?.(".hero-chips, .hero-blank-card")) return;
     const onGround = e.target === heroRef.current || e.target === viewRef.current;
     if (!(e.button === 1 || spaceRef.current || onGround)) return;
     e.preventDefault();
@@ -1501,13 +1517,18 @@ function PlayCanvas({ brushable }) {
                 </Popover>
                 <button type="button" className="btn ghost sm icon" onClick={() => zoomStep(1.25)} aria-label="Zoom in" title="Zoom in">+</button>
               </div>
-              <span className="bar-sep" aria-hidden="true" />
-              <CaptureButton image={shown} card={frameCard} label={<><CaptureIcon /> Capture</>} />
-              <Tooltip text="Download the canvas as a PNG. The settings that made it are written into the file, so dropping it back into Kiln restores them.">
-                <button type="button" className="btn sm icon" onClick={download} disabled={busy} aria-label="Download">
-                  {busy ? "…" : <DownloadIcon />}
-                </button>
-              </Tooltip>
+              {/* Nothing to keep from a blank canvas. */}
+              {!canvasIsBlank && (
+                <>
+                  <span className="bar-sep" aria-hidden="true" />
+                  <CaptureButton image={shown} card={frameCard} label={<><CaptureIcon /> Capture</>} />
+                  <Tooltip text="Download the canvas as a PNG. The settings that made it are written into the file, so dropping it back into Kiln restores them.">
+                    <button type="button" className="btn sm icon" onClick={download} disabled={busy} aria-label="Download">
+                      {busy ? "…" : <DownloadIcon />}
+                    </button>
+                  </Tooltip>
+                </>
+              )}
             </>
           )}
         </div>
@@ -1547,6 +1568,31 @@ function PlayCanvas({ brushable }) {
           </div>
         ) : (
           <span className="sub">Generate, drop, or paste an image.</span>
+        )}
+        {/* A blank canvas says what it is and what to do with it, rather than
+            showing an empty checkerboard. Gone as soon as there is anything:
+            a run, a mask, a picture. */}
+        {canvasIsBlank && !progress && !hasMask && !runs.length && (
+          <div className="hero-blank">
+            <div className="hero-blank-card">
+              <b>A blank {size.w} × {size.h} canvas</b>
+              <p className="sub mb-0">
+                Generate a first image, or bring one in to rework. Drop or paste an image anywhere on this page.
+              </p>
+              <div className="row center gap-2">
+                <button type="button" className="btn primary" onClick={() => generateRef.current?.()}
+                  disabled={!modelPath}>
+                  Generate
+                </button>
+                <button type="button" className="btn" onClick={() => openRef.current?.click()}>
+                  Open an image…
+                </button>
+              </div>
+              <button type="button" className="btn ghost sm" onClick={() => setManageTab("assets")}>
+                or pick one from Assets →
+              </button>
+            </div>
+          </div>
         )}
         {/* What the picture is, and how it is being shown, on the picture
             itself rather than in a header above it. */}
@@ -2398,8 +2444,6 @@ function EntityRow({
   );
 }
 
-const MANAGE_KEY = "kiln.canvasManageTab";
-
 /** What the canvas is made of, and the images kept at hand: Layers | Assets.
  *
  *  One panel with two tabs, where there were three cards (Assets, Layers,
@@ -2408,14 +2452,7 @@ const MANAGE_KEY = "kiln.canvasManageTab";
  *  otherwise open them as the canvas.
  */
 function ManagePanel() {
-  const { rasterLayers, assets, addAssetFiles } = usePlay();
-  const [tab, setTabState] = useState(() => {
-    try { return localStorage.getItem(MANAGE_KEY) === "assets" ? "assets" : "layers"; } catch { return "layers"; }
-  });
-  const setTab = (t) => {
-    setTabState(t);
-    try { localStorage.setItem(MANAGE_KEY, t); } catch { /* ignore */ }
-  };
+  const { rasterLayers, assets, addAssetFiles, manageTab: tab, setManageTab: setTab } = usePlay();
   const [over, setOver] = useState(false);
   const tabs = [
     { id: "layers", label: <>Layers <span className="sub">· {rasterLayers.length}</span></> },
