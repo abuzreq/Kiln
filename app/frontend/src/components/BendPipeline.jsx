@@ -4,8 +4,9 @@ import HolderBadges, { holdersText } from "./HolderBadges.jsx";
 
 // The model as a signal path: what the image passes through, in order, with
 // where the current bend sits marked on it. No geometry and no layer names --
-// three stages you can bend whole, and a numbered strip inside any stage you
-// want to be specific about. This is the plain-language way into bending; the
+// three stages you can bend whole, each with a strip of ticks (one per layer,
+// in order) so "how much of the decoder" shows without opening anything, and a
+// numbered row inside any stage you want to be specific about. This is the plain-language way into bending; the
 // map (UnetVisualizer) is there when the structure itself is the point.
 const STAGES = [
   { group: "encoder", label: "Encoder", sub: "reads the image, detail first" },
@@ -45,6 +46,10 @@ export default function BendPipeline({
       { id: "late", label: "late", ids: stage.ids.slice(half) },
       ...(attn.length ? [{ id: "attn", label: "attention", ids: attn.map((n) => n.id) }] : []),
     ];
+    // The pick that says exactly what this bend holds in this stage, if any.
+    const held = stage.ids.filter((id) => focusTargets?.has(id));
+    const matches = (q) => q.ids.length === held.length && q.ids.every((id) => focusTargets?.has(id));
+    const current = held.length ? quick.find(matches)?.id : null;
     return (
       <div className="bend-pipe-layers" key={`${stage.group}-layers`}>
         <div className="row wrap gap-2">
@@ -69,7 +74,9 @@ export default function BendPipeline({
         <div className="row wrap gap-2 mt-1">
           <span className="sub">take</span>
           {quick.map((q) => (
-            <button type="button" key={q.id} className="btn ghost sm"
+            <button type="button" key={q.id}
+              className={`btn ghost sm ${current === q.id ? "on" : ""}`.trim()}
+              aria-pressed={current === q.id}
               onClick={() => pick(q.ids, { force: true })}>{q.label}</button>
           ))}
           <span className="sub">
@@ -83,7 +90,10 @@ export default function BendPipeline({
   return (
     <div className="bend-pipe-wrap">
       <div className="bend-pipe">
-        <span className="bend-pipe-end">Noise</span>
+        <span className="bend-pipe-end">
+          <span className="bend-pipe-swatch noise" aria-hidden="true" />
+          noise
+        </span>
         {stages.map((s) => {
           const hit = s.ids.filter((id) => focusTargets?.has(id)).length;
           const others = holdersIn(holders, s.ids);
@@ -93,19 +103,31 @@ export default function BendPipeline({
           return (
             <React.Fragment key={s.group}>
               <span className="bend-pipe-arrow" aria-hidden="true">→</span>
-              <div className={`bend-pipe-stage ${all ? "on" : hit ? "some" : ""}`.trim()}>
+              <div
+                className={`bend-pipe-stage ${all ? "on" : hit ? "some" : ""} ${isOpen ? "open" : ""}`.trim()}
+                style={{ "--stage": `var(--stage-${s.group})` }}
+              >
                 <button
                   type="button"
                   className="bend-pipe-pill"
-                  aria-pressed={all}
+                  aria-pressed={all ? true : hit ? "mixed" : false}
                   title={`Bend the whole ${s.label.toLowerCase()}`}
                   onClick={() => onToggleGroup?.(s.group)}
                 >
-                  <b>{s.label}</b>
+                  <span className="bend-pipe-title">
+                    <b>{s.label}</b>
+                    <span className="bend-pipe-count tnum">
+                      {all ? `all ${s.ids.length}` : hit ? `${hit} of ${s.ids.length}` : `${s.ids.length} layers`}
+                      <HolderBadges list={others} />
+                    </span>
+                  </span>
                   <span className="sub">{s.sub}</span>
-                  <span className="bend-pipe-count">
-                    {all ? `all ${s.ids.length}` : hit ? `${hit} of ${s.ids.length}` : `${s.ids.length} layers`}
-                    <HolderBadges list={others} />
+                  <span className="bend-pipe-ticks" aria-hidden="true">
+                    {s.layers.map((n) => {
+                      const on = focusTargets?.has(n.id);
+                      const other = !on && heldByActive(holders, n.id);
+                      return <i key={n.id} className={on ? "on" : other ? "other" : ""} />;
+                    })}
                   </span>
                 </button>
                 {s.layers.length > 1 && (
@@ -116,7 +138,7 @@ export default function BendPipeline({
                     aria-label={isOpen ? `Hide the layers in ${s.label}` : `Pick single layers in ${s.label}`}
                     onClick={() => setOpen(isOpen ? null : s.group)}
                   >
-                    {isOpen ? "−" : "+"}
+                    {isOpen ? "Hide layers ▾" : "Pick single layers ▸"}
                   </button>
                 )}
               </div>
@@ -124,7 +146,10 @@ export default function BendPipeline({
           );
         })}
         <span className="bend-pipe-arrow" aria-hidden="true">→</span>
-        <span className="bend-pipe-end">Image</span>
+        <span className="bend-pipe-end">
+          <span className="bend-pipe-swatch image" aria-hidden="true" />
+          image
+        </span>
       </div>
       {stages.filter((s) => s.group === open).map(row)}
     </div>

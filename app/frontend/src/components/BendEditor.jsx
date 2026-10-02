@@ -1,7 +1,9 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Slider, Select } from "./ui.jsx";
+import { Slider, Select, TipLabel } from "./ui.jsx";
 import BendFootprint from "./BendFootprint.jsx";
 import RunWindow, { RunWindowMini } from "./RunWindow.jsx";
+import DualRange from "./DualRange.jsx";
+import OpPicker from "./OpPicker.jsx";
 import { explicitTargets, isGroup, resolveTargets } from "../bendTargets.js";
 import { bendAmount } from "../bendSynopsis.js";
 
@@ -46,6 +48,93 @@ function ParamControl({ param, opDef, value, onChange }) {
       onChange={onChange}
       tip={tip}
     />
+  );
+}
+
+// Params that mean one thing between them, shown as one control: an offset is
+// an X and a Y, and clamp's bounds are a span whose width is the whole point.
+const PAIRS = [
+  { keys: ["dx", "dy"], kind: "xy" },
+  { keys: ["min", "max"], kind: "span" },
+];
+
+const decimalsOf = (step) => (String(step).split(".")[1] || "").length;
+
+/** A number box that only commits whole, in-range values: half-typed text
+ *  ("-", "1.") stays in the box instead of landing in the bend's params. */
+function NumField({ label, value, def, onChange }) {
+  const [draft, setDraft] = useState(null);
+  const step = def.step ?? (def.kind === "int" ? 1 : 0.01);
+  const commit = (text) => {
+    const v = parseFloat(text);
+    if (!Number.isFinite(v)) return;
+    const c = Math.min(def.max ?? Infinity, Math.max(def.min ?? -Infinity, v));
+    onChange(def.kind === "int" ? Math.round(c) : Number(c.toFixed(decimalsOf(step))));
+  };
+  return (
+    <label className="num-field">
+      <span>{label}</span>
+      <input
+        type="number"
+        inputMode="decimal"
+        value={draft ?? value ?? def.default}
+        min={def.min}
+        max={def.max}
+        step={step}
+        onChange={(e) => { setDraft(e.target.value); commit(e.target.value); }}
+        onBlur={() => setDraft(null)}
+      />
+    </label>
+  );
+}
+
+/** Two params as one control (see PAIRS). */
+function PairControl({ kind, a, b, opDef, params, setParam, setParams }) {
+  const va = params[a.name] ?? a.default;
+  const vb = params[b.name] ?? b.default;
+  if (kind === "xy") {
+    // "Shift X" and "Shift Y" are one "Shift"
+    const label = a.label.replace(/\s*X$/i, "") || "Offset";
+    return (
+      <div className="param-pair">
+        <div className="row between center">
+          <TipLabel tip={opDef?.help}><span className="param-pair-label">{label}</span></TipLabel>
+          <span className="sub tnum">{a.min} to {a.max} feature px</span>
+        </div>
+        <div className="param-xy">
+          <NumField label="X" value={va} def={a} onChange={(v) => setParam(a.name, v)} />
+          <NumField label="Y" value={vb} def={b} onChange={(v) => setParam(b.name, v)} />
+        </div>
+      </div>
+    );
+  }
+  const step = a.step ?? 0.1;
+  const fmt = (v) => v.toFixed(decimalsOf(step));
+  return (
+    <div className="param-pair">
+      <div className="row between center">
+        <TipLabel tip={`${a.help || ""} ${b.help || ""}`.trim() || opDef?.help}>
+          <span className="param-pair-label">Keep between</span>
+        </TipLabel>
+        <span className="sub tnum">{fmt(va)} … {fmt(vb)}</span>
+      </div>
+      <DualRange
+        lo={va}
+        hi={vb}
+        min={a.min ?? -5}
+        max={b.max ?? 5}
+        step={step}
+        loLabel={a.label}
+        hiLabel={b.label}
+        format={fmt}
+        onChange={(lo, hi) => setParams({ [a.name]: lo, [b.name]: hi })}
+      />
+      <div className="row between sub param-pair-ends">
+        <span>{a.min ?? -5}</span>
+        <span>narrower: flatter, harder bands</span>
+        <span>{b.max ?? 5}</span>
+      </div>
+    </div>
   );
 }
 
@@ -140,22 +229,20 @@ export function BendInspector({
   const targets = b.targets || [];
   const hit = resolveTargets(targets, nodes).size;
   const setParam = (name, v) => update(b.id, { params: { ...b.params, [name]: v } });
+  const setParams = (patch) => update(b.id, { params: { ...b.params, ...patch } });
 
   return (
     <div className="bend-inspector" aria-label={`Bend ${index + 1} settings`}>
       <div className="bend-inspector-head">
         <span className="bend-badge on" aria-hidden="true">{index + 1}</span>
-        <select
-          className="grow"
+        <OpPicker
+          ops={ops}
           value={b.op}
-          aria-label="Operation"
-          onChange={(e) => {
-            const nd = ops.find((o) => o.name === e.target.value);
-            update(b.id, { op: e.target.value, params: defaultsFor(nd), ...scheduleFor(nd) });
+          onChange={(name) => {
+            const nd = ops.find((o) => o.name === name);
+            update(b.id, { op: name, params: defaultsFor(nd), ...scheduleFor(nd) });
           }}
-        >
-          {ops.map((o) => <option key={o.name} value={o.name}>{o.label}</option>)}
-        </select>
+        />
         <button
           type="button"
           role="switch"
@@ -186,10 +273,22 @@ export function BendInspector({
           tip={amountTip(opDef, amountDef)}
         />
       )}
-      {extraParams.map((param) => (
-        <ParamControl key={param.name} param={param} opDef={opDef} value={b.params[param.name]}
-          onChange={(v) => setParam(param.name, v)} />
-      ))}
+      {extraParams.map((param) => {
+        const pair = PAIRS.find((pr) => pr.keys.includes(param.name)
+          && pr.keys.every((k) => extraParams.some((x) => x.name === k)));
+        if (pair) {
+          if (param.name !== pair.keys[0]) return null;
+          const second = extraParams.find((x) => x.name === pair.keys[1]);
+          return (
+            <PairControl key={pair.keys.join("-")} kind={pair.kind} a={param} b={second}
+              opDef={opDef} params={b.params} setParam={setParam} setParams={setParams} />
+          );
+        }
+        return (
+          <ParamControl key={param.name} param={param} opDef={opDef} value={b.params[param.name]}
+            onChange={(v) => setParam(param.name, v)} />
+        );
+      })}
 
       <div className="bend-inspector-section">
         <div className="row between center">
