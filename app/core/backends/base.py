@@ -234,6 +234,13 @@ class Backend:
         """Bucket one module name into encoder / mid / decoder / other."""
         raise NotImplementedError
 
+    def slice_points(self, net) -> dict[str, dict]:
+        """Targets that bend a channel range of a module's input (``hook:
+        "pre"``) or output (``"out"``) instead of a whole module output: skip
+        connections, fused q/k/v. ``{id: {module, hook, start, stop}}``; a
+        backend with none returns ``{}``."""
+        return {}
+
     def stage_of_key(self, key: str) -> str:
         """Bucket one state-dict key into encoder / mid / decoder / other."""
         raise NotImplementedError

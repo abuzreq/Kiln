@@ -147,6 +147,9 @@ class XurdifBackend(Backend):
     def stage_of_point(self, name: str) -> str:
         return graph._stage_of(name)
 
+    def slice_points(self, net) -> dict[str, dict]:
+        return graph.slice_points(net)
+
     def stage_of_key(self, key: str) -> str:
         return graph.stage_of_key(key)
 

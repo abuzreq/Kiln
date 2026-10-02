@@ -100,6 +100,7 @@ def main():
 
     check_bend_isolation(out)
     check_discovery_baseline()
+    check_slice_targets(unet, conf)
 
     out.unlink(missing_ok=True)
     (ROOT / "workspace_smoke_craft_conf.pt").unlink(missing_ok=True)
@@ -186,6 +187,104 @@ def check_bend_isolation(ckpt: Path):
     assert last[0]["image"].tobytes() == plain_alone, "a plain run was bent by another run's stack"
     assert last[1]["image"].tobytes() == bent_alone, "a bent run changed when run alongside another"
     print("bends stay in their own run: plain and bent runs on one model, interleaved, match solo")
+
+
+def check_slice_targets(unet, conf):
+    """Skips and q/k/v bend only their own channels.
+
+    A skip target rewrites the skip half of a decoder block's input and
+    nothing else: the upsampled half arrives untouched, and the result differs
+    from bending the skip's source block (which also feeds the path down). A
+    q/k/v part rewrites its third of the fused projection's output.
+    """
+    from app.core import backends as _backends
+    from app.core.backends.xurdif import graph as xgraph
+    from app.core.craft.interchange import to_external
+
+    xb = _backends.get("xurdif")
+    torch.manual_seed(0)
+    x, t = torch.randn(1, 3, 64, 64), torch.tensor([10.0])
+
+    g = xb.layer_graph(unet)
+    skips = {s["id"]: s for s in g["skips"]}
+    assert set(skips) == {f"skip:{i}" for i in range(len(unet.downs))}, list(skips)
+    assert skips["skip:1"]["from"] == "downs.1.0" and skips["skip:1"]["to"] == f"ups.{len(unet.downs) - 2}.1"
+    inner = {n["id"]: n for n in g["inner"]}
+    assert {"downs.1.0.conv", "downs.1.0.norm", "downs.1.0.film"} <= set(inner), sorted(inner)[:6]
+    assert "downs.1.0.act" not in inner, "act duplicates the block's own output"
+    assert {"mid_attn.q", "mid_attn.k", "mid_attn.v", "mid_attn.proj"} <= set(inner)
+    assert inner["downs.1.0.film"]["parent"] == "downs.1.0" and inner["downs.1.0.film"]["stage"] == "encoder"
+    # Groups keep meaning the main points: no stack changes what it bends.
+    enc = bending._resolve_targets(["encoder"], unet, xb)
+    assert not any(":" in n or n in inner for n in enc), enc
+
+    def run(model, targets, op="multiply", params=None, probe=None):
+        """Output for one bend on `targets`, plus what `probe` module saw going in."""
+        seen = {}
+        hooks = []
+        rt = bending.build_runtime([{"op": op, "params": params or {"value": 0.0}, "targets": targets,
+                                     "step_start": 0, "step_end": 1, "active": True}], backend=xb)
+        rt.attach(model)
+        if probe:
+            # registered after the bend, so it sees what the block really gets
+            def look(m, a):
+                seen.setdefault("in", a[0].clone())     # returns None: a probe, not a bend
+            hooks.append(dict(model.named_modules())[probe].register_forward_pre_hook(look))
+        try:
+            with torch.no_grad():
+                out = model(x, t)
+        finally:
+            rt.detach()
+            for h in hooks:
+                h.remove()
+        return out, seen.get("in")
+
+    with torch.no_grad():
+        plain = unet(x, t)
+    consumer = skips["skip:1"]["to"]
+    split = xgraph.skip_points(unet)[1]["start"]
+    same, _ = run(unet, ["skip:1"], params={"value": 1.0})
+    assert torch.equal(same, plain), "multiply 1 on a skip changed the output"
+    zeroed, seen = run(unet, ["skip:1"], probe=consumer)
+    _, seen_plain = run(unet, [], probe=consumer)
+    assert not torch.equal(zeroed, plain), "multiply 0 on a skip did nothing"
+    assert torch.equal(seen[:, :split], seen_plain[:, :split]), "the upsampled half was touched"
+    assert torch.count_nonzero(seen[:, split:]) == 0, "the skip half was not bent"
+    source, _ = run(unet, [skips["skip:1"]["from"]])
+    assert not torch.equal(zeroed, source), "bending the skip is the same as bending its source"
+
+    cg = xb.layer_graph(conf)
+    parts = {n["id"] for n in cg["inner"]}
+    assert {"mid_attn.qkv:q", "mid_attn.qkv:k", "mid_attn.qkv:v", "mid_attn.proj"} <= parts, sorted(parts)
+    assert "down_attns.3.to_qkv:v" in parts and "down_attns.3.to_out" in parts, sorted(parts)
+    with torch.no_grad():
+        cplain = conf(x, t)
+    seen_out = {}
+    qkv = dict(conf.named_modules())["mid_attn.qkv"]
+    h = qkv.register_forward_hook(lambda m, i, o: seen_out.setdefault("o", o.clone()))
+    vzero, _ = run(conf, ["mid_attn.qkv:v"])
+    h.remove()
+    c = qkv.out_channels // 3
+    assert not torch.equal(vzero, cplain), "zeroing v did nothing"
+    # the hook above ran before the bend's, so compare the bent output instead
+    seen_bent = {}
+    rt = bending.build_runtime([{"op": "multiply", "params": {"value": 0.0}, "targets": ["mid_attn.qkv:v"],
+                                 "step_start": 0, "step_end": 1, "active": True}], backend=xb)
+    rt.attach(conf)
+    h = qkv.register_forward_hook(lambda m, i, o: seen_bent.setdefault("o", o.clone()))
+    with torch.no_grad():
+        conf(x, t)
+    h.remove()
+    rt.detach()
+    assert torch.equal(seen_bent["o"][:, :2 * c], seen_out["o"][:, :2 * c]), "q or k was touched"
+    assert torch.count_nonzero(seen_bent["o"][:, 2 * c:]) == 0, "v was not bent"
+
+    doc, report = to_external([{"op": "multiply", "params": {"value": 0.5}, "active": True,
+                                "targets": ["skip:1", "downs.1.0.film", "mid_attn.qkv:v"]}])
+    assert [e["path"] for e in doc["bends"]] == ["downs.1.0.film"], doc["bends"]
+    assert report["kiln_only_targets"] == ["mid_attn.qkv:v", "skip:1"], report
+    print(f"  skips and q/k/v bend only their channels; {len(g['inner'])} inner points, "
+          f"{len(g['skips'])} skips; export leaves them out")
 
 
 if __name__ == "__main__":
