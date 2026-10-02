@@ -2,12 +2,15 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api, downloadPost, pollJob } from "../api.js";
 import { useApp } from "../state.jsx";
 import { usePlay, usePlayState } from "./playContext.jsx";
-import { Select, Num, Text, Disclose, Progress, Modal, Seg, Popover } from "../components/ui.jsx";
-import { DownloadIcon, TransferIcon } from "../components/icons.jsx";
+import { Select, Num, Disclose, Progress, Modal, Seg, Popover } from "../components/ui.jsx";
+import { DownloadIcon, ExpandIcon, TilesIcon, TransferIcon } from "../components/icons.jsx";
 import UnetVisualizer from "../components/UnetVisualizer.jsx";
 import BendPipeline from "../components/BendPipeline.jsx";
 import BendEditor, { BendInspector } from "../components/BendEditor.jsx";
-import BendPresetList from "../components/BendPresetList.jsx";
+import BendPresets from "../components/BendPresets.jsx";
+import {
+  CompareHistory, CompareMeta, CompareViewer, MODES, MODES_LARGE, StackChips,
+} from "../components/BendCompare.jsx";
 import { buildSamplePayload } from "../sampleSettings.jsx";
 import {
   expandGroup, holdersOf, isGroup, resolveTargets, toggleNodeTargets,
@@ -29,6 +32,9 @@ const GRAINS = [
   { id: "layers", label: "Layers", tip: "Every layer you can bend" },
 ];
 const VIEW_KEY = "kiln.bendMapView";
+const COMPARE_MODE_KEY = "kiln.bendCompareMode";
+// Earlier tries kept for the session. Each holds two small images and a stack.
+const HISTORY_MAX = 6;
 const GRAIN_KEY = "kiln.bendMapDensity";
 
 function loadPref(key, list, fallback) {
@@ -58,28 +64,19 @@ const BEND_SWEEP_EMPTY = {
   frames: null, busy: false, job: null, fps: 8, pingpong: true,
 };
 
-/** The two samples, side by side in the modal and stacked in the column, where
- *  one above the other is what gives each of them the full width. Same markup
- *  either way, so the enlarged view cannot drift from the inline one. */
-function ComparePair({ plain, bent, large = false, stacked = false, onEnlarge }) {
-  const box = (src, label, alt) => (
-    <div className="grow">
-      <div className="section-title">{label}</div>
-      <div className={`preview-box preview-square ${large || stacked ? "" : "preview-max"}`}>
-        {src ? (
-          onEnlarge
-            ? <img src={src} alt={alt} onClick={onEnlarge} className="clickable" />
-            : <img src={src} alt={alt} />
-        ) : <span className="sub">—</span>}
-      </div>
-    </div>
-  );
-  return (
-    <div className={`${stacked ? "col" : "row"} gap-2 mt-2 ${large ? "compare-large" : ""}`}>
-      {box(plain, "Without bends", "without bends")}
-      {box(bent, "With bends", "with bends")}
-    </div>
-  );
+/** A stack as it was, without the ids that only mean something on screen. */
+const stackKey = (bends) => JSON.stringify((bends || []).map(({ id, ...b }) => b));
+
+/** Kiln's zip route wants data URLs; a pair handed over from Discoveries is
+ *  served files. */
+async function asDataUrl(src) {
+  if (!src || src.startsWith("data:")) return src;
+  const blob = await fetch(src).then((r) => r.blob());
+  return new Promise((resolve) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(fr.result);
+    fr.readAsDataURL(blob);
+  });
 }
 
 export function BendWorkspace({ stack, setStack }) {
@@ -105,6 +102,13 @@ export function BendWorkspace({ stack, setStack }) {
   // state alongside the image itself so a tab switch does not silently
   // invalidate one without the other.
   const [cachedPlainKey, setCachedPlainKey] = usePlayState("bend.plainKey", null);
+  // Every compare this session, newest first: { id, plain, bent, card, stack,
+  // meta }. `shownTry` is the one in the viewer; null shows bend.plain/bent
+  // as they are (a pair handed over from Discoveries has no entry).
+  const [history, setHistory] = usePlayState("bend.history", []);
+  const [shownTry, setShownTry] = usePlayState("bend.shownTry", null);
+  const [compareMode, setCompareModeState] = useState(() => loadPref(COMPARE_MODE_KEY, MODES, "wipe"));
+  const [bigMode, setBigMode] = useState("split");
   const [compareOpen, setCompareOpen] = useState(false);
   const [presetsOpen, setPresetsOpen] = useState(false);
   const [view, setViewState] = useState(() => loadPref(VIEW_KEY, VIEWS, "simple"));
@@ -122,6 +126,7 @@ export function BendWorkspace({ stack, setStack }) {
   };
   const setView = (v) => { setViewState(v); remember(VIEW_KEY, v); };
   const setGrain = (g) => { setGrainState(g); remember(GRAIN_KEY, g); };
+  const setCompareMode = (m) => { setCompareModeState(m); remember(COMPARE_MODE_KEY, m); };
   const shown = view === "simple" ? "simple" : grain;
 
   const ops = sharedOps || [];
@@ -136,6 +141,9 @@ export function BendWorkspace({ stack, setStack }) {
     setGraph(null);
     setGenPlain(null);
     setGenBent(null);
+    // tries of another model say nothing about this one
+    setHistory([]);
+    setShownTry(null);
     api.post("/craft/introspect", { model_path: modelPath })
       .then(setGraph)
       .catch((e) => toast(e.message, "error"));
@@ -154,6 +162,7 @@ export function BendWorkspace({ stack, setStack }) {
     // it: leaving a stale key here would let Compare skip rendering and show
     // the discovery's "before" as if it were this model's.
     setCachedPlainKey(null);
+    setShownTry(null);
     setBendCompare(null);
   }, [bendCompare]);
 
@@ -245,6 +254,19 @@ export function BendWorkspace({ stack, setStack }) {
       setPresetsOpen(false);
       api.get("/craft/bends").then(setPresets);
     } catch (e) { toast(e.message, "error"); }
+  };
+
+  // Keep the stack and put the preset's bends after it: the way to combine a
+  // starter with what you already have, which Load (a replacement) cannot do.
+  const addPreset = (name) => {
+    const p = presets.find((x) => x.name === name);
+    if (!p?.bends?.length) return;
+    const added = p.bends.map((b) => ({ ...b, id: newBendId() }));
+    setStack([...stack, ...added]);
+    setFocusedBendId(added[0].id);
+    setNote(null);
+    setPresetsOpen(false);
+    toast(`Added “${name.replace(/^starter-/, "")}” — ${added.length} bend${added.length === 1 ? "" : "s"} after yours`, "success");
   };
 
   const loadPreset = (name) => {
@@ -345,13 +367,53 @@ export function BendWorkspace({ stack, setStack }) {
       setGenJob(j1);
       const bent = await pollJob(j1.id, setGenJob, 300);
       if (bent.status === "error") throw new Error(bent.message || "Sample with bends failed");
-      setGenBent(bent.detail?.frame || null);
+      const bentFrame = bent.detail?.frame || null;
+      setGenBent(bentFrame);
+      const entry = {
+        id: newBendId(),
+        plain: plainFrame,
+        bent: bentFrame,
+        card: bent.detail?.card || null,
+        stack: stack.map((b) => ({ ...b })),
+        meta: {
+          seed: bentBody.seed, steps: bentBody.steps, size: bentBody.image_size, reused: reusedPlain,
+        },
+      };
+      setHistory((h) => [entry, ...(h || [])].slice(0, HISTORY_MAX));
+      setShownTry(entry.id);
       toast(reusedPlain
         ? "Compared — reused the unbent image, only the bent side was sampled"
         : "Compared with vs without bends", "success");
     } catch (e) { toast(e.message, "error"); }
     setGenBusy(false);
     setGenJob(null);
+  };
+
+  const pair = (shownTry && history?.find((h) => h.id === shownTry))
+    || { plain: genPlain, bent: genBent, card: null, stack: null, meta: null };
+  const hasPair = !!(pair.plain || pair.bent);
+  const restorable = !!pair.stack && stackKey(pair.stack) !== stackKey(stack);
+
+  const restoreTry = (entry) => {
+    const loaded = entry.stack.map((b) => ({ ...b, id: newBendId() }));
+    setStack(loaded);
+    setFocusedBendId(loaded[0]?.id || null);
+    setNote(null);
+    toast("Restored the bends from that try — they replaced your stack", "success");
+  };
+
+  const downloadPair = async () => {
+    try {
+      const [plain, bent] = await Promise.all([asDataUrl(pair.plain), asDataUrl(pair.bent)]);
+      await downloadPost("/tools/zip", {
+        images: [
+          { image: plain, value: "without", card: null },
+          { image: bent, value: "with", card: pair.card },
+        ].filter((x) => x.image),
+        label: "bend",
+        name: `bend_compare_${Date.now().toString().slice(-6)}`,
+      }, "bend-compare.zip");
+    } catch (e) { toast(e.message || "Download failed", "error"); }
   };
 
   const runSweep = async () => {
@@ -464,6 +526,27 @@ export function BendWorkspace({ stack, setStack }) {
           )}
           <span className="bend-toolbar-sep" aria-hidden="true" />
           <Popover
+            label="Bend presets"
+            triggerClass="btn sm"
+            trigger={<><TilesIcon /> Presets</>}
+            open={presetsOpen}
+            onOpenChange={setPresetsOpen}
+            panelClass="bend-presets-pop"
+          >
+            <BendPresets
+              starters={starterPresets}
+              saved={savedPresets}
+              ops={ops}
+              nodes={nodes}
+              saveName={saveName}
+              setSaveName={setSaveName}
+              canSave={stack.length > 0 && !!saveName.trim()}
+              onSave={savePreset}
+              onLoad={loadPreset}
+              onAdd={addPreset}
+            />
+          </Popover>
+          <Popover
             label="Share with other tools"
             triggerLabel="Import or export bends as JSON"
             triggerClass="btn icon"
@@ -570,73 +653,92 @@ export function BendWorkspace({ stack, setStack }) {
             setFocusedId={(id) => { setFocusedBendId(id); setNote(null); }}
             addBend={() => addBend()}
             headExtra={(
-              <button type="button" className="btn sm" aria-expanded={presetsOpen}
-                onClick={() => setPresetsOpen((v) => !v)}>
-                Presets{presetsOpen ? " ▴" : " ▾"}
+              <button type="button" className="btn ghost sm" disabled={!stack.length}
+                onClick={() => setPresetsOpen(true)}>
+                Save as preset…
               </button>
-            )}
-            beforeStack={presetsOpen && (
-              <div className="bend-presets-panel">
-                <div className="row center wrap gap-2">
-                  <div className="grow">
-                    <Text label="" value={saveName} onChange={setSaveName} placeholder="Name this setup, e.g. melt-decoder" />
-                  </div>
-                  <button type="button" className="btn primary" onClick={savePreset} disabled={!stack.length}>
-                    Save bend
-                  </button>
-                </div>
-                <p className="hint mt-1 mb-2">
-                  Each starter changes one thing. Load one, Compare, then edit it. Hover for details.
-                </p>
-                <BendPresetList
-                  groups={[
-                    { label: "Starters", presets: starterPresets },
-                    { label: "Saved", presets: savedPresets },
-                  ]}
-                  onLoad={loadPreset}
-                  ops={ops}
-                />
-              </div>
             )}
           />
         </div>
 
         <div className="card bend-compare-card">
-          <div className="row between center wrap gap-2">
+          <div className="row between center gap-2">
             <h3 className="mb-0">Compare</h3>
-            {(genPlain || genBent) && (
-              <button type="button" className="btn ghost sm" onClick={() => setCompareOpen(true)}>
-                Enlarge
+            <div className="row center gap-2">
+              <Seg ariaLabel="How to show the pair" tabs={MODES} value={compareMode}
+                   onChange={setCompareMode} size="sm" />
+              <button type="button" className="btn icon" aria-label="Enlarge the compare"
+                title="Enlarge" disabled={!hasPair} onClick={() => setCompareOpen(true)}>
+                <ExpandIcon />
               </button>
-            )}
+            </div>
           </div>
-          <p className="hint mb-2">
+          {hasPair ? (
+            <CompareViewer plain={pair.plain} bent={pair.bent} mode={compareMode} />
+          ) : (
+            <div className="cmp-empty sub">
+              {genBusy ? "Sampling…" : "The same seed, without and then with your bends, shows up here."}
+            </div>
+          )}
+          <CompareMeta meta={pair.meta} />
+          {genBusy ? (
+            <div className="col gap-1">
+              <button type="button" className="btn danger w-full"
+                onClick={async () => { if (genJob) await api.post(`/jobs/${genJob.id}/cancel`); }}>
+                Stop
+              </button>
+              {genJob && (
+                <>
+                  <Progress value={genJob.progress || 0} />
+                  <span className="sub">{genJob.message || "Generating…"}</span>
+                </>
+              )}
+            </div>
+          ) : (
+            <button type="button" className="btn primary w-full" onClick={generateCompare}
+              disabled={!modelPath || !stack.length}>
+              Compare samples
+            </button>
+          )}
+          <p className="hint mb-0">
             Same seed, plain then bent. The plain side is reused until the model, settings or seed change.
           </p>
-          <div className="row center wrap gap-2">
-            {genBusy ? (
-              <button type="button" className="btn danger" onClick={async () => { if (genJob) await api.post(`/jobs/${genJob.id}/cancel`); }}>Stop</button>
-            ) : (
-              <button type="button" className="btn primary" onClick={generateCompare} disabled={!modelPath || !stack.length}>
-                Compare samples
-              </button>
-            )}
-            {genBusy && genJob && <span className="sub">{genJob.message || "Generating…"}</span>}
-          </div>
-          {(genPlain || genBent) && (
-            <ComparePair plain={genPlain} bent={genBent} stacked onEnlarge={() => setCompareOpen(true)} />
-          )}
+          <CompareHistory
+            history={history}
+            shownId={shownTry}
+            ops={ops}
+            onShow={setShownTry}
+            onRestore={restoreTry}
+            restorable={restorable}
+          />
         </div>
       </div>
 
       {compareOpen && (
         <Modal
-          title="Compare: without vs with bends"
+          title="Compare"
           wide
           onClose={() => setCompareOpen(false)}
-          footer={<button type="button" className="btn ghost" onClick={() => setCompareOpen(false)}>Close</button>}
+          footer={(
+            <>
+              <button type="button" className="btn" onClick={downloadPair} disabled={!hasPair}>
+                <DownloadIcon /> Download pair
+              </button>
+              <button type="button" className="btn primary" disabled={!pair.bent}
+                onClick={() => { setCompareOpen(false); openFrameInCreate({ image: pair.bent, card: pair.card }); }}>
+                Open bent in Create
+              </button>
+              <button type="button" className="btn ghost" onClick={() => setCompareOpen(false)}>Close</button>
+            </>
+          )}
         >
-          <ComparePair plain={genPlain} bent={genBent} large />
+          <div className="row between center wrap gap-2 mb-2">
+            <Seg ariaLabel="How to show the pair" tabs={MODES_LARGE} value={bigMode}
+                 onChange={setBigMode} size="sm" />
+            <CompareMeta meta={pair.meta} />
+          </div>
+          <CompareViewer plain={pair.plain} bent={pair.bent} mode={bigMode} large />
+          <StackChips stack={pair.stack} ops={ops} />
         </Modal>
       )}
 

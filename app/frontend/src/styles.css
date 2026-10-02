@@ -749,22 +749,117 @@ body {
 .run-mini { position: relative; display: block; height: 4px; border-radius: 2px; background: var(--bg-1); }
 .run-mini > span { position: absolute; top: 0; bottom: 0; border-radius: 2px; background: var(--text-dim); }
 .run-mini.hot > span { background: var(--accent); }
-.bend-presets-panel {
-  margin-top: var(--s-2);
-  padding: var(--s-2);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--bg-3);
-}
-.bend-presets-panel .bend-preset-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: var(--s-3);
-  align-items: start;
-}
-/* Two samples, one above the other, each as wide as the column. */
-.bend-compare-card .preview-box { max-height: min(34vh, 330px); }
 .bend-editor { min-height: 0; }
+
+/* Presets popover (BendPresets.jsx): save the stack, then starters as cards
+   that lead with what they do, then your own as rows. */
+.bend-presets-pop { width: min(720px, calc(100vw - 32px)); max-height: min(78vh, 760px); overflow-y: auto; }
+.bend-presets { display: flex; flex-direction: column; gap: var(--s-3); }
+.bend-presets section { display: flex; flex-direction: column; gap: var(--s-2); }
+.preset-save { display: flex; gap: var(--s-2); }
+.preset-save-field {
+  flex: 1; display: flex; align-items: center; gap: var(--s-2); min-width: 0;
+  padding: 0 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg-1);
+}
+.preset-save-field:focus-within { border-color: var(--accent); }
+.preset-save-field span { font-size: var(--fs-sm); color: var(--text-dim); white-space: nowrap; }
+.preset-save-field input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--text); padding: 7px 0; }
+.preset-save-field input:focus { outline: none; }
+.preset-note { margin: calc(-1 * var(--s-2)) 0 0; font-size: var(--fs-xs); }
+.preset-head { margin-bottom: 0; }
+.preset-grid {
+  list-style: none; margin: 0; padding: 0;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: var(--s-2);
+}
+.preset-card {
+  display: flex; flex-direction: column; gap: 6px; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg-3);
+}
+.preset-card:hover, .preset-card:focus-within { border-color: var(--accent); }
+.preset-name { font-weight: 650; }
+.preset-lead { margin: 0; font-size: var(--fs-sm); line-height: 1.45; color: var(--text-dim); }
+.preset-bends { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.preset-bends li { display: grid; grid-template-columns: auto minmax(40px, 1fr); align-items: center; gap: var(--s-2); }
+.preset-bends li > span:first-child { font-size: var(--fs-xs); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Which stages a preset reaches, each segment as wide as its share of layers. */
+.preset-stages { display: flex; gap: 2px; width: 72px; height: 6px; flex-shrink: 0; }
+.preset-stages span { flex-basis: 0; border-radius: 2px; background: var(--bg-1); }
+.preset-stages span.on { background: var(--stage); }
+.preset-rows {
+  list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  max-height: 220px; overflow-y: auto;
+}
+.preset-rows li { display: flex; align-items: center; gap: var(--s-2); padding: 6px 10px; }
+.preset-rows li + li { border-top: 1px solid var(--line); }
+.preset-row-name { font-weight: 600; white-space: nowrap; }
+.preset-row-sum { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Compare (BendCompare.jsx). */
+.bend-compare-card { display: flex; flex-direction: column; gap: var(--s-2); }
+.bend-compare-card .hint { margin: 0; }
+.cmp-empty {
+  display: flex; align-items: center; justify-content: center; aspect-ratio: 1; padding: var(--s-4);
+  text-align: center; border: 1px dashed var(--line); border-radius: var(--radius-sm);
+}
+.cmp-viewer { width: 100%; }
+.cmp-frame {
+  position: relative; margin: 0; overflow: hidden; border-radius: var(--radius-sm);
+  border: 1px solid var(--line); background: var(--bg-2);
+}
+.cmp-frame img, .cmp-frame canvas { display: block; width: 100%; height: auto; }
+.cmp-viewer.large .cmp-frame img, .cmp-viewer.large .cmp-frame canvas {
+  max-height: 68vh; object-fit: contain;
+}
+.cmp-viewer.large > .cmp-wipe, .cmp-viewer.large > .cmp-flip, .cmp-viewer.large > .cmp-diff {
+  max-width: min(68vh, 100%); margin: 0 auto;
+}
+.cmp-split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-2); }
+.cmp-tag {
+  position: absolute; top: 6px; padding: 2px 8px; border-radius: 999px;
+  background: rgba(14, 15, 19, 0.78); color: var(--text); font-size: var(--fs-xs); font-weight: 600;
+  pointer-events: none;
+}
+.cmp-tag.left { left: 6px; }
+.cmp-tag.right { right: 6px; }
+.cmp-tag.hot { color: var(--accent-2); }
+.cmp-missing { display: flex; align-items: center; justify-content: center; aspect-ratio: 1; }
+.cmp-wipe { cursor: ew-resize; touch-action: none; user-select: none; }
+.cmp-wipe-top { position: absolute; inset: 0; height: 100% !important; }
+.cmp-wipe-line { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--text); pointer-events: none; }
+.cmp-wipe-handle {
+  position: absolute; top: 50%; width: 26px; height: 26px; margin: -13px 0 0 -13px; border-radius: 50%;
+  background: var(--text); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+.cmp-wipe-handle::before {
+  content: "‹ ›"; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  color: var(--bg); font-size: 13px; font-weight: 700; letter-spacing: 1px;
+}
+.cmp-wipe-handle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.cmp-flip { display: block; width: 100%; padding: 0; cursor: pointer; font: inherit; color: inherit; }
+.cmp-flip-hint {
+  position: absolute; bottom: 6px; right: 6px; padding: 2px 8px; border-radius: 999px;
+  background: rgba(14, 15, 19, 0.78); color: var(--text-dim); font-size: var(--fs-xs);
+}
+.cmp-meta { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); flex-wrap: wrap; }
+.cmp-stack { list-style: none; margin: var(--s-3) 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.cmp-stack li {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px 3px 3px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--bg-2); font-size: var(--fs-sm);
+}
+.cmp-history { display: flex; flex-direction: column; gap: 6px; padding-top: var(--s-2); border-top: 1px solid var(--line); }
+.cmp-history-row { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; }
+.cmp-try {
+  display: flex; flex-direction: column; gap: 3px; padding: 0; border: 0; background: none;
+  color: var(--text-faint); font: inherit; font-size: var(--fs-xs); cursor: pointer; text-align: left;
+}
+.cmp-try img {
+  width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 5px;
+  border: 1px solid var(--line); box-sizing: border-box; opacity: 0.75;
+}
+.cmp-try:hover img { opacity: 1; }
+.cmp-try.on { color: var(--text); }
+.cmp-try.on img { border: 2px solid var(--accent); opacity: 1; }
+.cmp-restore { gap: var(--s-2); }
 /* The stack reads left to right across the full width: a bend is a step in a
    chain, and stacked vertically in a narrow column it could show two at a time
    before scrolling. Cards keep a fixed width so the row scrolls predictably. */
@@ -1418,40 +1513,6 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .source-scroll.model-scroll { max-height: min(62vh, 560px); }
 .thumb.virtual-cell.clickable { cursor: zoom-in; }
 .thumb.virtual-cell.clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-
-/* Preset list: one row per stack, name over a one-line summary. Scrolls past a
-   handful rather than pushing the bend editor off screen. */
-.bend-preset-rows {
-  list-style: none;
-  margin: 0 0 var(--s-2);
-  padding: 0;
-  /* Two rows, then scroll. Nine presets listed in full pushed the bend editor
-     off the bottom of the card, which is the thing you are actually editing. */
-  max-height: min(40vh, 360px);
-  overflow-y: auto;
-}
-.bend-preset-row {
-  display: block;
-  width: 100%;
-  text-align: left;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  padding: 4px 7px;
-  cursor: pointer;
-  color: var(--text);
-  font-family: inherit;
-}
-.bend-preset-row:hover { background: var(--bg-3); border-color: var(--accent); }
-.bend-preset-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.bend-preset-row .name { display: block; font-size: var(--fs-sm); font-weight: 600; }
-.bend-preset-row .summary {
-  display: block;
-  font-size: var(--fs-xs);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 
 .run-params { display: flex; flex-direction: column; gap: 2px; }
 .source-inner { position: relative; width: 100%; }

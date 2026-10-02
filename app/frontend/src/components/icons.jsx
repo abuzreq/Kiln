@@ -229,6 +229,27 @@ export function TransferIcon(props) {
   );
 }
 
+/** Two corners pulled apart: show this larger. */
+export function ExpandIcon(props) {
+  return (
+    <Icon {...props}>
+      <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+    </Icon>
+  );
+}
+
+/** Four tiles: a gallery of presets. */
+export function TilesIcon(props) {
+  return (
+    <Icon {...props}>
+      <rect x="3" y="3" width="7" height="7" rx="1.5" />
+      <rect x="14" y="3" width="7" height="7" rx="1.5" />
+      <rect x="3" y="14" width="7" height="7" rx="1.5" />
+      <rect x="14" y="14" width="7" height="7" rx="1.5" />
+    </Icon>
+  );
+}
+
 export function CaptureIcon(props) {
   return (
     <Icon {...props}>

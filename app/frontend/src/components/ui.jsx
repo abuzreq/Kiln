@@ -221,10 +221,19 @@ function focusables(root) {
  *  presets): a modal would hide the work they act on, and an inline panel pushes
  *  that work down the page. Closes on Escape (focus goes back to the button) or
  *  a press outside. `children` may be a function, handed `close`, for actions
- *  that should shut it.
+ *  that should shut it. Pass `open` and `onOpenChange` to open it from
+ *  elsewhere too (a second button that leads to the same panel).
  */
-export function Popover({ label, trigger, triggerLabel, triggerClass = "btn sm", align = "end", children }) {
-  const [open, setOpen] = useState(false);
+export function Popover({
+  label, trigger, triggerLabel, triggerClass = "btn sm", align = "end", children,
+  open: openProp, onOpenChange, panelClass = "",
+}) {
+  const [openState, setOpenState] = useState(false);
+  const open = openProp ?? openState;
+  const setOpen = useCallback((next) => {
+    const v = typeof next === "function" ? next(open) : next;
+    if (onOpenChange) onOpenChange(v); else setOpenState(v);
+  }, [open, onOpenChange]);
   // The side it opens towards. Toolbars wrap, so a button that sits at the
   // right edge on a wide window can be at the left on a narrow one, and a panel
   // hung from its right edge would then leave the screen.
@@ -232,7 +241,7 @@ export function Popover({ label, trigger, triggerLabel, triggerClass = "btn sm",
   const wrap = useRef(null);
   const btn = useRef(null);
   const panel = useRef(null);
-  const close = useCallback(() => { setOpen(false); btn.current?.focus(); }, []);
+  const close = useCallback(() => { setOpen(false); btn.current?.focus(); }, [setOpen]);
 
   useLayoutEffect(() => {
     if (!open) { setSide(align); return; }
@@ -255,7 +264,10 @@ export function Popover({ label, trigger, triggerLabel, triggerClass = "btn sm",
       document.removeEventListener("mousedown", onDown);
       document.removeEventListener("keydown", onKey);
     };
-  }, [open, close]);
+    // Bound once per opening: setOpen changes identity with `open`, and
+    // re-running would move focus back to the first control on every keystroke.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   return (
     <span className="popover-anchor" ref={wrap}>
@@ -272,7 +284,7 @@ export function Popover({ label, trigger, triggerLabel, triggerClass = "btn sm",
         {trigger}
       </button>
       {open && (
-        <div ref={panel} className={`popover popover-${side}`} role="dialog" aria-label={label}>
+        <div ref={panel} className={`popover popover-${side} ${panelClass}`.trim()} role="dialog" aria-label={label}>
           {typeof children === "function" ? children(close) : children}
         </div>
       )}

@@ -11,7 +11,8 @@ function formatTarget(t) {
   return GROUP_LABELS[t] || t;
 }
 
-function formatTargets(targets) {
+/** Where a bend acts, in a few words: group names, or the first few layers. */
+export function formatTargets(targets) {
   // Not "all layers": _resolve_targets in app/core/craft/bending.py expands an
   // empty list to the empty set, so a bend with no targets hooks nothing at
   // all. Reading it the other way round made a bend look like it was doing the
@@ -39,6 +40,19 @@ export function bendAmount(b, def) {
     || Object.keys(params)[0];
   const v = key != null ? params[key] : null;
   return v == null ? null : String(v);
+}
+
+/** "Clamp -0.8…0.8", "Shift (roll) 6, 0", "Multiply 0.65": the op and the
+ *  numbers that matter, for places with room for one short line per bend. */
+export function bendHeadline(b, def) {
+  const name = def?.label || b?.op || "bend";
+  const p = b?.params || {};
+  if (p.min != null && p.max != null && def?.params?.some((x) => x.name === "min")) {
+    return `${name} ${p.min}…${p.max}`;
+  }
+  if (p.dx != null || p.dy != null) return `${name} ${p.dx ?? 0}, ${p.dy ?? 0}`;
+  const amount = bendAmount(b, def);
+  return amount != null ? `${name} ${amount}` : name;
 }
 
 function bendLine(b, i, opMap) {
