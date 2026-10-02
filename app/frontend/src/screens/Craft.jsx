@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { api, downloadPost, pollJob } from "../api.js";
+import { api, downloadPost, mediaUrl, pollJob } from "../api.js";
 import { useApp } from "../state.jsx";
 import { usePlay, usePlayState } from "./playContext.jsx";
 import { Select, Num, Disclose, Progress, Modal, Seg, Popover } from "../components/ui.jsx";
@@ -16,10 +16,14 @@ import {
   expandGroup, holdersOf, isGroup, resolveTargets, toggleNodeTargets,
 } from "../bendTargets.js";
 import { bendCount, newBendId, normalizeStack } from "../bendStack.js";
+import { randomBend, rerollBend } from "../bendRandom.js";
 
 // How the model is shown while you pick what to bend. Simple is the signal
 // path in words; Structure is the map, at two grains. The geometry under the
 // two map grains is the same, so switching does not move anything.
+// The shortest a sweep video runs; see videoRepeat.
+const VIDEO_MIN_SECONDS = 3;
+
 const VIEWS = [
   { id: "simple", label: "Simple", tip: "The model as a signal path: encoder, bottleneck, decoder" },
   { id: "structure", label: "Structure", tip: "The map of the network itself" },
@@ -97,6 +101,7 @@ export function BendWorkspace({ stack, setStack }) {
   const [genBent, setGenBent] = usePlayState("bend.bent", null);
   const [sweep, setSweep] = usePlayState("bend.sweep", BEND_SWEEP_EMPTY);
   const [gif, setGif] = usePlayState("bend.gif", null);
+  const [video, setVideo] = usePlayState("bend.video", null);
   // What the cached unbent image (bend.plain) was sampled from. Kept in Play
   // state alongside the image itself so a tab switch does not silently
   // invalidate one without the other.
@@ -113,6 +118,7 @@ export function BendWorkspace({ stack, setStack }) {
   const [view, setViewState] = useState(() => loadPref(VIEW_KEY, VIEWS, "simple"));
   const [grain, setGrainState] = useState(() => loadPref(GRAIN_KEY, GRAINS, "overview"));
   const [gifBusy, setGifBusy] = useState(false);
+  const [videoBusy, setVideoBusy] = useState(false);
 
   useEffect(() => {
     api.get("/craft/bends").then(setPresets).catch(() => {});
@@ -212,6 +218,36 @@ export function BendWorkspace({ stack, setStack }) {
     };
     setStack([...stack.slice(0, i + 1), copy, ...stack.slice(i + 1)]);
     setFocusedBendId(copy.id);
+    setNote(null);
+  };
+
+  // The dice. Rolling is how you look around, and the roll before this one is
+  // often the one you wanted, so one step back is kept -- for as long as the
+  // rolled bend is left as it came out. `sig` is what a roll changes; the
+  // stack is rebuilt on every set, so identity cannot tell.
+  const [lastRoll, setLastRoll] = useState(null);
+  const sig = (b) => JSON.stringify([b.op, b.params, b.targets, b.step_start, b.step_end]);
+  const rollBend = (id) => {
+    const src = stack.find((b) => b.id === id);
+    if (!src || !ops.length) return;
+    const rolled = rerollBend(src, ops, nodes);
+    setStack(stack.map((b) => (b.id === id ? rolled : b)));
+    setLastRoll({ id, prev: src, sig: sig(rolled) });
+    setNote(null);
+  };
+  const canUndoRoll = !!(lastRoll && focusedBend && lastRoll.id === focusedBend.id
+    && sig(focusedBend) === lastRoll.sig);
+  const undoRoll = () => {
+    if (!canUndoRoll) return;
+    setStack(stack.map((b) => (b.id === lastRoll.id ? { ...lastRoll.prev, active: b.active } : b)));
+    setLastRoll(null);
+  };
+  const addRandomBend = () => {
+    const bend = randomBend(ops, nodes);
+    if (!bend) return;
+    setStack([...stack, bend]);
+    setFocusedBendId(bend.id);
+    setLastRoll(null);
     setNote(null);
   };
 
@@ -459,6 +495,7 @@ export function BendWorkspace({ stack, setStack }) {
     if (!modelPath) { toast("Pick a model", "error"); return; }
     setSweep((s) => ({ ...s, busy: true, frames: null }));
     setGif(null);
+    setVideo(null);
     try {
       const { job: j } = await api.post("/craft/bend/sweep", {
         model_path: modelPath,
@@ -500,7 +537,8 @@ export function BendWorkspace({ stack, setStack }) {
 
   const dropFrame = (i) => {
     setSweep((s) => ({ ...s, frames: (s.frames || []).filter((_, k) => k !== i) }));
-    setGif(null);  // the built GIF no longer matches the strip
+    setGif(null);  // the built GIF and video no longer match the strip
+    setVideo(null);
   };
 
   const downloadFrames = async () => {
@@ -529,11 +567,42 @@ export function BendWorkspace({ stack, setStack }) {
         card: sweep.job?.detail?.card || null,
         kind: "sweep",
       });
-      setGif(r);
+      setGif({ ...r, at: Date.now() });
       toast(`GIF ready — ${r.frames} frames, saved to Sweeps`, "success");
     } catch (e) { toast(e.message, "error"); }
     setGifBusy(false);
   };
+
+  // A GIF loops by itself; a video file plays once wherever it ends up, and a
+  // six-frame sweep at 8 fps is gone in under a second. So the video repeats
+  // the sweep until it runs at least VIDEO_MIN_SECONDS.
+  const videoRepeat = () => {
+    const n = (sweep.frames || []).length;
+    const cycle = sweep.pingpong && n > 2 ? 2 * n - 2 : n;
+    return Math.max(1, Math.min(20, Math.ceil((VIDEO_MIN_SECONDS * sweep.fps) / Math.max(1, cycle))));
+  };
+
+  const makeVideo = async () => {
+    const frames = sweep.frames || [];
+    if (frames.length < 2) { toast("Run a sweep with at least two values first", "error"); return; }
+    setVideoBusy(true);
+    try {
+      const r = await api.post("/tools/video", {
+        images: frames.map((f) => f.image),
+        fps: sweep.fps,
+        pingpong: sweep.pingpong,
+        repeat: videoRepeat(),
+        name: `bend_${sweep.param}_${Date.now().toString().slice(-6)}`,
+        card: sweep.job?.detail?.card || null,
+        kind: "sweep",
+      });
+      setVideo({ ...r, at: Date.now() });
+      toast(`Video ready — ${r.seconds}s ${r.format.toUpperCase()} (${r.codec}), saved to Sweeps`, "success");
+    } catch (e) { toast(e.message, "error"); }
+    setVideoBusy(false);
+  };
+  // The preview shows whichever was made last; both stay downloadable.
+  const showVideo = !!video && (!gif || (video.at || 0) >= (gif.at || 0));
 
   const opMap = Object.fromEntries((ops || []).map((o) => [o.name, o]));
   const sweepBend = stack[sweep.bend];
@@ -631,47 +700,70 @@ export function BendWorkspace({ stack, setStack }) {
 
       <div className="bend-work">
         <div className="card bend-bench">
-          {/* The map and the settings of the bend it is editing, side by side:
-              the map sets where a bend acts, the panel everything else. They
-              wrap into one column when the card is too narrow for both. */}
-          <div className="bend-bench-top">
-            <div className="bend-bench-map">
-              <div className="row between center wrap gap-2">
-                <div className="row center wrap gap-2">
-                  <h3 className="mb-0">Model map</h3>
-                  {focusedBend ? (
-                    <span className="pill accent">
-                      Editing #{focusIndex + 1} {opMap[focusedBend.op]?.label || focusedBend.op}
-                    </span>
-                  ) : (
-                    <span className="pill">No bend selected</span>
-                  )}
-                </div>
+          {/* The map takes the whole width of the card: it is a picture of the
+              network, and its two sides need room to read as two sides. */}
+          <div className="bend-bench-map">
+            <div className="row between center wrap gap-2">
+              <div className="row center wrap gap-2">
+                <h3 className="mb-0">Model map</h3>
+                {focusedBend ? (
+                  <span className="pill accent">
+                    Editing #{focusIndex + 1} {opMap[focusedBend.op]?.label || focusedBend.op}
+                  </span>
+                ) : (
+                  <span className="pill">No bend selected</span>
+                )}
               </div>
-              <p className="hint mt-1 mb-2">{MAP_HINT[shown][focusedBend ? "focus" : "empty"]}</p>
-              {view === "simple" ? (
-                <BendPipeline
-                  graph={graph}
-                  focusTargets={focusTargets}
-                  holders={holders}
-                  hasFocus={!!focusedBend}
-                  activeGroups={(focusedBend?.targets || []).filter(isGroup)}
-                  onToggle={onMapToggle}
-                  onToggleGroup={toggleGroup}
-                  onCreateFromNode={onCreateFromNode}
-                />
-              ) : (
-                <UnetVisualizer
-                  graph={graph}
-                  focusTargets={focusTargets}
-                  holders={holders}
-                  hasFocus={!!focusedBend}
-                  density={grain}
-                  showInner={showInner}
-                  onToggle={onMapToggle}
-                  onCreateFromNode={onCreateFromNode}
-                />
-              )}
+            </div>
+            <p className="hint mt-1 mb-2">{MAP_HINT[shown][focusedBend ? "focus" : "empty"]}</p>
+            {view === "simple" ? (
+              <BendPipeline
+                graph={graph}
+                focusTargets={focusTargets}
+                holders={holders}
+                hasFocus={!!focusedBend}
+                activeGroups={(focusedBend?.targets || []).filter(isGroup)}
+                onToggle={onMapToggle}
+                onToggleGroup={toggleGroup}
+                onCreateFromNode={onCreateFromNode}
+              />
+            ) : (
+              <UnetVisualizer
+                graph={graph}
+                focusTargets={focusTargets}
+                holders={holders}
+                hasFocus={!!focusedBend}
+                density={grain}
+                showInner={showInner}
+                onToggle={onMapToggle}
+                onCreateFromNode={onCreateFromNode}
+              />
+            )}
+          </div>
+
+          {/* The stack and the settings of the bend it has focused, side by
+              side: pick a card on the left, edit it on the right, and set where
+              it acts on the map above. They wrap into one column when narrow. */}
+          <div className="bend-work-sep" />
+          <div className="bend-bench-bottom">
+            <div className="bend-bench-stack">
+              <BendEditor
+                ops={ops}
+                nodes={nodes}
+                points={points}
+                stack={stack}
+                setStack={setStack}
+                focusedId={focusedBendId}
+                setFocusedId={(id) => { setFocusedBendId(id); setNote(null); }}
+                addBend={() => addBend()}
+                addRandomBend={addRandomBend}
+                headExtra={(
+                  <button type="button" className="btn ghost sm" disabled={!stack.length}
+                    onClick={() => setPresetsOpen(true)}>
+                    Save as preset…
+                  </button>
+                )}
+              />
             </div>
             <BendInspector
               b={focusedBend}
@@ -684,28 +776,10 @@ export function BendWorkspace({ stack, setStack }) {
               update={updateBend}
               remove={removeBend}
               duplicate={duplicateBend}
+              onRoll={() => rollBend(focusedBend.id)}
+              onUndoRoll={canUndoRoll ? undoRoll : null}
             />
           </div>
-
-          {/* The stack lives in the same card as the map: the map is how you set
-              the layers of whichever card below is focused. */}
-          <div className="bend-work-sep" />
-          <BendEditor
-            ops={ops}
-            nodes={nodes}
-            points={points}
-            stack={stack}
-            setStack={setStack}
-            focusedId={focusedBendId}
-            setFocusedId={(id) => { setFocusedBendId(id); setNote(null); }}
-            addBend={() => addBend()}
-            headExtra={(
-              <button type="button" className="btn ghost sm" disabled={!stack.length}
-                onClick={() => setPresetsOpen(true)}>
-                Save as preset…
-              </button>
-            )}
-          />
         </div>
 
         <div className="card bend-compare-card">
@@ -795,7 +869,7 @@ export function BendWorkspace({ stack, setStack }) {
       >
         <p className="hint mb-2">
           One generation per value, same seed, same targets. Only the number moves, so the strip
-          can be saved as a GIF.
+          can be saved as a GIF or a video.
         </p>
         <div className="row wrap gap-3">
           <div className="w-130">
@@ -844,7 +918,7 @@ export function BendWorkspace({ stack, setStack }) {
             <div className="row between center wrap gap-2 mt-2">
               <span className="sub">
                 {sweep.frames.length} run{sweep.frames.length === 1 ? "" : "s"} — click one to open it in Create,
-                or drop the ones you don&apos;t want before building the GIF.
+                or drop the ones you don&apos;t want before building the GIF or video.
               </span>
               <button type="button" className="btn sm" onClick={downloadFrames}
                 title="Save every run in the strip as a zip of PNGs, each with its recipe embedded.">
@@ -881,7 +955,7 @@ export function BendWorkspace({ stack, setStack }) {
 
             <div className="row center wrap gap-2 mt-2">
               <div className="w-70">
-                <Num label="GIF fps" value={sweep.fps} min={1} max={30}
+                <Num label="fps" value={sweep.fps} min={1} max={30}
                   onChange={(v) => setSweep((s) => ({ ...s, fps: Math.max(1, Math.min(30, Math.round(v) || 1)) }))}
                   tip="Playback speed of the animation." />
               </div>
@@ -893,17 +967,33 @@ export function BendWorkspace({ stack, setStack }) {
               <button type="button" className="btn primary self-end mb-2" onClick={makeGif} disabled={gifBusy}>
                 {gifBusy ? "Building…" : "Make GIF"}
               </button>
+              <button type="button" className="btn primary self-end mb-2" onClick={makeVideo} disabled={videoBusy}
+                title="An MP4 (H.264), or a WebM where this machine has no H.264 encoder. Full colour, unlike a GIF.">
+                {videoBusy ? "Encoding…" : "Make video"}
+              </button>
               {gif && (
                 <a className="btn self-end mb-2" href={gif.gif} download={`${sweep.param}-sweep.gif`}>
-                  Download GIF
+                  <DownloadIcon /> GIF
+                </a>
+              )}
+              {video && (
+                <a className="btn self-end mb-2" href={mediaUrl(video.path)}
+                  download={`${sweep.param}-sweep.${video.format}`}>
+                  <DownloadIcon /> {video.format === "mp4" ? "MP4" : "WebM"}
                 </a>
               )}
             </div>
             <p className="hint mb-0">
-              Ping-pong plays the sweep forwards then back, so the loop has no jump.
+              Ping-pong plays the sweep forwards then back, so the loop has no jump. A GIF loops
+              by itself; the video repeats the sweep to run at least {VIDEO_MIN_SECONDS} seconds.
             </p>
 
-            {gif && (
+            {showVideo ? (
+              <div className="preview-box preview-max mt-2">
+                <video key={video.path} src={mediaUrl(video.path)} autoPlay loop muted playsInline controls
+                  aria-label="bend sweep video" />
+              </div>
+            ) : gif && (
               <div className="preview-box preview-max mt-2">
                 <img src={gif.gif} alt="bend sweep animation" />
               </div>

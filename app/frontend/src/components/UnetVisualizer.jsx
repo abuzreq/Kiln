@@ -71,7 +71,9 @@ export default function UnetVisualizer({
   // The map is laid out for the box it is drawn in, so a wider card spreads the
   // bands rather than leaving half of itself empty. Changes under 8px are
   // ignored: re-laying out on every pixel would feed the observer its own
-  // output.
+  // output. The box only exists once there is a graph to draw, so the observer
+  // is attached then rather than on mount.
+  const ready = !!graph?.nodes?.length;
   useEffect(() => {
     const el = boxRef.current;
     if (!el || typeof ResizeObserver === "undefined") return undefined;
@@ -83,7 +85,7 @@ export default function UnetVisualizer({
     const ro = new ResizeObserver(measure);
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [ready]);
 
   // The layers inside blocks are an advanced, Layers-only view: they open the
   // rows up a little so their dots fit under each block.

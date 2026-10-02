@@ -7,6 +7,7 @@ import OpPicker from "./OpPicker.jsx";
 import { explicitTargets, isGroup, resolveTargets } from "../bendTargets.js";
 import { depthOf } from "./unetLayout.js";
 import { bendAmount } from "../bendSynopsis.js";
+import { DiceIcon, UndoIcon } from "./icons.jsx";
 
 function defaultsFor(opDef) {
   const p = {};
@@ -263,7 +264,7 @@ function WhereChips({ targets, nodes, onChange }) {
 
 /** One bend in the stack. It only says what the bend is -- op, amount, where
  *  it hooks in, when it acts -- and picks it; editing happens in the panel
- *  beside the map, which has room the card never did. Its states are the
+ *  beside the stack, which has room the card never did. Its states are the
  *  ones that change what a run does: off, and on but hooked into nothing. */
 function BendCard({ b, i, opDef, nodes, points, focused, dragging, onFocus, onKeyMove, dragProps }) {
   const amount = bendAmount(b, opDef);
@@ -327,13 +328,13 @@ function BendCard({ b, i, opDef, nodes, points, focused, dragging, onFocus, onKe
   );
 }
 
-/** The focused bend's settings, beside the map that sets its layers.
+/** The focused bend's settings, beside the stack, under the map that sets its layers.
  *
  *  `groups` are the named target groups from /craft/ops; `toggleGroup` is the
  *  workspace's, so taking a group here behaves exactly as it did on the chips
  *  that used to sit above the map. */
 export function BendInspector({
-  b, index, opDef, ops, nodes, points, note, update, remove, duplicate,
+  b, index, opDef, ops, nodes, points, note, update, remove, duplicate, onRoll, onUndoRoll,
 }) {
   if (!b) {
     return (
@@ -365,6 +366,21 @@ export function BendInspector({
             update(b.id, { op: name, params: defaultsFor(nd), ...scheduleFor(nd) });
           }}
         />
+        {onRoll && (
+          <button type="button" className="btn icon sm" onClick={onRoll}
+            aria-label="Roll a random bend"
+            title={(b.targets || []).length
+              ? "Roll a random op, amount and timing. Where it acts stays as you set it."
+              : "Roll a random op, amount, timing and layers"}>
+            <DiceIcon size={15} />
+          </button>
+        )}
+        {onUndoRoll && (
+          <button type="button" className="btn icon sm" onClick={onUndoRoll}
+            aria-label="Back to the bend before the roll" title="Back to the bend before the roll">
+            <UndoIcon size={14} />
+          </button>
+        )}
         <button
           type="button"
           role="switch"
@@ -461,7 +477,7 @@ export function BendInspector({
 }
 
 export default function BendEditor({
-  ops, nodes, points, stack, setStack, focusedId, setFocusedId, addBend,
+  ops, nodes, points, stack, setStack, focusedId, setFocusedId, addBend, addRandomBend,
   headExtra, beforeStack,
 }) {
   const opMap = Object.fromEntries(ops.map((o) => [o.name, o]));
@@ -532,7 +548,7 @@ export default function BendEditor({
         </div>
       </div>
       <p className="hint mb-0">
-        Applied left to right — drag a card to reorder. Pick one to edit it beside the map.
+        Applied left to right — drag a card to reorder. Pick one to edit its settings.
       </p>
 
       {beforeStack || null}
@@ -559,10 +575,19 @@ export default function BendEditor({
           </React.Fragment>
         ))}
         {stack.length > 0 && slot(stack.length)}
-        <button type="button" className="bend-add-tile" onClick={addBend} disabled={!ops.length}>
-          <span aria-hidden="true">+</span>
-          Add bend
-        </button>
+        <div className="bend-add-col">
+          <button type="button" className="bend-add-tile" onClick={addBend} disabled={!ops.length}>
+            <span aria-hidden="true">+</span>
+            Add bend
+          </button>
+          {addRandomBend && (
+            <button type="button" className="bend-add-tile dice" onClick={addRandomBend}
+              disabled={!ops.length} title="Add a bend with a random op, amount, timing and layers">
+              <DiceIcon size={14} />
+              Random
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

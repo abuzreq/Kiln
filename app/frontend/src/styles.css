@@ -618,12 +618,14 @@ body {
 }
 .bend-work-sep { border-top: 1px solid var(--line); margin: var(--s-3) 0 0; }
 
-/* The map and the focused bend's settings. Side by side while the card has
-   room for both; the panel drops under the map when it does not. */
-.bend-bench-top { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--s-3) var(--s-4); }
-.bend-bench-map { flex: 1 1 440px; min-width: 0; }
+/* The map across the card; under it the stack and the focused bend's
+   settings, side by side while there is room and stacked when there is not. */
+.bend-bench-map { min-width: 0; }
+.bend-bench-bottom { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--s-3) var(--s-4); }
+.bend-bench-stack { flex: 1 1 360px; min-width: 0; }
+.bend-bench-bottom > .bend-inspector { margin-top: var(--s-3); }
 .bend-inspector {
-  flex: 0 1 320px; min-width: 280px;
+  flex: 0 1 340px; min-width: 280px;
   display: flex; flex-direction: column; gap: var(--s-3);
   padding: var(--s-3); border: 1px solid var(--line); border-radius: var(--radius-sm);
   background: var(--bg-2);
@@ -883,15 +885,19 @@ body {
 /* The stack reads left to right across the full width: a bend is a step in a
    chain, and stacked vertically in a narrow column it could show two at a time
    before scrolling. Cards keep a fixed width so the row scrolls predictably. */
+/* Wraps rather than scrolls: beside the settings panel a row holds two or
+   three cards, and a long stack hidden behind a scrollbar is a stack you
+   cannot see. Order still reads left to right, row by row. */
 .bend-stack {
   display: flex;
   flex-direction: row;
+  flex-wrap: wrap;
+  row-gap: var(--s-2);
   align-items: stretch;
-  overflow-x: auto;
   padding-bottom: var(--s-2);
   margin-top: var(--s-2);
 }
-/* A card names its bend and nothing else (editing is beside the map), so it is
+/* A card names its bend and nothing else (editing is in the panel beside), so it is
    narrow: wide enough for "Fourier amplify" with its badge and amount. */
 .bend-stack .bend-card { flex: 0 0 236px; width: 236px; }
 .bend-stack-empty { flex: 1; margin-right: var(--s-2); }
@@ -936,15 +942,18 @@ body {
   content: ""; position: absolute; top: 0; bottom: 0; left: 50%; width: 3px; margin-left: -1.5px;
   border-radius: 2px; background: var(--accent);
 }
+/* Add, and under it the dice: a plain bend to set up, or a random one to react to. */
+.bend-add-col { flex: 0 0 110px; display: flex; flex-direction: column; gap: 6px; margin-left: var(--s-1); }
 .bend-add-tile {
-  flex: 0 0 110px; display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 2px; min-height: 76px; margin-left: var(--s-1);
+  flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 2px; min-height: 52px;
   border: 1px dashed var(--line); border-radius: var(--radius-sm); background: transparent;
   color: var(--text-dim); font: inherit; font-size: var(--fs-sm); font-weight: 600; cursor: pointer;
 }
 .bend-add-tile span { font-size: 20px; line-height: 1; }
 .bend-add-tile:hover { border-color: var(--accent); color: var(--accent); }
 .bend-add-tile:disabled { opacity: 0.45; cursor: not-allowed; }
+.bend-add-tile.dice { flex: 0 0 auto; min-height: 30px; flex-direction: row; gap: 6px; }
 .bend-card-head-main { display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0; }
 .bend-card-op {
   min-width: 0;
@@ -1531,6 +1540,7 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
   background: var(--bg-3); color: var(--text); border: 1px solid var(--line);
   border-radius: var(--radius-sm); padding: 7px 12px; cursor: pointer;
   font-size: var(--fs-sm); font-weight: 600; font-family: inherit;
+  text-decoration: none;  /* a link dressed as a button (a download) is still a button */
 }
 .btn:hover { border-color: var(--accent); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
@@ -1587,7 +1597,7 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .progress > div { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width 0.2s; }
 
 .preview-box { background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius); display: flex; align-items: center; justify-content: center; overflow: hidden; }
-.preview-box img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.preview-box img, .preview-box video { max-width: 100%; max-height: 100%; object-fit: contain; }
 .preview-scroll { overflow: auto; align-items: flex-start; justify-content: flex-start; }
 .preview-scroll img { max-height: none; width: 100%; height: auto; object-fit: contain; }
 /* A snapshot shown at its own size rather than stretched to the column.
@@ -1714,7 +1724,7 @@ input:disabled, select:disabled { opacity: 0.65; cursor: not-allowed; }
 .modal-foot { margin-top: 18px; justify-content: flex-end; }
 
 .thumb-sm { width: 40px; height: 40px; flex: 0 0 40px; border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-3); border: 1px solid var(--line); }
-.thumb-sm img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.thumb-sm img, .thumb-sm video { width: 100%; height: 100%; object-fit: cover; display: block; }
 
 .logbox { margin: 12px 0 0; padding: var(--s-3); background: var(--bg-3); border: 1px solid var(--line); border-radius: var(--radius-sm); font-family: "SFMono-Regular", Consolas, monospace; font-size: 11.5px; line-height: 1.5; color: var(--text-dim); max-height: 240px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
 

@@ -722,13 +722,15 @@ def sweeps():
     from app.core.config import workspace
 
     out = []
-    files = [p for ext in ("*.png", "*.gif") for p in workspace.sweeps.glob(ext)]
+    files = [p for ext in ("*.png", "*.gif", "*.mp4", "*.webm") for p in workspace.sweeps.glob(ext)]
     for p in sorted(files, key=lambda x: x.stat().st_mtime, reverse=True)[:120]:
+        kind = p.suffix.lower()
         entry = {"path": str(p), "name": p.stem, "mtime": p.stat().st_mtime,
-                 "animated": p.suffix.lower() == ".gif"}
+                 "animated": kind == ".gif", "video": kind in (".mp4", ".webm"),
+                 "format": kind.lstrip(".")}
         try:
-            # GIFs carry no metadata chunk, so their recipe sits in a sibling .json
-            if entry["animated"]:
+            # GIFs and videos carry no Kiln card, so their recipe sits in a sibling .json
+            if entry["animated"] or entry["video"]:
                 sidecar = p.with_suffix(".json")
                 entry["card"] = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.exists() else None
             else:
@@ -755,7 +757,8 @@ def delete_sweep():
     if not p.exists():
         return err("not found", 404)
     p.unlink()
-    p.with_suffix(".json").unlink(missing_ok=True)   # the GIF's recipe sidecar
+    if p.suffix.lower() != ".png":
+        p.with_suffix(".json").unlink(missing_ok=True)   # a GIF's or video's recipe sidecar
     return ok({"deleted": str(p)})
 
 

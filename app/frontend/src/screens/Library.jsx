@@ -216,12 +216,19 @@ function Sweeps({ onClose }) {
       {items.map((it) => (
         <div key={it.path} className="asset-row static">
           <a className="thumb-sm" href={mediaUrl(it.path)} target="_blank" rel="noreferrer">
-            <img src={it.animated ? mediaUrl(it.path) : thumbUrl(it.path)} alt="" loading="lazy" />
+            {it.video ? (
+              <video src={mediaUrl(it.path)} muted loop playsInline preload="metadata"
+                onMouseEnter={(e) => e.currentTarget.play().catch(() => {})}
+                onMouseLeave={(e) => e.currentTarget.pause()} />
+            ) : (
+              <img src={it.animated ? mediaUrl(it.path) : thumbUrl(it.path)} alt="" loading="lazy" />
+            )}
           </a>
           <div className="meta">
             <b title={it.name}>{it.name}</b>
             <span className="sub">
               {it.animated && <span className="pill sm">GIF</span>}
+              {it.video && <span className="pill sm">{it.format === "mp4" ? "MP4" : "WebM"}</span>}
               {axisLabel(it.card) || cardLabel(it.card) || "no recorded settings"}
             </span>
           </div>
