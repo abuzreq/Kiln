@@ -163,7 +163,7 @@ function Shell() {
           <div className={mode === "prepare" ? "" : "pane-off"}><Studio /></div>
         )}
         {visited.play && (
-          <div className={mode === "play" ? "" : "pane-off"}><Play /></div>
+          <div className={mode === "play" ? "pane-play" : "pane-off"}><Play /></div>
         )}
       </div>
 

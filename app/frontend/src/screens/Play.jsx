@@ -1189,7 +1189,7 @@ export default function Play() {
 
   return (
     <PlayCtx.Provider value={value}>
-      <div className="play">
+      <div className={`play ${CANVAS_TABS.has(tab) ? "fill" : ""}`.trim()}>
         <PlaySetup
           model={activeModel}
           params={sampleParams}
@@ -1217,25 +1217,28 @@ export default function Play() {
             </div>
           </div>
         </PlaySetup>
-        <div className={`play-body ${CANVAS_TABS.has(tab) ? "" : "solo"}`}>
-          {tab === "create" && <div className="play-tools"><CreatePanel /></div>}
+        {/* Canvas: the picture with its results strip under it, and everything
+            you make and manage with in one column on the right. The tab fills
+            the window instead of scrolling, so the picture takes whatever
+            height is left and the results never fall below the fold. */}
+        <div className={`play-body ${CANVAS_TABS.has(tab) ? "canvas-layout" : "solo"}`}>
           {CANVAS_TABS.has(tab) && (
-            <div
-              className={`play-stage ${dragOver ? "drop-on" : ""} with-rail`}
-              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-              onDragLeave={() => setDragOver(false)}
-              onDrop={(e) => { e.preventDefault(); setDragOver(false); const f = e.dataTransfer.files?.[0]; if (f) loadFile(f); }}
-            >
-              <div className="play-main">
+            <>
+              <div
+                className={`play-stage canvas-col ${dragOver ? "drop-on" : ""}`}
+                onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={(e) => { e.preventDefault(); setDragOver(false); const f = e.dataTransfer.files?.[0]; if (f) loadFile(f); }}
+              >
                 <PlayCanvas brushable={!!canvasImage} />
-                <QueueStrip />
-                <ResultsPanel />
+                <ResultsStrip />
               </div>
-              <div className="play-rail">
+              <aside className="canvas-inspector" aria-label="Generate, layers and assets">
+                <CreatePanel />
                 <AssetsPanel />
                 <LayersPanel />
-              </div>
-            </div>
+              </aside>
+            </>
           )}
           {tab === "bend" && <div className="play-solo"><BendWorkspace stack={bendStack} setStack={setBendStack} /></div>}
           {tab === "merge" && <div className="play-solo"><Merge /></div>}
@@ -1376,7 +1379,7 @@ function PlayCanvas({ brushable }) {
   };
 
   return (
-    <div className="col">
+    <div className="col canvas-wrap">
       <div className="card canvas-card">
         <div className="row between center mb-2">
           <h3 className="mb-0">Canvas</h3>
@@ -1541,39 +1544,47 @@ function CaptureButton({ image, card, label = "Save", className = "btn sm" }) {
   );
 }
 
-/** Every image this session produced, newest first.
+/** Results and the queue, in one strip under the picture.
  *
- *  Sits directly under the canvas, as wide as it, in a wrapping grid. A side
- *  rail left it a 232px column under Assets and Layers, where only the first
- *  few ever showed; under the picture it has the canvas's full width, and it is
- *  where a batch or a queue of runs lands.
+ *  Fixed height and always on screen: as a grid that grew under the canvas,
+ *  results sat below the fold at 900px, so every Generate ended in a scroll.
+ *  Runs in flight come first (a progress ring, or a place in line), then every
+ *  image this session made, newest first. The strip scrolls sideways; the page
+ *  does not.
  */
-/** Every run the Create panel has in flight, one chip each.
- *
- *  A running chip shows a progress ring, a waiting one its place in line.
- *  Clicking a chip watches it; the x cancels it, and what it had is dropped. */
-function QueueStrip() {
-  const { runs, watchedId, watch, cancelRun, queueFolder } = usePlay();
-  if (!runs.length) return null;
+function ResultsStrip() {
+  const {
+    history, frame, placeHistory, removeHistory, clearHistory,
+    addHistoryAsLayer, applyCard, activeLayer,
+    runs, watchedId, watch, cancelRun, queueFolder,
+  } = usePlay();
   const live = runs.filter((r) => r.job.status === "running").length;
   const waiting = runs.length - live;
   // Where they land, as the landing rule decided: a lone run still goes to its
   // layer, and a queue (or a fill, which is never queued) says so too.
   const toResults = runs.filter((r) => r.toResults).length;
-  const lands = toResults === runs.length ? `Lands in Results, saved to captures/${queueFolder}`
+  const lands = toResults === runs.length ? `Lands here, saved to captures/${queueFolder}`
     : toResults === 0 ? (runs.some((r) => r.fill) ? "Lands over the mask" : "Lands in the layer")
-      : "Fill lands over the mask, the rest in Results";
+      : "Fill lands over the mask, the rest here";
+
   return (
-    <section className="card queue-strip" aria-label="Queue">
-      <div className="row between center">
-        <h3 className="mb-0">
-          Queue <span className="sub">· {live} running{waiting ? `, ${waiting} waiting` : ""}</span>
-        </h3>
-        <span className="sub">{lands}</span>
+    <section className="card results-strip" aria-label="Results">
+      <div className="results-strip-head">
+        <h3 className="mb-0">Results <span className="sub">· {history.length}</span></h3>
+        {runs.length > 0 ? (
+          <span className="sub">
+            {live} running{waiting ? `, ${waiting} waiting` : ""}. {lands}.
+          </span>
+        ) : history.length > 0 ? (
+          <span className="sub">Click one to put it into {activeLayer?.name || "the active layer"}.</span>
+        ) : null}
+        {history.length > 0 && (
+          <button type="button" className="btn ghost xs results-strip-clear" onClick={clearHistory}>Clear</button>
+        )}
       </div>
-      <div className="queue-chips">
+      <div className="results-strip-row">
         {runs.map((r) => (
-          <QueueChip
+          <QueueTile
             key={r.id}
             run={r}
             watched={r.id === watchedId}
@@ -1581,6 +1592,47 @@ function QueueStrip() {
             onCancel={() => cancelRun(r.id)}
           />
         ))}
+        {history.map((h, i) => {
+          const seed = h.card?.params?.seed;
+          return (
+            <div key={h.id} className={`strip-tile ${h.img === frame ? "on" : ""}`}>
+              <button
+                type="button"
+                className="strip-thumb"
+                onClick={() => placeHistory(h)}
+                aria-label={`Result ${i + 1}${seed != null ? `, seed ${seed}` : ""}`}
+                title={`${cardLabel(h.card) || `Result ${i + 1}`} — click to put it into ${activeLayer?.name || "the active layer"}`}
+              >
+                <img src={h.img} alt="" />
+                <span className="play-result-idx">#{i + 1}</span>
+              </button>
+              <span className="strip-cap mono">{seed != null ? seed : "—"}</span>
+              <div className="strip-actions">
+                <Tooltip text="Add on top of the layer stack, keeping what is there">
+                  <button type="button" className="btn xs" onClick={() => addHistoryAsLayer(h)}>Layer</button>
+                </Tooltip>
+                <CaptureButton image={h.img} card={h.card} label="Save" className="btn xs" />
+                <Tooltip text={h.card?.params ? "Load this image's settings into the sampler" : "No settings recorded for this image"}>
+                  <button type="button" className="btn xs" onClick={() => applyCard(h.card)} disabled={!h.card?.params}>
+                    Set
+                  </button>
+                </Tooltip>
+              </div>
+              <button
+                type="button"
+                className="strip-x"
+                onClick={() => removeHistory(h.id)}
+                aria-label={`Remove result ${i + 1}`}
+                title="Remove from results"
+              >×</button>
+            </div>
+          );
+        })}
+        {!runs.length && !history.length && (
+          <p className="sub results-strip-empty">
+            Everything you generate lands here too, so nothing is lost when the canvas changes.
+          </p>
+        )}
       </div>
     </section>
   );
@@ -1591,7 +1643,9 @@ function seedsOf(job) {
   return d.seeds || (d.seed != null ? [d.seed] : []);
 }
 
-function QueueChip({ run, watched, onWatch, onCancel }) {
+/** A run in flight. Clicking it watches it (its preview goes on the canvas);
+ *  the x cancels it, and what it had is dropped. */
+function QueueTile({ run, watched, onWatch, onCancel }) {
   const j = run.job;
   const running = j.status === "running";
   const paused = running && !!j.detail?.paused;
@@ -1601,91 +1655,27 @@ function QueueChip({ run, watched, onWatch, onCancel }) {
     ? (seeds.length > 1 ? `seeds ${Math.min(...seeds)}–${Math.max(...seeds)}` : `seed ${seeds[0]}`)
     : "";
   const place = j.detail?.queue?.position;
-  // A waiting chip's place is already its marker on the left.
   const state = running
     ? (paused ? "paused" : `${Math.round((j.progress || 0) * 100)}%`)
     : "waiting";
-  const label = [j.kind === "inpaint" ? "fill" : null, model, seedText]
-    .filter(Boolean).join(" · ");
+  const label = [j.kind === "inpaint" ? "fill" : null, model, seedText].filter(Boolean).join(" · ");
   return (
-    <div className={`queue-chip ${watched ? "on" : ""} ${running ? "running" : "waiting"}`}>
+    <div className={`strip-tile queue-tile ${watched ? "on" : ""} ${running ? "running" : "waiting"}`}>
       <button
         type="button"
-        className="queue-chip-main"
+        className="strip-thumb"
         onClick={() => onWatch(run.id)}
-        title={watched ? "Watching this run" : "Watch this run: its preview goes on the canvas"}
+        aria-label={`${label}, ${state}${watched ? ", watching" : ""}`}
+        title={watched ? `Watching: ${label}` : `Watch this run: its preview goes on the canvas. ${label}`}
       >
         {running
-          ? <span className="queue-ring" style={{ "--p": j.progress || 0 }} aria-hidden="true" />
+          ? <span className="queue-ring big" style={{ "--p": j.progress || 0 }} aria-hidden="true" />
           : <span className="queue-place mono" aria-hidden="true">{place ? `#${place}` : "…"}</span>}
-        <span className="queue-chip-label">{label}</span>
-        <span className="sub mono">{state}</span>
+        <span className="queue-tile-state mono">{state}</span>
       </button>
-      <button
-        type="button"
-        className="queue-chip-x"
-        onClick={onCancel}
-        aria-label="Cancel this run"
-        title="Cancel this run"
-      >×</button>
+      <span className="strip-cap" title={label}>{j.kind === "inpaint" ? "fill" : seedText || "run"}</span>
+      <button type="button" className="strip-x" onClick={onCancel} aria-label="Cancel this run" title="Cancel this run">×</button>
     </div>
-  );
-}
-
-function ResultsPanel() {
-  const {
-    history, frame, placeHistory, removeHistory, clearHistory,
-    addHistoryAsLayer, applyCard, activeLayer,
-  } = usePlay();
-  if (!history.length) return null;
-
-  return (
-    <section className="card results-panel" aria-label="Results">
-      <div className="row between center mb-2">
-        <h3 className="mb-0">Results <span className="sub">· {history.length}</span></h3>
-        <button type="button" className="btn ghost sm" onClick={clearHistory}>Clear</button>
-      </div>
-      <div className="results-grid">
-        {history.map((h, i) => {
-          const selected = h.img === frame;
-          const seed = h.card?.params?.seed;
-          return (
-            <div key={h.id} className={`play-result ${selected ? "on" : ""}`}>
-              <button
-                type="button"
-                className="play-result-thumb"
-                onClick={() => placeHistory(h)}
-                aria-label={`Result ${i + 1}${seed != null ? `, seed ${seed}` : ""}`}
-                title={`${cardLabel(h.card) || `Result ${i + 1}`} — click to put it into ${activeLayer?.name || "the active layer"}`}
-              >
-                <img src={h.img} alt="" />
-                <span className="play-result-idx">#{i + 1}</span>
-              </button>
-              <span className="play-result-seed mono">{seed != null ? `seed ${seed}` : "—"}</span>
-              <div className="play-result-actions">
-                <Tooltip text="Add on top of the layer stack, keeping what is there">
-                  <button type="button" className="btn xs" onClick={() => addHistoryAsLayer(h)}>Layer</button>
-                </Tooltip>
-                <CaptureButton image={h.img} card={h.card} label="Save" className="btn xs" />
-                <Tooltip text={h.card?.params ? "Load this image's settings into the sampler" : "No settings recorded for this image"}>
-                  <button
-                    type="button"
-                    className="btn xs"
-                    onClick={() => applyCard(h.card)}
-                    disabled={!h.card?.params}
-                  >
-                    Set
-                  </button>
-                </Tooltip>
-                <Tooltip text="Remove from results">
-                  <button type="button" className="btn xs ghost" onClick={() => removeHistory(h.id)} aria-label="Remove">×</button>
-                </Tooltip>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </section>
   );
 }
 

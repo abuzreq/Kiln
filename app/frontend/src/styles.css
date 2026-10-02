@@ -44,6 +44,7 @@
   --canvas-max-w: 1100px;
   --canvas-max-h: 960px;
   --rail-w: 232px;
+  --inspector-w: 340px;
   font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
 }
 
@@ -167,8 +168,8 @@ body {
   width: 100%; margin-inline: auto;
   max-width: calc(var(--sidebar-w) + var(--canvas-max-w) + var(--rail-w) + 2 * var(--s-3));
 }
+.play.fill { max-width: calc(var(--canvas-max-w) + var(--inspector-w) + var(--s-3)); }
 .play-body { display: grid; grid-template-columns: minmax(260px, var(--sidebar-w)) minmax(0, 1fr); gap: var(--s-3); align-items: start; }
-.play-tools { min-width: 0; }
 @media (max-width: 900px) {
   .play-body { grid-template-columns: 1fr; }
 }
@@ -363,103 +364,101 @@ body {
 .btn.xs { padding: 1px 6px; font-size: var(--fs-xs); }
 .btn.xs.w-full { width: 100%; margin-top: 4px; }
 
-/* The canvas with Results under it, and the right rail (Assets, Layers). The
-   rail drops under the canvas on narrow viewports, where a side column would
-   squeeze the image too far. */
-.play-main { display: flex; flex-direction: column; gap: var(--s-3); min-width: 0; }
-.play-main > .col { min-width: 0; }
-.play-rail {
+/* Canvas: the picture over its results strip, and the inspector beside them.
+   The tab fills the window (the Play pane is given the content area's height)
+   instead of scrolling, so the picture takes the height that is left and the
+   results are always on screen. Narrow windows go back to one scrolling
+   column further down. */
+.pane-play { height: 100%; }
+.play.fill { height: 100%; }
+.play-body.canvas-layout {
+  flex: 1; min-height: 0;
+  grid-template-columns: minmax(0, 1fr) var(--inspector-w);
+  align-items: stretch;
+}
+.canvas-col { display: flex; flex-direction: column; gap: var(--s-3); min-width: 0; min-height: 0; }
+.canvas-col > .canvas-wrap { flex: 1; min-height: 0; gap: 0; }
+.canvas-layout .canvas-card { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+/* The picture fits the stage both ways. The stage is a size container, so the
+   image's caps are the stage's own box rather than a guess from 100vh. */
+.canvas-layout .canvas-card .hero {
+  flex: 1; min-height: 240px; max-height: none; container-type: size;
+}
+.canvas-layout .canvas-card .hero img { max-width: 100cqw; max-height: 100cqh; }
+.canvas-inspector {
   display: flex; flex-direction: column; gap: var(--s-3);
-  min-width: 0; position: sticky; top: 0;
-  max-height: calc(100vh - var(--topbar-h) - var(--content-pad-y) * 2);
-  overflow-y: auto;
+  min-width: 0; min-height: 0; overflow-y: auto; padding-right: 2px;
 }
-@media (max-width: 1100px) { .play-rail { position: static; max-height: none; overflow: visible; } }
-.play-stage.with-rail {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) var(--rail-w);
-  gap: var(--s-3);
-  align-items: start;
-}
-@media (max-width: 1100px) {
-  .play-stage.with-rail { grid-template-columns: 1fr; }
-  /* One column: Layers belongs next to the picture it edits, so the rail goes
-     between the canvas and Results rather than under a long results grid. */
-  .play-main { display: contents; }
-  .play-rail { order: 1; }
-  .results-panel { order: 2; }
+@media (max-width: 1000px) {
+  .play.fill { height: auto; }
+  .play-body.canvas-layout { grid-template-columns: minmax(0, 1fr); }
+  .canvas-layout .canvas-card .hero { flex: none; height: min(70vh, 620px); }
+  .canvas-inspector { overflow: visible; }
 }
 
-/* Queue: one chip per run in flight, between the canvas and Results. */
-.queue-strip { padding: var(--s-2) var(--s-3); min-width: 0; }
-.queue-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--s-2); }
-.queue-chip {
-  display: inline-flex; align-items: stretch; max-width: 100%;
-  border: 1px solid var(--line); border-radius: 999px; background: var(--bg-2);
+/* Results: runs in flight, then this session's images, in one fixed-height
+   strip that scrolls sideways. Fixed so the picture never jumps when the first
+   result lands. */
+.results-strip {
+  flex: 0 0 auto; height: 140px; min-width: 0;
+  display: flex; gap: var(--s-3); padding: 10px 12px;
 }
-.queue-chip.on { border-color: var(--accent); background: var(--accent-soft); }
-.queue-chip-main {
-  display: inline-flex; align-items: center; gap: 6px; min-width: 0;
-  padding: 3px 4px 3px 6px; background: none; border: 0; color: inherit; cursor: pointer;
+.results-strip-head { width: 120px; flex-shrink: 0; display: flex; flex-direction: column; gap: 6px; }
+.results-strip-head .sub { font-size: var(--fs-xs); line-height: 1.35; }
+.results-strip-clear { margin-top: auto; align-self: flex-start; }
+.results-strip-row {
+  flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 10px;
+  overflow-x: auto; overflow-y: hidden; padding-bottom: 4px;
 }
-.queue-chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.queue-chip-x {
-  padding: 0 10px 0 6px; background: none; border: 0; color: var(--text-dim);
-  cursor: pointer; font-size: 15px; line-height: 1;
+.results-strip-empty { margin: 0; align-self: center; max-width: 360px; }
+.strip-tile { position: relative; flex: 0 0 94px; width: 94px; display: flex; flex-direction: column; gap: 4px; }
+.strip-thumb {
+  position: relative; width: 94px; height: 94px; padding: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+  border: 2px solid var(--line); border-radius: var(--radius-sm); overflow: hidden;
+  background: var(--bg-3); color: var(--text); cursor: pointer; font: inherit;
 }
-.queue-chip-x:hover { color: var(--accent); }
-/* A ring, not a disc: the mask cuts the middle out, so it sits on any chip colour. */
+.strip-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.strip-tile.on .strip-thumb { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.strip-cap {
+  font-size: var(--fs-xs); color: var(--text-dim); text-align: center;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.strip-tile.on .strip-cap { color: var(--text); }
+/* Keep, layer and set ride on the bottom of the thumbnail, shown on hover or
+   keyboard focus, so the strip stays one tile tall. */
+.strip-actions {
+  position: absolute; left: 4px; right: 4px; top: 66px;
+  display: flex; gap: 2px; justify-content: center;
+  opacity: 0; pointer-events: none; transition: opacity 0.12s ease;
+}
+.strip-actions .tip-wrap { display: flex; }
+.strip-actions .btn.xs {
+  padding: 2px 5px; font-size: 10.5px; min-width: 0;
+  background: rgba(14, 15, 19, 0.88); border-color: rgba(255, 255, 255, 0.12);
+}
+.strip-x {
+  position: absolute; top: 4px; right: 4px; width: 20px; height: 20px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; border: 1px solid var(--line); background: rgba(14, 15, 19, 0.85);
+  color: var(--text-dim); font-size: 14px; line-height: 1; cursor: pointer;
+  opacity: 0; transition: opacity 0.12s ease;
+}
+.strip-x:hover { color: var(--accent); border-color: var(--accent); }
+.strip-tile:hover .strip-actions, .strip-tile:focus-within .strip-actions { opacity: 1; pointer-events: auto; }
+.strip-tile:hover .strip-x, .strip-tile:focus-within .strip-x, .queue-tile .strip-x { opacity: 1; }
+.queue-tile .strip-thumb { background: var(--bg-2); }
+.queue-tile.on .strip-thumb { background: var(--accent-soft); }
+.queue-tile-state { font-size: var(--fs-xs); color: var(--text-dim); }
+/* A ring, not a disc: the mask cuts the middle out, so it sits on any colour. */
 .queue-ring {
   flex: 0 0 auto; width: 16px; height: 16px; border-radius: 50%;
   background: conic-gradient(var(--accent) calc(var(--p) * 1turn), var(--line) 0);
   -webkit-mask: radial-gradient(closest-side, transparent 58%, #000 62%);
   mask: radial-gradient(closest-side, transparent 58%, #000 62%);
 }
-.queue-place { flex: 0 0 auto; min-width: 16px; text-align: center; opacity: 0.8; }
-
-/* Results: a grid as wide as the canvas. No scroller of its own -- the session
-   keeps at most HISTORY_MAX images, so the page scrolls instead. */
-.results-panel { padding: var(--s-2) var(--s-3) var(--s-3); min-width: 0; }
-.results-grid {
-  display: grid;
-  /* 144px is the narrowest cell whose four actions still fit one row. */
-  grid-template-columns: repeat(auto-fill, minmax(144px, 1fr));
-  gap: var(--s-3) 10px;
-}
-.results-panel .play-result { width: 100%; min-width: 0; }
-.results-panel .play-result-thumb {
-  width: 100%;
-  height: auto;
-  aspect-ratio: 1;
-}
-.play-result {
-  flex: 0 0 auto;
-  width: 112px;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-.play-result-thumb {
-  position: relative;
-  width: 112px;
-  height: 112px;
-  padding: 0;
-  border: 2px solid var(--line);
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-  background: var(--bg-3);
-  cursor: pointer;
-}
-.play-result-thumb img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-.play-result.on .play-result-thumb {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent);
-}
+.queue-ring.big { width: 40px; height: 40px; }
+.queue-place { flex: 0 0 auto; min-width: 16px; text-align: center; opacity: 0.8; font-size: var(--fs-lg); }
 .play-result-idx {
   position: absolute;
   top: 4px;
@@ -471,35 +470,6 @@ body {
   border-radius: 3px;
   background: rgba(14, 15, 19, 0.78);
   color: var(--text);
-}
-.play-result-seed {
-  display: block;
-  font-size: var(--fs-xs);
-  color: var(--text-dim);
-  text-align: center;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.play-result-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 3px;
-  justify-content: center;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.12s ease;
-}
-.play-result:hover .play-result-actions,
-.play-result.on .play-result-actions,
-.play-result:focus-within .play-result-actions {
-  opacity: 1;
-  pointer-events: auto;
-}
-.play-result-actions .btn.xs {
-  padding: 3px 6px;
-  font-size: var(--fs-xs);
-  min-width: 0;
 }
 
 .model-thumbs { display: flex; gap: 6px; overflow-x: auto; padding-bottom: var(--s-1); }
