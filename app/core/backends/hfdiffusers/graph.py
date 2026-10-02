@@ -147,6 +147,75 @@ def _label_of(name: str) -> str:
     return f"{stage} {i} · {role} {idx}"
 
 
+def _skip_sources(model) -> list[str]:
+    """What ``UNet2DModel.forward`` pushes onto its skip stack, in order.
+
+    ``conv_in``'s output, then per down block each resnet's output (its
+    attention's, in an ``Attn*`` block, which runs straight after the resnet)
+    and the downsampler's.
+    """
+    have = dict(model.named_modules())
+    out = ["conv_in"]
+    for i, block in enumerate(getattr(model, "down_blocks", None) or []):
+        p = f"down_blocks.{i}"
+        for j in range(len(getattr(block, "resnets", []) or [])):
+            attn = f"{p}.attentions.{j}"
+            out.append(attn if attn in have else f"{p}.resnets.{j}")
+        if f"{p}.downsamplers.0" in have:
+            out.append(f"{p}.downsamplers.0")
+    return out
+
+
+def skip_points(model) -> list[dict]:
+    """Each skip connection, as a bend target of its own.
+
+    Every up resnet consumes one skip: its block does ``cat([hidden, skip])``
+    right before ``resnet(hidden, temb)``. Bending only the skip is a pre-hook
+    on that resnet rewriting the channels past the hidden half. The id names
+    the consumer (``skip:<up block>.<resnet>``), which is unique and is where
+    the hook lives; ``from`` and ``to`` are the main points the map draws the
+    arc between.
+
+    Derived from the module tree, not traced, so it is free at bend time. If
+    the stack does not pair off exactly (a block type that pushes something
+    else), no skips are listed rather than wrong ones.
+    """
+    have = dict(model.named_modules())
+    ups = getattr(model, "up_blocks", None) or []
+    if "conv_in" not in have or not ups:
+        return []
+    stack = _skip_sources(model)
+    if len(stack) != sum(len(getattr(b, "resnets", []) or []) for b in ups):
+        return []
+
+    mid = getattr(model, "mid_block", None)
+    if mid is not None and getattr(mid, "resnets", None):
+        hidden = mid.resnets[-1].out_channels
+    else:
+        downs = getattr(model, "down_blocks", None) or []
+        hidden = downs[-1].resnets[-1].out_channels if downs else None
+
+    out = []
+    for i, block in enumerate(ups):
+        for k, resnet in enumerate(getattr(block, "resnets", []) or []):
+            src = stack.pop()
+            split, total = hidden, getattr(resnet, "in_channels", None)
+            hidden = getattr(resnet, "out_channels", None)
+            if not split or not total or not 0 < split < total:
+                continue
+            name = f"up_blocks.{i}.resnets.{k}"
+            out.append({
+                "id": f"skip:{i}.{k}", "module": name, "hook": "pre",
+                "start": split, "stop": None, "from": src, "to": name, "level": i,
+            })
+    return out
+
+
+def slice_points(model) -> dict[str, dict]:
+    """Targets that bend part of a module's input: the skips. Keyed by id."""
+    return {s["id"]: s for s in skip_points(model)}
+
+
 def layer_graph(model, image_size: int = 64) -> dict:
     """Ordered bend points with their channel counts and spatial sizes.
 
@@ -204,5 +273,37 @@ def layer_graph(model, image_size: int = 64) -> dict:
             "down_factor": round(probe_size / h, 2) if h else None,
             "bendable": True,
         })
+    by_id = {n["id"]: n for n in nodes}
 
-    return {"nodes": nodes, "order": points, "ref_size": probe_size}
+    # Named by resolution, as xurdif's are, and numbered in encoder order when
+    # a resolution has more than one (here it usually has layers_per_block + 1).
+    skips = [(s, by_id[s["from"]]) for s in skip_points(model)
+             if s["from"] in by_id and s["to"] in by_id]
+    skips.sort(key=lambda p: points.index(p[0]["from"]))
+    res_of = {}
+    for s, src in skips:
+        df = src["down_factor"]
+        res_of[s["id"]] = "full res" if not df or df <= 1 else f"1/{round(df)} res"
+    count: dict[str, int] = {}
+    for r in res_of.values():
+        count[r] = count.get(r, 0) + 1
+    seen: dict[str, int] = {}
+    skip_nodes = []
+    for s, src in skips:
+        res = res_of[s["id"]]
+        seen[res] = seen.get(res, 0) + 1
+        label = f"skip · {res}" + (f" · {seen[res]}" if count[res] > 1 else "")
+        skip_nodes.append({
+            "id": s["id"],
+            "label": label,
+            "type": "skip",
+            "stage": "skip",
+            "from": s["from"],
+            "to": s["to"],
+            "channels": src["channels"],
+            "h": src["h"],
+            "w": src["w"],
+            "down_factor": src["down_factor"],
+        })
+
+    return {"nodes": nodes, "order": points, "ref_size": probe_size, "skips": skip_nodes}

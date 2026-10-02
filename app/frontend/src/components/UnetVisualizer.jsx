@@ -101,23 +101,43 @@ export default function UnetVisualizer({
   const spine = useMemo(() => (density === "layers" ? runPaths(layout?.placed || []) : null), [layout, density]);
   // Skips the backend can bend on their own become targets, drawn as arcs from
   // the encoder point that feeds them to the decoder block that takes them. A
-  // backend without them (Diffusers, for now) keeps the plain decorative arcs.
+  // graph without them keeps the plain decorative arcs.
   const skipArcs = useMemo(() => {
     if (!layout || !graph?.skips?.length) return [];
     const at = new Map(layout.placed.map((n) => [n.id, n]));
-    return graph.skips.map((sk) => {
-      const a = at.get(sk.from);
-      const b = at.get(sk.to);
-      if (!a || !b) return null;
+    const ends = graph.skips
+      .map((sk) => ({ sk, a: at.get(sk.from), b: at.get(sk.to) }))
+      .filter((e) => e.a && e.b);
+    // A Diffusers level has several skips (one per up resnet), nested between
+    // the same two rows of dots. Each one lifts higher the wider it spans
+    // among its row's skips, so their middles and handles come apart. A
+    // single skip per row (xurdif) keeps the base lift.
+    const rows = new Map();
+    ends.forEach((e) => {
+      const key = Math.round(Math.min(e.a.y, e.b.y));
+      rows.set(key, [...(rows.get(key) || []), e]);
+    });
+    const rank = new Map();
+    rows.forEach((list) => {
+      list.sort((p, q) => Math.abs(p.b.x - p.a.x) - Math.abs(q.b.x - q.a.x))
+        .forEach((e, k) => rank.set(e.sk.id, k));
+    });
+    return ends.map(({ sk, a, b }) => {
       const cx = (a.x + b.x) / 2;
-      const cy = Math.min(a.y, b.y) - 14;
+      const cy = Math.min(a.y, b.y) - 14 - 20 * rank.get(sk.id);
       return {
         ...sk, d: `M${a.x},${a.y} Q${cx},${cy} ${b.x},${b.y}`,
         mx: 0.25 * a.x + 0.5 * cx + 0.25 * b.x, my: 0.25 * a.y + 0.5 * cy + 0.25 * b.y,
       };
-    }).filter(Boolean);
+    });
   }, [layout, graph]);
   const skips = useMemo(() => (skipArcs.length ? [] : skipPaths(layout)), [layout, skipArcs]);
+  // The widest of a level's nested skips can rise above the top row's band:
+  // the drawing grows upward by that much rather than clipping its handle.
+  const topExtra = useMemo(
+    () => Math.max(0, Math.ceil(8 - Math.min(Infinity, ...skipArcs.map((a) => a.my)))),
+    [skipArcs],
+  );
 
   const innerPlaced = useMemo(() => {
     if (!innerOn || !layout) return [];
@@ -153,8 +173,8 @@ export default function UnetVisualizer({
     const box = svgRef.current?.getBoundingClientRect();
     if (!box || !box.width) return { x: 0, y: 0 };
     const k = (layout?.width || 1) / box.width;
-    return { x: (e.clientX - box.left) * k, y: (e.clientY - box.top) * k };
-  }, [layout]);
+    return { x: (e.clientX - box.left) * k, y: (e.clientY - box.top) * k - topExtra };
+  }, [layout, topExtra]);
 
   // The marquee finishes on window mouseup so a release outside the svg still lands.
   const dragging = !!drag;
@@ -376,7 +396,7 @@ export default function UnetVisualizer({
         onMouseEnter={() => setHover({ ...sk, extra: "skip", x: sk.mx, y: sk.my, r: 5 })}
         onMouseLeave={() => setHover(null)}
       >
-        <path d={sk.d} fill="none" stroke="transparent" strokeWidth="14" />
+        <path d={sk.d} fill="none" stroke="transparent" strokeWidth="10" />
         <path
           d={sk.d} fill="none"
           stroke={on || other || hot ? "var(--accent)" : c.dim}
@@ -501,7 +521,7 @@ export default function UnetVisualizer({
     <div className="scroll-x" ref={boxRef}>
       <svg
         ref={svgRef}
-        viewBox={`0 0 ${width} ${height}`}
+        viewBox={`0 ${-topExtra} ${width} ${height + topExtra}`}
         preserveAspectRatio="xMidYMin meet"
         className={`unet-map ${drag ? "dragging" : ""}`}
         style={{ maxWidth: Math.round(width * MAX_SCALE) }}
