@@ -149,7 +149,13 @@ class BendRuntime:
         part = fn(x[:, start:stop])
         if part.shape != x[:, start:stop].shape:
             return x                    # an op that changed the shape cannot go back in
-        return torch.cat([x[:, :start], part, x[:, stop:]], dim=1)
+        # Written into a clone rather than re-concatenated: the clone keeps x's
+        # memory layout. A Diffusers up block can hand its resnet a
+        # channels-last tensor, and a contiguous one in its place sends the
+        # conv down another kernel, so even multiply 1 drifted the output.
+        y = x.clone()
+        y[:, start:stop] = part
+        return y
 
     def _make_slice_hook(self, bends, spec):
         def hook(m, inp, out):

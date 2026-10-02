@@ -9,7 +9,8 @@ const GROUP_LABELS = {
 
 function formatTarget(t) {
   if (GROUP_LABELS[t]) return GROUP_LABELS[t];
-  const skip = /^skip:(\d+)$/.exec(t);
+  // "skip:2" (xurdif: encoder level) or "skip:2.1" (Diffusers: up block, resnet)
+  const skip = /^skip:(\d+(?:\.\d+)?)$/.exec(t);
   if (skip) return `skip ${skip[1]}`;
   // "mid_attn.qkv:v" -> "mid_attn v"
   const part = /^(.*)\.(?:to_)?qkv:([qkv])$/.exec(t);

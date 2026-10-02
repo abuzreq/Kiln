@@ -175,6 +175,100 @@ def check_craft(model_dir: Path):
           % delta)
 
 
+def check_skips(model_dir: Path):
+    """Every skip is a target of its own, on every architecture this backend loads.
+
+    UNet2DModel pushes ``layers_per_block + 1`` skips per level, so each up
+    resnet consumes one. For each listed skip: the channels past the split in
+    the consumer's input are exactly what its ``from`` module emitted (so the
+    static pairing and split match the real concat), multiply 1 leaves the
+    output bit-identical, and multiply 0 zeroes only that half and differs
+    from zeroing the source (which also feeds the path down).
+    """
+    from diffusers import UNet2DModel
+
+    from app.core.backends.hfdiffusers import graph as dgraph
+    from app.core.backends.hfdiffusers.tinyunet import TinyUNet2DModel
+
+    b, ref = backends.resolve(str(model_dir))
+    net, _ = b.load(ref, device="cpu")
+    torch.manual_seed(3)
+    wide = loader.UNet2DAdapter(UNet2DModel(
+        sample_size=32, in_channels=3, out_channels=3, layers_per_block=2,
+        block_out_channels=(32, 64, 64),
+        down_block_types=("DownBlock2D", "AttnDownBlock2D", "DownBlock2D"),
+        up_block_types=("UpBlock2D", "AttnUpBlock2D", "UpBlock2D"),
+        downsample_type="resnet", upsample_type="resnet", norm_num_groups=32,
+    ).eval())
+    tiny = loader.UNet2DAdapter(TinyUNet2DModel(dim=16, dim_mults=(1, 2, 2)).eval())
+
+    def run(model, targets, value=0.0, probes=()):
+        seen = {}
+        hooks = []
+        rt = bending.build_runtime([{"op": "multiply", "params": {"value": value}, "targets": targets,
+                                     "step_start": 0, "step_end": 1, "active": True}], backend=b)
+        rt.attach(model)
+        mods = dict(model.named_modules())
+        def pre(m, a, _n):
+            seen.setdefault((_n, "pre"), a[0].clone())      # returns None: a probe, not a bend
+
+        def post(m, a, o, _n):
+            seen.setdefault((_n, "out"), (o[0] if isinstance(o, tuple) else o).clone())
+
+        for name, kind in probes:
+            # registered after the bend, so a "pre" probe sees what the block really gets
+            if kind == "pre":
+                hooks.append(mods[name].register_forward_pre_hook(lambda m, a, _n=name: pre(m, a, _n)))
+            else:
+                hooks.append(mods[name].register_forward_hook(lambda m, a, o, _n=name: post(m, a, o, _n)))
+        try:
+            with torch.no_grad():
+                out = model(x, t)
+        finally:
+            rt.detach()
+            for h in hooks:
+                h.remove()
+        return out, seen
+
+    for label, model, size, expect in (("tiny", net, 32, 2 * 2), ("wide", wide, 32, 3 * 3),
+                                       ("tinyunet", tiny, 32, 3)):
+        torch.manual_seed(0)
+        x = torch.randn(1, 3, size, size)
+        t = torch.tensor([10], dtype=torch.long) if label != "tinyunet" else torch.tensor([10.0])
+        g = b.layer_graph(model, image_size=size)
+        skips = g.get("skips") or []
+        assert len(skips) == expect, (label, [s["id"] for s in skips])
+        slices = b.slice_points(model)
+        assert set(slices) >= {s["id"] for s in skips}, (label, sorted(slices))
+        assert bending._resolve_targets([s["id"] for s in skips], model, b) == {s["id"] for s in skips}
+        enc = bending._resolve_targets(["all"], model, b)
+        assert not any(":" in n for n in enc), "groups must not pick up skips"
+        with torch.no_grad():
+            plain = model(x, t)
+        for s in skips:
+            spec = slices[s["id"]]
+            split = spec["start"]
+            _, seen = run(model, [], probes=[(spec["module"], "pre"), (s["from"], "out")])
+            got, src = seen[(spec["module"], "pre")], seen[(s["from"], "out")]
+            if label != "tinyunet":     # xurdif's own check covers its pairing
+                assert torch.equal(got[:, split:], src), (label, s["id"], "skip half is not its source")
+            same, _ = run(model, [s["id"]], value=1.0)
+            assert torch.equal(same, plain), (label, s["id"], "multiply 1 changed the output")
+            zeroed, seen = run(model, [s["id"]], probes=[(spec["module"], "pre")])
+            bent = seen[(spec["module"], "pre")]
+            assert torch.equal(bent[:, :split], got[:, :split]), (label, s["id"], "hidden half touched")
+            assert torch.count_nonzero(bent[:, split:]) == 0, (label, s["id"], "skip half not bent")
+            assert not torch.equal(zeroed, plain), (label, s["id"], "multiply 0 did nothing")
+            source, _ = run(model, [s["from"]])
+            assert not torch.equal(zeroed, source), (label, s["id"], "same as bending the source")
+        print("  %s: %d skips bend alone, e.g. %s" % (
+            label, len(skips), ", ".join(f"{s['id']} {s['label']}" for s in skips[:3])))
+    # Ids are architecture-specific: xurdif's never resolve on UNet2DModel.
+    assert not bending._resolve_targets(["skip:1"], net, b)
+    assert sorted(dgraph.slice_points(net.wrapped)) == sorted(s["id"] for s in b.layer_graph(net, 32)["skips"])
+    print("skip connections are targets on UNet2DModel and TinyUNet2DModel")
+
+
 def check_merge(a: Path, bdir: Path, out: Path):
     from app.core.craft.merging import check_compat, merge
 
@@ -263,6 +357,7 @@ def main():
         b = _tiny_model(tmp / "models" / "tiny_b", seed=2)
         check_inference(a)
         check_craft(a)
+        check_skips(a)
         check_merge(a, b, tmp / "out")
         check_cross_backend(a, tmp)
         check_reference_repo()

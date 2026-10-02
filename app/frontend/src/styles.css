@@ -997,7 +997,7 @@ body {
 /* The map draws itself at its own size and scales into the column; the
    min-width floor is what makes a very narrow column scroll instead of
    shrinking the layers into illegibility. */
-.unet-map { touch-action: none; width: 100%; height: auto; display: block; max-width: 100%; }
+.unet-map { touch-action: none; user-select: none; width: 100%; height: auto; display: block; max-width: 100%; }
 .unet-map.dragging { cursor: crosshair; }
 .unet-node { cursor: pointer; outline: none; }
 .unet-node:focus-visible circle:last-of-type { stroke: var(--accent); stroke-width: 2.5; }

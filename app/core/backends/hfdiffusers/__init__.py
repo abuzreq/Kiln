@@ -146,6 +146,10 @@ class DiffusersBackend(Backend):
         inner = getattr(net, "wrapped", net)
         return self._vocab_for_net(net)._ordered_points(inner)
 
+    def slice_points(self, net) -> dict[str, dict]:
+        inner = getattr(net, "wrapped", net)
+        return self._vocab_for_net(net).slice_points(inner)
+
     def stage_of_point(self, name: str) -> str:
         return self._vocab_for_key(name)._stage_of(name)
 
