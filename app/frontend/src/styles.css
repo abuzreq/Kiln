@@ -647,6 +647,11 @@ body {
   font-size: var(--fs-xs); font-weight: 700; font-variant-numeric: tabular-nums;
 }
 .bend-badge.on { background: var(--accent); border-color: var(--accent); color: #1a1206; }
+.bend-badge.sm { width: 16px; height: 16px; font-size: 9.5px; }
+.bend-badge.off { background: transparent; border-style: dashed; color: var(--text-faint); }
+.holder-badges { display: inline-flex; gap: 3px; margin-left: 6px; vertical-align: middle; }
+.unet-legend-this { margin-left: auto; }
+.unet-legend-ring { width: 14px; height: 10px; border-radius: 5px; border: 2px solid var(--accent); }
 .switch {
   flex-shrink: 0; width: 34px; height: 20px; padding: 2px; border-radius: 999px;
   border: 1px solid var(--line); background: var(--bg-3); cursor: pointer;
@@ -710,29 +715,65 @@ body {
 .bend-stack {
   display: flex;
   flex-direction: row;
-  align-items: flex-start;
+  align-items: stretch;
   overflow-x: auto;
-  gap: var(--s-2);
   padding-bottom: var(--s-2);
   margin-top: var(--s-2);
 }
-/* A card only names its bend now (editing is beside the map), so it no longer
-   needs the width an open card did. 300px still fits "Fourier amplify" with
-   its amount next to the badge and the row buttons. */
-.bend-stack .bend-card { flex: 0 0 300px; width: 300px; }
+/* A card names its bend and nothing else (editing is beside the map), so it is
+   narrow: wide enough for "Fourier amplify" with its badge and amount. */
+.bend-stack .bend-card { flex: 0 0 236px; width: 236px; }
+.bend-stack-empty { flex: 1; margin-right: var(--s-2); }
 .bend-card {
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--bg-2);
   overflow: hidden;
+  transition: opacity 120ms ease;
 }
-.bend-card.dim { opacity: 0.55; }
-.bend-card.focused { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.bend-card.focused { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.bend-card.focused .bend-card-head { background: var(--accent-soft); }
+/* Off: kept in the stack but not applied, so it reads as an outline of itself. */
+.bend-card.off { border-style: dashed; background: transparent; }
+.bend-card.off .bend-card-head { background: transparent; color: var(--text-dim); }
+.bend-card.off .bend-card-op b { text-decoration: line-through; text-decoration-color: var(--text-faint); }
+/* On, but hooked into nothing: it would silently do nothing in a run. */
+.bend-card.idle:not(.focused) { border-color: rgba(251, 191, 36, 0.5); }
+.bend-card.dragging { opacity: 0.4; }
 .bend-card-head {
-  display: flex; flex-direction: column; gap: 6px; padding: var(--s-2) 10px;
+  display: flex; flex-direction: column; gap: 7px; padding: var(--s-2) 10px;
   cursor: pointer; user-select: none; background: var(--bg-3);
-  width: 100%; border: none; color: inherit; font: inherit; text-align: left;
+  width: 100%; height: 100%; border: none; color: inherit; font: inherit; text-align: left;
 }
+.bend-grip { flex-shrink: 0; fill: var(--text-faint); opacity: 0.6; cursor: grab; }
+.bend-card:hover .bend-grip { opacity: 1; }
+.bend-off-tag {
+  flex-shrink: 0; padding: 0 5px; border: 1px solid var(--line); border-radius: 4px;
+  font-size: var(--fs-xs); font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
+}
+.bend-card-warn { font-size: var(--fs-xs); color: var(--warn); line-height: 14px; }
+/* The gaps between cards: a › while the stack is still (it runs left to right),
+   an orange line where a dragged card would land. */
+.bend-join {
+  flex: 0 0 18px; display: flex; align-items: center; justify-content: center;
+  color: var(--text-faint); font-size: var(--fs-lg); position: relative;
+}
+.bend-join.edge { flex-basis: 8px; }
+.bend-join.edge:first-child { flex-basis: 0; margin-right: 8px; }
+.bend-join.drop { color: transparent; }
+.bend-join.drop::before {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 50%; width: 3px; margin-left: -1.5px;
+  border-radius: 2px; background: var(--accent);
+}
+.bend-add-tile {
+  flex: 0 0 110px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 2px; min-height: 76px; margin-left: var(--s-1);
+  border: 1px dashed var(--line); border-radius: var(--radius-sm); background: transparent;
+  color: var(--text-dim); font: inherit; font-size: var(--fs-sm); font-weight: 600; cursor: pointer;
+}
+.bend-add-tile span { font-size: 20px; line-height: 1; }
+.bend-add-tile:hover { border-color: var(--accent); color: var(--accent); }
+.bend-add-tile:disabled { opacity: 0.45; cursor: not-allowed; }
 .bend-card-head-main { display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0; }
 .bend-card-op {
   min-width: 0;
@@ -744,7 +785,7 @@ body {
 
 /* Per-bend footprint: the U in miniature, lit where this bend hooks in. */
 .bend-footprint { display: flex; align-items: center; gap: 8px; padding-left: 2px; }
-.bend-footprint svg { display: block; flex-shrink: 0; }
+.bend-footprint svg { display: block; flex: 1 1 auto; min-width: 0; height: auto; }
 .bend-footprint-count { white-space: nowrap; }
 .bend-footprint-count.none { color: var(--text-dim); font-style: italic; }
 

@@ -10,7 +10,7 @@ import BendEditor, { BendInspector } from "../components/BendEditor.jsx";
 import BendPresetList from "../components/BendPresetList.jsx";
 import { buildSamplePayload } from "../sampleSettings.jsx";
 import {
-  expandGroup, isGroup, resolveMany, resolveTargets, toggleNodeTargets,
+  expandGroup, holdersOf, isGroup, resolveTargets, toggleNodeTargets,
 } from "../bendTargets.js";
 
 const newBendId = () => Math.random().toString(36).slice(2);
@@ -171,9 +171,11 @@ export function BendWorkspace({ stack, setStack }) {
     () => resolveTargets(focusedBend?.targets, nodes),
     [focusedBend, nodes],
   );
-  // Everything the rest of the stack hits, so editing one bend never hides the others.
-  const otherTargets = useMemo(
-    () => resolveMany(stack.filter((b) => b.active && b.id !== focusedBendId), nodes),
+  // Which other bend holds each layer, by its number in the stack, so editing
+  // one bend never hides the others -- and the map can say which one it is.
+  // Bends that are off are included and flagged, and drawn faded.
+  const holders = useMemo(
+    () => holdersOf(stack, nodes, focusedBendId),
     [stack, focusedBendId, nodes],
   );
 
@@ -523,7 +525,7 @@ export function BendWorkspace({ stack, setStack }) {
                 <BendPipeline
                   graph={graph}
                   focusTargets={focusTargets}
-                  otherTargets={otherTargets}
+                  holders={holders}
                   hasFocus={!!focusedBend}
                   activeGroups={(focusedBend?.targets || []).filter(isGroup)}
                   onToggle={onMapToggle}
@@ -534,7 +536,7 @@ export function BendWorkspace({ stack, setStack }) {
                 <UnetVisualizer
                   graph={graph}
                   focusTargets={focusTargets}
-                  otherTargets={otherTargets}
+                  holders={holders}
                   hasFocus={!!focusedBend}
                   density={grain}
                   onToggle={onMapToggle}
@@ -567,8 +569,6 @@ export function BendWorkspace({ stack, setStack }) {
             focusedId={focusedBendId}
             setFocusedId={(id) => { setFocusedBendId(id); setNote(null); }}
             addBend={() => addBend()}
-            updateBend={updateBend}
-            removeBend={removeBend}
             headExtra={(
               <button type="button" className="btn sm" aria-expanded={presetsOpen}
                 onClick={() => setPresetsOpen((v) => !v)}>

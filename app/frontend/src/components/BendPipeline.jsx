@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from "react";
-import { resolveTargets } from "../bendTargets.js";
+import { heldByActive, holdersIn } from "../bendTargets.js";
+import HolderBadges, { holdersText } from "./HolderBadges.jsx";
 
 // The model as a signal path: what the image passes through, in order, with
 // where the current bend sits marked on it. No geometry and no layer names --
@@ -13,7 +14,7 @@ const STAGES = [
 ];
 
 export default function BendPipeline({
-  graph, focusTargets, otherTargets, hasFocus, activeGroups,
+  graph, focusTargets, holders, hasFocus, activeGroups,
   onToggle, onToggleGroup, onCreateFromNode,
 }) {
   const [open, setOpen] = useState(null);
@@ -49,14 +50,15 @@ export default function BendPipeline({
         <div className="row wrap gap-2">
           {layers.map((n, i) => {
             const on = focusTargets?.has(n.id);
-            const other = !on && otherTargets?.has(n.id);
+            const other = !on && heldByActive(holders, n.id);
+            const also = holdersIn(holders, [n.id]);
             return (
               <button
                 type="button"
                 key={n.id}
                 className={`pill chip num ${on ? "on" : ""} ${other ? "other" : ""}`.trim()}
                 aria-pressed={on}
-                title={`${n.label} · ${n.type} · ${n.channels}ch`}
+                title={`${n.label} · ${n.type} · ${n.channels}ch${also.length ? ` · also in ${holdersText(also)}` : ""}`}
                 onClick={() => pick([n.id], { force: !on })}
               >
                 {i}{n.type === "attention" ? " ◆" : ""}
@@ -84,7 +86,7 @@ export default function BendPipeline({
         <span className="bend-pipe-end">Noise</span>
         {stages.map((s) => {
           const hit = s.ids.filter((id) => focusTargets?.has(id)).length;
-          const others = s.ids.filter((id) => !focusTargets?.has(id) && otherTargets?.has(id)).length;
+          const others = holdersIn(holders, s.ids);
           const held = activeGroups?.includes(s.group);
           const all = held || (hit > 0 && hit === s.ids.length);
           const isOpen = open === s.group;
@@ -103,7 +105,7 @@ export default function BendPipeline({
                   <span className="sub">{s.sub}</span>
                   <span className="bend-pipe-count">
                     {all ? `all ${s.ids.length}` : hit ? `${hit} of ${s.ids.length}` : `${s.ids.length} layers`}
-                    {others > 0 && <i title={`${others} held by other bends`}> +{others}</i>}
+                    <HolderBadges list={others} />
                   </span>
                 </button>
                 {s.layers.length > 1 && (

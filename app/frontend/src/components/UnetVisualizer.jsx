@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { tokens } from "../theme.js";
+import { heldByActive, holdersIn } from "../bendTargets.js";
+import { badgeRun, holdersText } from "./HolderBadges.jsx";
 import {
   layoutStructured, collapseBands, runPaths, skipPaths, resLabel,
 } from "./unetLayout.js";
@@ -12,8 +14,9 @@ import {
 //
 // In layers, clicking a node toggles it in the FOCUSED bend's targets,
 // shift+click takes a range through the network and dragging the background
-// sweeps a rectangle. Layers held by other bends keep a dimmed ring so the whole
-// stack stays legible while you edit one.
+// sweeps a rectangle. Layers held by other bends keep a dimmed ring, and each
+// level carries the numbers of the bends that reach into it, so the whole stack
+// stays legible while you edit one.
 const STAGE_VARS = {
   encoder: "--stage-encoder",
   mid: "--stage-mid",
@@ -29,7 +32,7 @@ const DRAG_SLOP = 4;
 const MAX_SCALE = 1.4;
 
 export default function UnetVisualizer({
-  graph, focusTargets, otherTargets, hasFocus, density = "overview",
+  graph, focusTargets, holders, hasFocus, density = "overview",
   onToggle, onCreateFromNode,
 }) {
   const [hover, setHover] = useState(null);
@@ -164,6 +167,28 @@ export default function UnetVisualizer({
     }
     : null;
 
+  // What letting go of the box would change: the layers it would add (or, with
+  // alt, drop), outlined before the release, with their count beside it.
+  const preview = marquee
+    ? new Set(placed
+      .filter((n) => n.x >= marquee.x && n.x <= marquee.x + marquee.w
+        && n.y >= marquee.y && n.y <= marquee.y + marquee.h)
+      .filter((n) => (drag.remove ? focusTargets?.has(n.id) : !focusTargets?.has(n.id)))
+      .map((n) => n.id))
+    : null;
+
+  /** Numbered badges for the other bends in `ids`, from (x, y) along `dir`. */
+  const badges = (ids, x, y, dir, key) => badgeRun(holdersIn(holders, ids)).map((h, k) => (
+    <g key={`${key}-b${k}`} className="unet-badge" transform={`translate(${x + dir * k * 16},${y})`}
+       opacity={h.active ? 1 : 0.6} pointerEvents="none">
+      <circle r="7.5" fill={c.panel} stroke={h.active ? c.dim : c.line}
+              strokeDasharray={h.active ? undefined : "2 2"} />
+      <text y="3.2" textAnchor="middle" fontSize="9" fontWeight="700" fill={h.active ? c.text : c.dim}>
+        {h.text}
+      </text>
+    </g>
+  ));
+
   const state = (ids) => {
     const hit = ids.filter((id) => focusTargets?.has(id)).length;
     return { hit, all: hit === ids.length && hit > 0, some: hit > 0 && hit < ids.length };
@@ -171,7 +196,9 @@ export default function UnetVisualizer({
 
   const node = (n) => {
     const isFocus = focusTargets?.has(n.id);
-    const isOther = !isFocus && otherTargets?.has(n.id);
+    const isOther = !isFocus && heldByActive(holders, n.id);
+    // held only by bends that are off: still worth a trace, but a faint one
+    const isOffOnly = !isFocus && !isOther && holders?.has(n.id);
     const fill = c[n.stage] || c[SIDE_STAGE[n.side]] || c.other;
     const attn = n.type === "attention";
     const shape = (r, props) => (attn
@@ -197,6 +224,12 @@ export default function UnetVisualizer({
         {isOther && shape(n.r + 5, {
           fill: "none", stroke: "var(--accent)", strokeWidth: 1.5, strokeDasharray: "3 3", opacity: 0.45,
         })}
+        {isOffOnly && shape(n.r + 5, {
+          fill: "none", stroke: c.dim, strokeWidth: 1, strokeDasharray: "2 3", opacity: 0.4,
+        })}
+        {preview?.has(n.id) && shape(n.r + 8, {
+          fill: "none", stroke: "var(--accent)", strokeWidth: 1.5, strokeDasharray: "2 3",
+        })}
         {shape(n.r, {
           fill, opacity: isFocus ? 1 : 0.72,
           stroke: hover?.id === n.id ? "#fff" : "transparent", strokeWidth: 2,
@@ -209,6 +242,7 @@ export default function UnetVisualizer({
 
   const capsule = (cap) => {
     const { all, some, hit } = state(cap.ids);
+    const held = holdersIn(holders, cap.ids);
     const open = () => setExpanded((s) => {
       const next = new Set(s);
       next.add(cap.key);
@@ -220,7 +254,8 @@ export default function UnetVisualizer({
           role="button"
           tabIndex={0}
           aria-pressed={all}
-          aria-label={`${cap.label} layers — ${all ? "targeted" : some ? "partly targeted" : "not targeted"}`}
+          aria-label={`${cap.label} layers — ${all ? "targeted" : some ? "partly targeted" : "not targeted"}${
+            held.length ? `; also in ${holdersText(held)}` : ""}`}
           onClick={() => pick(cap.ids, { force: !all })}
           onKeyDown={keyActivate(() => pick(cap.ids, { force: !all }))}
         >
@@ -241,6 +276,10 @@ export default function UnetVisualizer({
             </text>
           )}
         </g>
+        {/* On the capsule's outer top corner, clear of its label. */}
+        {cap.side === "L"
+          ? badges(cap.ids, cap.x + 6, cap.y - 3, 1, cap.key)
+          : badges(cap.ids, cap.x + cap.w - 6, cap.y - 3, -1, cap.key)}
         {cap.count > 1 && (
           <g
             role="button"
@@ -283,6 +322,24 @@ export default function UnetVisualizer({
         <text y="4" textAnchor="middle" fontSize="12" fill={c.dim}>−</text>
       </g>
     );
+  };
+
+  // In Layers (and in an opened level) the badges sit above the outer end of
+  // each band side's first row, where the run starts reading inwards.
+  const sideBadges = (list) => {
+    const bySide = new Map();
+    list.forEach((n) => {
+      const key = `${n.depth}:${n.side}`;
+      const g = bySide.get(key) || { ids: [], ends: [] };
+      g.ids.push(n.id);
+      if (!n.wrapRow) g.ends.push(n);
+      bySide.set(key, g);
+    });
+    return [...bySide.entries()].filter(([, g]) => g.ends.length).flatMap(([key, g]) => {
+      const outerLeft = key.endsWith(":L");
+      const end = g.ends.reduce((a, b) => ((outerLeft ? b.x < a.x : b.x > a.x) ? b : a));
+      return badges(g.ids, end.x, end.y - end.r - 10, outerLeft ? 1 : -1, `side-${key}`);
+    });
   };
 
   const expandedNodes = density === "overview"
@@ -355,19 +412,42 @@ export default function UnetVisualizer({
         {density === "overview" && capsules.filter((cap) => !expanded.has(cap.key)).map(capsule)}
         {density === "overview" && expandedKeys.map((key) => collapser(key, expandedNodes.filter((n) => `${n.depth}:${n.side}` === key)))}
         {(density === "layers" ? placed : expandedNodes).map(node)}
+        {sideBadges(density === "layers" ? placed : expandedNodes)}
 
-        {hover && (
-          <g
-            transform={`translate(${Math.max(4, Math.min(hover.x - 85, width - 174))},${hover.y - 48 < 4 ? hover.y + hover.r + 8 : hover.y - 48})`}
-            pointerEvents="none"
-          >
-            <rect width="170" height="36" rx="5" fill={c.panel} stroke={c.line} />
-            <text x="8" y="15" fontSize="11" fill={c.text}>{hover.label} · {hover.type}</text>
-            <text x="8" y="28" fontSize="11" fill={c.dim}>
-              {hover.channels}ch · {hover.h}×{hover.w} · {resLabel(hover)}
+        {marquee && preview.size > 0 && (
+          <g transform={`translate(${marquee.x + marquee.w},${marquee.y + marquee.h})`} pointerEvents="none">
+            <rect x="4" y="2" width={preview.size > 9 ? 34 : 28} height="17" rx="8.5" fill="var(--accent)" />
+            <text x={preview.size > 9 ? 21 : 18} y="14" textAnchor="middle" fontSize="11" fontWeight="700"
+                  fill="#1a1206">
+              {drag.remove ? "−" : "+"}{preview.size}
             </text>
           </g>
         )}
+
+        {hover && (() => {
+          // What this layer is, then what a click on it will do, then who else
+          // is here -- the last two being why you hover before clicking.
+          const also = holdersIn(holders, [hover.id]);
+          const mine = focusTargets?.has(hover.id);
+          const act = !hasFocus ? "click to start a bend here"
+            : mine ? "in this bend · click to drop" : "click to add to this bend";
+          const h = also.length ? 62 : 49;
+          const top = hover.y - h - 12 < 4 ? hover.y + hover.r + 8 : hover.y - h - 12;
+          return (
+            <g transform={`translate(${Math.max(4, Math.min(hover.x - 95, width - 194))},${top})`}
+               pointerEvents="none">
+              <rect width="190" height={h} rx="5" fill={c.panel} stroke={c.line} />
+              <text x="8" y="15" fontSize="11" fill={c.text}>{hover.label} · {hover.type}</text>
+              <text x="8" y="28" fontSize="11" fill={c.dim}>
+                {hover.channels}ch · {hover.h}×{hover.w} · {resLabel(hover)}
+              </text>
+              <text x="8" y="42" fontSize="11" fill={mine ? "var(--accent)" : c.text}>{act}</text>
+              {also.length > 0 && (
+                <text x="8" y="55" fontSize="11" fill={c.dim}>also in {holdersText(also)}</text>
+              )}
+            </g>
+          );
+        })()}
       </svg>
       <div className="row wrap" style={{ gap: 14, marginTop: 6 }}>
         {["encoder", "mid", "decoder"].map((k) => (
@@ -376,6 +456,12 @@ export default function UnetVisualizer({
           </span>
         ))}
         <span className="row center" style={{ gap: 6, fontSize: 12, color: "var(--text-dim)" }}>◆ attention</span>
+        <span className="row center unet-legend-this" style={{ gap: 6, fontSize: 12, color: "var(--text-dim)" }}>
+          <span className="unet-legend-ring" /> this bend
+        </span>
+        <span className="row center" style={{ gap: 6, fontSize: 12, color: "var(--text-dim)" }}>
+          <span className="bend-badge sm">1</span> other bends, by number
+        </span>
       </div>
     </div>
   );

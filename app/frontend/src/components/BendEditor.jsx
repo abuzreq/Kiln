@@ -1,8 +1,8 @@
-import React from "react";
-import { Slider, Select, DeleteBtn } from "./ui.jsx";
+import React, { useEffect, useRef, useState } from "react";
+import { Slider, Select } from "./ui.jsx";
 import BendFootprint from "./BendFootprint.jsx";
 import RunWindow, { RunWindowMini } from "./RunWindow.jsx";
-import { explicitTargets, resolveTargets } from "../bendTargets.js";
+import { explicitTargets, isGroup, resolveTargets } from "../bendTargets.js";
 import { bendAmount } from "../bendSynopsis.js";
 
 function defaultsFor(opDef) {
@@ -51,37 +51,63 @@ function ParamControl({ param, opDef, value, onChange }) {
 
 /** One bend in the stack. It only says what the bend is -- op, amount, where
  *  it hooks in, when it acts -- and picks it; editing happens in the panel
- *  beside the map, which has room the card never did. */
-function BendCard({ b, i, opDef, nodes, focused, onFocus, update, remove, move }) {
+ *  beside the map, which has room the card never did. Its states are the
+ *  ones that change what a run does: off, and on but hooked into nothing. */
+function BendCard({ b, i, opDef, nodes, focused, dragging, onFocus, onKeyMove, dragProps }) {
   const amount = bendAmount(b, opDef);
+  const targets = b.targets || [];
+  const hits = resolveTargets(targets, nodes).size;
+  // Before the graph loads every bend resolves to nothing; only warn once the
+  // layers are known, or when there is genuinely nothing chosen.
+  const idle = targets.length === 0 || (nodes?.length > 0 && hits === 0);
+  const where = targets.length === 1 && isGroup(targets[0]) ? targets[0] : null;
+  const name = opDef?.label || b.op;
+  const cls = [
+    "bend-card",
+    focused && "focused",
+    !b.active && "off",
+    b.active && idle && "idle",
+    dragging && "dragging",
+  ].filter(Boolean).join(" ");
+
   return (
-    <div className={`bend-card ${b.active ? "" : "dim"} ${focused ? "focused" : ""}`.trim()}>
+    <div className={cls} draggable {...dragProps}>
       <div
         className="bend-card-head"
         role="button"
         tabIndex={0}
+        data-bend-card={b.id}
         aria-pressed={focused}
-        aria-label={`Bend ${i + 1}: ${opDef?.label || b.op}`}
+        aria-label={`Bend ${i + 1}: ${name}${b.active ? "" : ", off"}${idle ? ", no layers" : ""}`}
+        aria-keyshortcuts="Alt+ArrowLeft Alt+ArrowRight"
+        title="Drag to reorder, or Alt+← / Alt+→"
         onClick={() => onFocus(b.id)}
-        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onFocus(b.id); } }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onFocus(b.id); return; }
+          if (e.altKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+            e.preventDefault();
+            onKeyMove(e.key === "ArrowLeft" ? -1 : 1);
+          }
+        }}
       >
         <div className="bend-card-head-main">
-          <label className="row center" onClick={(e) => e.stopPropagation()}>
-            <input type="checkbox" checked={b.active} onChange={(e) => update(b.id, { active: e.target.checked })}
-              aria-label={`Bend ${i + 1} on`} />
-          </label>
+          <svg className="bend-grip" width="8" height="14" viewBox="0 0 8 14" aria-hidden="true">
+            <circle cx="2" cy="2" r="1.2" /><circle cx="6" cy="2" r="1.2" />
+            <circle cx="2" cy="7" r="1.2" /><circle cx="6" cy="7" r="1.2" />
+            <circle cx="2" cy="12" r="1.2" /><circle cx="6" cy="12" r="1.2" />
+          </svg>
           <span className={`bend-badge ${focused ? "on" : ""}`.trim()} aria-hidden="true">{i + 1}</span>
           <span className="bend-card-op grow">
-            <b>{opDef?.label || b.op}</b>
+            <b>{name}</b>
             {amount != null && <span className="sub tnum"> {amount}</span>}
           </span>
-          <div className="row gap-1" onClick={(e) => e.stopPropagation()}>
-            <button type="button" className="btn ghost sm" onClick={() => move(i, -1)} aria-label="Move up">↑</button>
-            <button type="button" className="btn ghost sm" onClick={() => move(i, 1)} aria-label="Move down">↓</button>
-            <DeleteBtn onClick={() => remove(b.id)} label="Remove bend" />
-          </div>
+          {!b.active && <span className="bend-off-tag">off</span>}
         </div>
-        <BendFootprint nodes={nodes} targets={b.targets} />
+        {idle && b.active ? (
+          <span className="bend-card-warn">No layers yet — no effect</span>
+        ) : (
+          <BendFootprint nodes={nodes} targets={targets} label={where} />
+        )}
         <RunWindowMini start={b.step_start ?? 0} end={b.step_end ?? 1} hot={focused} />
       </div>
     </div>
@@ -228,16 +254,64 @@ export function BendInspector({
 }
 
 export default function BendEditor({
-  ops, nodes, stack, setStack, focusedId, setFocusedId, addBend, updateBend, removeBend,
+  ops, nodes, stack, setStack, focusedId, setFocusedId, addBend,
   headExtra, beforeStack,
 }) {
   const opMap = Object.fromEntries(ops.map((o) => [o.name, o]));
-  const move = (i, dir) => {
-    const j = i + dir;
-    if (j < 0 || j >= stack.length) return;
+  // { from, at }: the card being dragged and the gap it would land in, as an
+  // insertion index (0 = before the first card, stack.length = after the last).
+  const [drag, setDrag] = useState(null);
+  const refocus = useRef(null);
+
+  // Reordering moves the card's DOM node, which drops keyboard focus; put it
+  // back so Alt+arrow can be pressed again and again.
+  useEffect(() => {
+    if (!refocus.current) return;
+    document.querySelector(`[data-bend-card="${refocus.current}"]`)?.focus();
+    refocus.current = null;
+  });
+
+  const moveTo = (from, at) => {
+    const to = at > from ? at - 1 : at;
+    if (to === from || to < 0 || to >= stack.length) return;
     const s = [...stack];
-    [s[i], s[j]] = [s[j], s[i]];
+    const [b] = s.splice(from, 1);
+    s.splice(to, 0, b);
     setStack(s);
+  };
+  // A drop that would put the card back where it is shows no line.
+  const lands = (k) => drag && drag.at === k && k !== drag.from && k !== drag.from + 1;
+
+  const dragProps = (b, i) => ({
+    onDragStart: (e) => {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", b.id);
+      setDrag({ from: i, at: null });
+    },
+    onDragOver: (e) => {
+      if (!drag) return;
+      e.preventDefault();
+      const r = e.currentTarget.getBoundingClientRect();
+      const at = i + (e.clientX > r.left + r.width / 2 ? 1 : 0);
+      if (at !== drag.at) setDrag({ ...drag, at });
+    },
+    onDrop: (e) => {
+      if (!drag) return;
+      e.preventDefault();
+      if (drag.at != null) moveTo(drag.from, drag.at);
+      setDrag(null);
+    },
+    onDragEnd: () => setDrag(null),
+  });
+
+  const slot = (k) => {
+    const edge = k === 0 || k === stack.length;
+    return (
+      <span key={`slot-${k}`} className={`bend-join ${edge ? "edge" : ""} ${lands(k) ? "drop" : ""}`.trim()}
+        aria-hidden="true">
+        {!edge && "›"}
+      </span>
+    );
   };
 
   return (
@@ -248,32 +322,39 @@ export default function BendEditor({
         </div>
         <div className="row center gap-2">
           {headExtra}
-          <button type="button" className="btn sm primary" onClick={addBend} disabled={!ops.length}>+ Add bend</button>
         </div>
       </div>
       <p className="hint mb-0">
-        Applied left to right. Pick a bend to edit it beside the map.
+        Applied left to right — drag a card to reorder. Pick one to edit it beside the map.
       </p>
 
       {beforeStack || null}
 
-      {stack.length === 0 && <div className="empty">No bends yet. Click a layer on the map, or add one here.</div>}
-
       <div className="bend-stack">
+        {stack.length === 0 && (
+          <div className="empty bend-stack-empty">No bends yet. Click the map to start one, or add one here.</div>
+        )}
         {stack.map((b, i) => (
-          <BendCard
-            key={b.id}
-            b={b}
-            i={i}
-            opDef={opMap[b.op]}
-            nodes={nodes}
-            focused={focusedId === b.id}
-            onFocus={setFocusedId}
-            update={updateBend}
-            remove={removeBend}
-            move={move}
-          />
+          <React.Fragment key={b.id}>
+            {slot(i)}
+            <BendCard
+              b={b}
+              i={i}
+              opDef={opMap[b.op]}
+              nodes={nodes}
+              focused={focusedId === b.id}
+              dragging={drag?.from === i}
+              onFocus={setFocusedId}
+              onKeyMove={(dir) => { refocus.current = b.id; moveTo(i, dir < 0 ? i - 1 : i + 2); }}
+              dragProps={dragProps(b, i)}
+            />
+          </React.Fragment>
         ))}
+        {stack.length > 0 && slot(stack.length)}
+        <button type="button" className="bend-add-tile" onClick={addBend} disabled={!ops.length}>
+          <span aria-hidden="true">+</span>
+          Add bend
+        </button>
       </div>
     </div>
   );

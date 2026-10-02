@@ -9,7 +9,9 @@ import { resolveTargets } from "../bendTargets.js";
 // eight pixels a column the U folds into a blob and tells you less.
 const SMALL = { colW: 8, rowH: 6, marginX: 5, top: 5, bottom: 6, rMin: 2, rMax: 4.5 };
 
-export default function BendFootprint({ nodes, targets }) {
+/** `label` replaces the layer count, for a bend whose targets have a name
+ *  (one whole group) that says more than a number does. */
+export default function BendFootprint({ nodes, targets, label }) {
   const layout = useMemo(() => layoutNodes(nodes, SMALL), [nodes]);
   const hit = useMemo(() => resolveTargets(targets, nodes), [targets, nodes]);
   if (!layout) return null;
@@ -18,7 +20,9 @@ export default function BendFootprint({ nodes, targets }) {
 
   return (
     <div className="bend-footprint" title={`${n} of ${placed.length} layers`}>
-      <svg width={width} height={height} aria-hidden="true">
+      {/* Scales down to the card rather than pushing its label out: a 50-layer
+          model draws a strip twice as long as a 21-layer one. */}
+      <svg viewBox={`0 0 ${width} ${height}`} style={{ maxWidth: width }} aria-hidden="true">
         <path d={spinePath(placed)} fill="none" stroke="var(--line)" strokeWidth="1" />
         {placed.map((p) => (
           <circle
@@ -32,7 +36,7 @@ export default function BendFootprint({ nodes, targets }) {
         ))}
       </svg>
       <span className={`sub bend-footprint-count ${n ? "" : "none"}`}>
-        {n === 0 ? "no layers" : n === 1 ? "1 layer" : `${n} layers`}
+        {label || (n === 0 ? "no layers" : n === 1 ? "1 layer" : `${n} layers`)}
       </span>
     </div>
   );
