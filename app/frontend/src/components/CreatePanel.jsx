@@ -2,51 +2,18 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api.js";
 import { useApp } from "../state.jsx";
 import { usePlay } from "../screens/playContext.jsx";
-import { Slider, Select, Num, Disclose, TipLabel, Tooltip } from "./ui.jsx";
-import {
-  BrushIcon, WandIcon, ShapeIcon, ContrastIcon, MoveIcon, PaintIcon, EraseIcon,
-  RectIcon, EllipseIcon, PolygonIcon, PatternIcon, UndoIcon, InvertIcon, ClearIcon,
-  NewMaskIcon, AddIcon,
-} from "./icons.jsx";
+import { Slider, Select, Num, Seg, TipLabel, Tooltip } from "./ui.jsx";
+import { useFrameSize } from "./CanvasTools.jsx";
 import {
   buildSamplePayload, buildInpaintPayload, changeToParams, effectiveSteps, skippedSteps,
   fillSizeFor, solverCanResample, LIVE_PARAM_KEYS,
   liveEditLabels, joinLabels } from "../sampleSettings.jsx";
-import { contrastPreview, compositePostprocWithMask } from "../contrastMask.js";
-import { cachedStroke } from "../selection.js";
-import { maskUrlToCache } from "../layers.js";
+import { compositePostprocWithMask } from "../contrastMask.js";
 import { bendPresetSynopsis, bendPresetSummary } from "../bendSynopsis.js";
 
-// The mask tools and the Shape tool's kinds. Icons only in the rows (five
-// tools would not fit a sidebar with their words); the label is the tooltip,
-// the aria-label, and the name shown beside the row for the one that is on.
-const MASK_TOOLS = [
-  { id: "brush", label: "Brush", Icon: BrushIcon, tip: "Brush: paint freehand" },
-  { id: "wand", label: "Wand", Icon: WandIcon, tip: "Wand: click a colour on the canvas to select everything like it nearby" },
-  { id: "shape", label: "Shape", Icon: ShapeIcon, tip: "Shape: rectangles, ellipses, polygons, or a pattern" },
-  { id: "contrast", label: "Contrast", Icon: ContrastIcon, tip: "Contrast: split the canvas in two by brightness or by local contrast, and take one side" },
-  { id: "move", label: "Move", Icon: MoveIcon, tip: "Move: drag the mask around, or nudge it with the arrow keys" },
-];
-const SHAPE_KINDS = [
-  { id: "rect", label: "Rectangle", Icon: RectIcon, tip: "Rectangle: drag on the canvas; Shift for a square" },
-  { id: "ellipse", label: "Ellipse", Icon: EllipseIcon, tip: "Ellipse: drag on the canvas; Shift for a circle" },
-  { id: "polygon", label: "Polygon", Icon: PolygonIcon, tip: "Polygon: click corners on the canvas; Enter or double-click closes" },
-  { id: "pattern", label: "Pattern", Icon: PatternIcon, tip: "Pattern: blobs, cells, stripes, a split, or scattered shapes, from a seed" },
-];
+const PANEL_KEY = "kiln.createPanelTab";
 
 const DEFAULT_PP = { contrast: 1, gamma: 1, saturation: 1, eqhist: 0, unsharp: 0, noise: 0 };
-
-const SPLIT_METHODS = [
-  { value: "luminance", label: "Brightness" },
-  { value: "contrast", label: "Local contrast" },
-];
-
-// The two sides of a split. "Foreground/Background" claimed more than the maths
-// delivers — a luminance split separates dark from light, nothing more.
-const SPLIT_SIDES = [
-  { id: "foreground", label: "Side A", luminance: "Darker", contrast: "Detailed" },
-  { id: "background", label: "Side B", luminance: "Lighter", contrast: "Flat" },
-];
 
 function isIdentityPostproc(pp) {
   if (!pp) return true;
@@ -80,7 +47,7 @@ export default function CreatePanel() {
     getMaskDataUrl, applyContrastMask, frameCard, activeLayer,
     activeMask, maskPixels, hasMask, liveMasks, invertMask, clearMask, setMaskParam, nudgeMask,
     undo, canUndo, redo, canRedo, tab, setLivePreview, livePreviewOn,
-    job, genRunning, genPaused, canvasIsBlank, runs, trackRuns,
+    job, genRunning, genPaused, canvasIsBlank, runs, trackRuns, setSampleParam, generateRef,
   } = usePlay();
   const layerName = activeLayer?.name || "the active layer";
 
@@ -99,6 +66,13 @@ export default function CreatePanel() {
   const [srSharpen, setSrSharpen] = useState(0.5);
   const [srBusy, setSrBusy] = useState(false);
   const [genChange, setGenChange] = useState(0.7);
+  // Generate or Finish. Remembered, so someone who is finishing a picture
+  // comes back to Finish.
+  const [panelTab, setPanelTabState] = useState(() => (loadStored(PANEL_KEY) === "finish" ? "finish" : "generate"));
+  const setPanelTab = (t) => {
+    setPanelTabState(t);
+    try { localStorage.setItem(PANEL_KEY, t); } catch { /* ignore */ }
+  };
 
   // Everything that scopes to a masked area lives on the mask itself, so there
   // is one Change slider rather than two that looked alike and took turns being
@@ -144,36 +118,15 @@ export default function CreatePanel() {
     hasMask ? setMaskParam(activeMask?.id, "bendPreset", v) : setGenBendPreset(v)
   );
   const [variations, setVariations] = useState(1);
-  const [splitMethod, setSplitMethod] = useState("luminance");
-  const [brightnessThreshold, setBrightnessThreshold] = useState(128);
-  const [contrastThreshold, setContrastThreshold] = useState(0);
-  const [splitSoften, setSplitSoften] = useState(2);
-  const [smoothOn, setSmoothOn] = useState(false);
-  const [smoothRadius, setSmoothRadius] = useState(2);
-  const [maskSide, setMaskSide] = useState("foreground");
-  const [splitPreview, setSplitPreview] = useState(null);
-  const [splitBusy, setSplitBusy] = useState(false);
-  // Recompute the split whenever the picture being worked on changes: after a
-  // generation, and when an init image is set or swapped. A flag rather than a
-  // direct call, because both of those commit new state during the same render
-  // and calculating inline would still see the previous image.
-  const [splitPending, setSplitPending] = useState(false);
   // Job id -> the live settings it was started (or last resumed) with. Resume
   // sends only what differs, and with a queue each run has its own baseline.
   const snapshots = useRef({});
+  // The current run(), for the keyboard handler, which is bound once per tab.
+  const runRef = useRef(null);
   const ppSource = frame;
   const ppGen = useRef(0);
-  const [canvasSize, setCanvasSize] = useState(null);
-
   // Region fill runs at the canvas's own resolution, so the user needs to see it.
-  useEffect(() => {
-    if (!frame) { setCanvasSize(null); return undefined; }
-    let live = true;
-    const im = new Image();
-    im.onload = () => { if (live) setCanvasSize({ w: im.naturalWidth, h: im.naturalHeight }); };
-    im.src = frame;
-    return () => { live = false; };
-  }, [frame]);
+  const canvasSize = useFrameSize(frame);
 
   useEffect(() => {
     api.get("/library/bends").then(setBendPresets).catch(() => {});
@@ -183,6 +136,13 @@ export default function CreatePanel() {
     if (tab !== "create") return undefined;
     const ARROWS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
     const onKey = (e) => {
+      // Ctrl+Enter runs, from anywhere on the tab -- the prompt field included,
+      // so words can be typed and sent without reaching for the mouse.
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.altKey && !e.repeat) {
+        e.preventDefault();
+        runRef.current?.();
+        return;
+      }
       const t = e.target;
       const tag = t?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t?.isContentEditable) return;
@@ -228,18 +188,6 @@ export default function CreatePanel() {
     localStorage.setItem("kiln.genBendPreset", genBendPreset);
   }, [genBendPreset]);
 
-  const splitOpts = useMemo(() => {
-    const base = splitMethod === "luminance"
-      ? { method: "luminance", autoThreshold: false, threshold: brightnessThreshold, soften: splitSoften }
-      : { method: "contrast", autoThreshold: true, thresholdBias: contrastThreshold, soften: splitSoften };
-    return { ...base, presmooth: smoothOn ? smoothRadius : 0 };
-  }, [splitMethod, brightnessThreshold, contrastThreshold, splitSoften, smoothOn, smoothRadius]);
-
-  // Invalidate calculated preview when inputs change so Apply requires Calculate again.
-  useEffect(() => {
-    setSplitPreview(null);
-  }, [frame, splitOpts]);
-
   // Post-process reads the flattened stack and writes to a display slot beside
   // it, rather than editing the stack. So it can never feed on its own output,
   // Unprocessed is just the stack itself, and turning it off is free.
@@ -260,66 +208,6 @@ export default function CreatePanel() {
     }, 220);
     return () => clearTimeout(t);
   }, [pp, ppOn, ppSource, setPostFrame, getMaskDataUrl, maskPixels]);
-
-  const regionForSide = (side) => {
-    if (splitMethod === "contrast") {
-      return side === "foreground" ? "high" : "low";
-    }
-    return side === "foreground" ? "dark" : "light";
-  };
-
-  // The split reads the stack, not the screen: with post-process on the two
-  // differ, and the fill this selects for reads the stack.
-  const applySplit = async (side = maskSide, target = "active") => {
-    if (!frame) { toast("Put an image on the canvas first", "error"); return; }
-    if (!splitPreview) { toast("Calculate contrast regions first", "error"); return; }
-    setSplitBusy(true);
-    try {
-      const def = SPLIT_SIDES.find((x) => x.id === side);
-      const label = splitMethod === "luminance" ? def?.luminance : def?.contrast;
-      const ok = await applyContrastMask(
-        frame, { ...splitOpts, region: regionForSide(side) }, { target, name: label || "Contrast" },
-      );
-      if (ok) {
-        setMaskSide(side);
-        toast(target === "new"
-          ? `Made a mask of the ${(label || side).toLowerCase()} side`
-          : `Selected the ${(label || side).toLowerCase()} side`, "success");
-      } else {
-        toast("Could not build the selection", "error");
-      }
-    } catch (e) {
-      toast(e.message, "error");
-    } finally {
-      setSplitBusy(false);
-    }
-  };
-
-  // A generation replaces the canvas, which invalidates any split that was on
-  // screen. Recomputing it here means the contrast tiles are ready to use
-  // straight away instead of needing a manual Calculate after every run.
-  useEffect(() => {
-    if (!splitPending || !frame || splitBusy) return;
-    setSplitPending(false);
-    calculateSplit();
-    // calculateSplit is recreated every render; the flag is cleared above, so
-    // this cannot re-enter.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [splitPending, frame]);
-
-  const calculateSplit = async () => {
-    if (!frame) { toast("Put an image on the canvas first", "error"); return; }
-    setSplitBusy(true);
-    try {
-      const p = await contrastPreview(frame, splitOpts);
-      setSplitPreview(p);
-    } catch (e) {
-      setSplitPreview(null);
-      toast(e.message || "Contrast calculate failed", "error");
-    } finally {
-      setSplitBusy(false);
-    }
-  };
 
   /** Every frame a finished job produced, oldest first. */
   const framesOf = (done) => {
@@ -356,7 +244,6 @@ export default function CreatePanel() {
       return;
     }
     setLivePreview(null);
-    if (done.status === "done") setSplitPending(true);
     if (done.status === "done" || done.status === "cancelled") {
       const out = framesOf(done);
       out.forEach((f, i) => {
@@ -398,7 +285,6 @@ export default function CreatePanel() {
   const finishFill = async (done, maskSrc, maskIds = []) => {
     delete snapshots.current[done.id];
     if (done.status === "error") toast(done.message, "error");
-    if (done.status === "done") setSplitPending(true);
     if (done.status === "done" || done.status === "cancelled") {
       const out = framesOf(done);
       for (let i = 0; i < out.length - 1; i += 1) pushHistory(out[i].img, out[i].raw, out[i].card);
@@ -555,6 +441,12 @@ export default function CreatePanel() {
     setSrBusy(false);
   };
 
+  runRef.current = () => {
+    if (hasMask && runs.length) { toast("A fill starts when nothing else is running", "error"); return; }
+    run();
+  };
+  generateRef.current = runRef.current;
+
   const setPpField = (k, v) => setPp((s) => ({ ...s, [k]: v }));
 
   const inFlight = runs.length > 0;
@@ -600,638 +492,336 @@ export default function CreatePanel() {
     return p ? `${base}\n\n${bendPresetSynopsis(p, ops)}` : base;
   };
 
+  // What the run will do and where it lands, in words, next to the button.
+  // This replaced a notice over the picture ("Inpaint Mask 1"), which said only
+  // half of it and pushed the picture down whenever a mask was on.
+  const what = genPaused
+    ? <>Paused · step {job?.detail?.step || "?"} / {job?.detail?.total || "?"}</>
+    : hasMask
+      ? <>Fills <strong>{liveMasks.length > 1 ? `${liveMasks.length} masks` : maskName}</strong> · {stepText}</>
+      : reworkCanvas
+        ? <>Reworks the <strong>whole canvas</strong>, keeping its layout · {stepText}</>
+        : <>A <strong>new image</strong> · {sampleParams.image_size}px · {stepText}</>;
+  const whatTip = hasMask
+    ? `Only the masked area changes; the rest of the canvas is kept exactly. When the fill lands the mask turns off, so the next run is the whole canvas again; turn it back on in Layers to try another setting on the same area.`
+    : canvasIsBlank
+      ? "Makes a new image. Mask an area to rework only that part instead."
+      : "Reworks the whole canvas by the amount of Change; at full Change it makes a new image. Mask an area to rework only that part instead.";
+
   return (
-    <div className="col create-panel">
-      {/* ——— 1. Generate ——————————————————————————————— */}
-      <div className="card">
-        <h3>
-          <TipLabel tip={hasMask
-            ? `${maskName} is on, so this reworks only that area and leaves the rest alone. `
-              + "When the fill lands, the mask turns off, so the next run is the whole canvas again; turn it back on to try another model or setting on the same area."
-            : canvasIsBlank
-              ? "Makes a new image. Mask an area below to rework only that part of the canvas instead."
-              : "Reworks the whole canvas by the amount of Change; at full Change it makes a new image. "
-                + "Mask an area below to rework only that part instead."}
+    <section className="card inspector-panel create-panel" aria-label="Make">
+      <div className="panel-tabs" role="tablist" aria-label="Make">
+        {[
+          { id: "generate", label: "Generate" },
+          { id: "finish", label: "Finish", extra: ppOn ? <span className="panel-tab-dot" title="Post-process is on" /> : null },
+        ].map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            role="tab"
+            aria-selected={panelTab === t.id}
+            className={panelTab === t.id ? "on" : ""}
+            onClick={() => setPanelTab(t.id)}
           >
-            Generate
-          </TipLabel>
-        </h3>
+            {t.label}{t.extra}
+          </button>
+        ))}
+      </div>
 
-        {/* One Change slider, scoped by whatever is selected. There used to be
-            two of these with the same name in different sections, only one of
-            which did anything at any moment. */}
-        {(hasMask || !canvasIsBlank) && (
-          <Slider
-            label={hasMask ? `Change · ${maskName}` : "Change · whole canvas"}
-            value={changeValue}
-            min={0}
-            max={1}
-            step={0.05}
-            disabled={fillLocked}
-            onChange={setChangeValue}
-            fmt={(v) => (fillLocked
-              ? `full · blank canvas · ${sampleParams.steps} steps`
-              : !hasMask && v >= 1
-                ? `new image · ${sampleParams.steps} steps`
-                : `${v < 0.3 ? "subtle" : v < 0.7 ? "medium" : "strong"} · ${effectiveSteps(v, sampleParams.steps, true)} steps`)}
-            tip={(hasMask
-              ? `How strongly the model restyles ${maskName}.`
-              : "How far to move from what is on the canvas. Subtle keeps more of it; strong "
-                + "invents more; at full the canvas is ignored and a new image is made.")
-              + "\n\nWhat it does is skip steps. The first steps of the schedule are the high-noise "
-              + "ones that would wipe out what is already there, so the run starts partway down "
-              + "instead: the lower the Change, the more of those steps are skipped and the less is "
-              + "altered. Right now it skips "
-              + `${skippedSteps(changeValue, sampleParams.steps, true)} of ${sampleParams.steps} steps`
-              + ", which is why the run is shorter than the Steps box says. It also sets how much "
-              + "extra noise is mixed in at each remaining step."
-              + (hasMask
-                ? "\n\nThis one belongs to the mask, and is remembered with it."
-                : "")
-              + (fillLocked
-                ? "\n\nThe canvas is blank, so there is nothing to keep and the fill runs the whole "
-                  + "schedule. The slider comes back once something is underneath."
-                : "")}
-          />
-        )}
-
-        <div className="row gap-2 wrap">
-          <div className="w-100">
-            <Num
-              label="Variations"
-              value={variations}
-              onChange={(v) => setVariations(Math.max(1, Math.min(4, Math.round(v) || 1)))}
-              min={1}
-              max={4}
-              step={1}
-              tip="How many seeds to sample in one GPU run (1–4). With a fixed Seed, uses seed, seed+1, …. All land together for comparison."
+      {panelTab === "generate" ? (
+        <div className="panel-body" role="tabpanel" aria-label="Generate">
+          {/* One Change slider, scoped by whatever is selected. There used to be
+              two of these with the same name in different sections, only one of
+              which did anything at any moment. */}
+          {(hasMask || !canvasIsBlank) && (
+            <Slider
+              label={hasMask ? `Change · ${maskName}` : "Change · whole canvas"}
+              value={changeValue}
+              min={0}
+              max={1}
+              step={0.05}
+              disabled={fillLocked}
+              onChange={setChangeValue}
+              fmt={(v) => (fillLocked
+                ? `full · blank canvas · ${sampleParams.steps} steps`
+                : !hasMask && v >= 1
+                  ? `new image · ${sampleParams.steps} steps`
+                  : `${v < 0.3 ? "subtle" : v < 0.7 ? "medium" : "strong"} · ${effectiveSteps(v, sampleParams.steps, true)} steps`)}
+              tip={(hasMask
+                ? `How strongly the model restyles ${maskName}.`
+                : "How far to move from what is on the canvas. Subtle keeps more of it; strong "
+                  + "invents more; at full the canvas is ignored and a new image is made.")
+                + "\n\nWhat it does is skip steps. The first steps of the schedule are the high-noise "
+                + "ones that would wipe out what is already there, so the run starts partway down "
+                + "instead: the lower the Change, the more of those steps are skipped and the less is "
+                + "altered. Right now it skips "
+                + `${skippedSteps(changeValue, sampleParams.steps, true)} of ${sampleParams.steps} steps`
+                + ", which is why the run is shorter than the Steps box says. It also sets how much "
+                + "extra noise is mixed in at each remaining step."
+                + (hasMask
+                  ? "\n\nThis one belongs to the mask, and is remembered with it."
+                  : "")
+                + (fillLocked
+                  ? "\n\nThe canvas is blank, so there is nothing to keep and the fill runs the whole "
+                    + "schedule. The slider comes back once something is underneath."
+                  : "")}
             />
-          </div>
+          )}
 
-          {bendPresets.length > 0 && (
-            <div className="grow">
-              <Select
-                label={hasMask ? `Bend preset · ${maskName}` : "Bend preset"}
-                value={bendValue}
-                onChange={setBendValue}
-                options={bendOptions}
-                tip={bendTip(
-                  bendValue,
-                  hasMask
-                    ? `Optional UNet tweaks saved in Create ▸ Bend, applied when filling ${maskName}. Remembered with it.`
-                    : "Optional layer tweaks saved in Create ▸ Bend, applied to the whole canvas.",
-                )}
+          {/* The prompt, where it is used. It is the same stored value as the
+              Prompt in Setup ▸ Advanced, which Bend, Merge and Sweep sample
+              with, so the two can never disagree. */}
+          <label className="field steer-words">
+            <TipLabel tip={"Steers the picture towards these words with CLIP guidance while it samples. "
+              + "Kiln's models are unconditional: the words nudge, they do not describe. Empty means no guidance."
+              + "\n\nThe same prompt as in Setup ▸ Advanced, where its strength and ramp live; Bend, Merge and Sweep use it too."}
+            >
+              <span>Steer with words</span>
+            </TipLabel>
+            <input
+              type="text"
+              value={sampleParams.text || ""}
+              placeholder="e.g. a rust-red coastline, aerial"
+              onChange={(e) => setSampleParam("text", e.target.value)}
+            />
+          </label>
+
+          <div className="row gap-2 wrap">
+            <div className="w-100">
+              <Num
+                label="Variations"
+                value={variations}
+                onChange={(v) => setVariations(Math.max(1, Math.min(4, Math.round(v) || 1)))}
+                min={1}
+                max={4}
+                step={1}
+                tip="How many seeds to sample in one GPU run (1–4). With a fixed Seed, uses seed, seed+1, …. All land together for comparison."
               />
             </div>
-          )}
-        </div>
-        {bendValue && presetByName(bendValue) && (
-          <p className="hint mb-2 mono-hint">
-            {bendPresetSynopsis(presetByName(bendValue), ops)}
-          </p>
-        )}
 
-        <div className="create-generate-box">
-          <span className="sub">
-            {genPaused
-              ? `Paused · step ${job?.detail?.step || "?"} / ${job?.detail?.total || "?"}`
-              : variations > 1
-                ? `${generateHint} · ${variations} variations`
-                : generateHint}
-          </span>
-          {/* Where the result lands, and at what size. The layer is chosen in
-              the Layers panel; this is only the consequence, said next to the
-              button, with the reasons a hover away. */}
-          <span className="sub block mt-1">
-            {queueing ? (
-              <TipLabel tip={
-                "While a queue exists, every run lands in Results and the layer is left alone: "
-                + "otherwise each run would replace the layer in turn, and which one stayed would "
-                + "depend on which finished last. Put any of them into a layer from Results."
-                + "\n\nEach image is also saved, with its recipe, to one folder per queue under "
-                + "captures, so a long queue cannot push its first images out of Results."
-              }
-              >
-                Into <strong>Results</strong> · saved to captures
-              </TipLabel>
-            ) : (
-            <TipLabel tip={[
-              hasMask
-                ? `The result lands in ${layerName}, over what that layer has in the masked area. `
-                  + "It starts from the canvas as shown: hide layers to start from what is under them."
-                : `The result lands in ${layerName}, replacing what it has. `
-                  + "Add or duplicate a layer first to keep this attempt apart.",
-              fill && canvasSize
-                ? (scaledFill
-                  ? `Fills at ${fill.w}×${fill.h} and is scaled back to the ${canvasSize.w}×${canvasSize.h} canvas on return.`
-                  : `Fills at ${fill.w}×${fill.h}, the canvas's own size.`)
-                : null,
-              stepsTrimmed
-                ? `Keeping part of the image means starting partway down the schedule, so ${sampleParams.steps - runSteps} early steps are skipped. Raise Change to use more.`
-                : null,
-            ].filter(Boolean).join("\n\n")}
-            >
-              Into <strong>{layerName}</strong>
-              {fill && canvasSize ? ` · ${fill.w}×${fill.h}` : ""}
-              {stepsTrimmed ? ` · ${sampleParams.steps - runSteps} steps skipped` : ""}
-            </TipLabel>
+            {bendPresets.length > 0 && (
+              <div className="grow">
+                <Select
+                  label={hasMask ? `Bend preset · ${maskName}` : "Bend preset"}
+                  value={bendValue}
+                  onChange={setBendValue}
+                  options={bendOptions}
+                  tip={bendTip(
+                    bendValue,
+                    hasMask
+                      ? `Optional UNet tweaks saved in Create ▸ Bend, applied when filling ${maskName}. Remembered with it.`
+                      : "Optional layer tweaks saved in Create ▸ Bend, applied to the whole canvas.",
+                  )}
+                />
+              </div>
             )}
-          </span>
-          {/* Generate never locks: while anything is in flight it queues the
-              settings as they are at the click. Fills are the exception, see run(). */}
-          <button
-            type="button"
-            className="btn primary w-full mt-2"
-            onClick={run}
-            disabled={!modelPath || (hasMask && inFlight)}
-            title={hasMask && inFlight ? "A fill starts when nothing else is running" : undefined}
-          >
-            {generateLabel}
-          </button>
-          {genRunning && (
-            <div className="row gap-2 mt-2">
-              {genPaused ? (
-                <button type="button" className="btn primary grow" onClick={resume}>Resume</button>
-              ) : (
-                <button type="button" className="btn grow" onClick={pause}>Pause</button>
-              )}
-              <button type="button" className="btn danger grow" onClick={stopAndSave}>Stop &amp; save</button>
-            </div>
+          </div>
+          {bendValue && presetByName(bendValue) && (
+            <p className="hint mb-0 mono-hint">
+              {bendPresetSynopsis(presetByName(bendValue), ops)}
+            </p>
           )}
+
           {/* The fill's edge belongs to the mask, but it is decided at the moment
               of filling, so it sits with the button that fills. */}
           {hasMask && !genRunning && (
-            <div className="fill-edge mt-2">
-          <div className="section-title">
-            <TipLabel tip="How the fill meets what is around it. Both settings belong to the mask and are remembered with it.">
-              Fill edge
-            </TipLabel>
-          </div>
-          <Slider
-            label="Feather"
-            value={feather}
-            min={0}
-            max={32}
-            step={1}
-            disabled={!activeMask}
-            onChange={(v) => setMaskParam(activeMask?.id, "feather", Math.round(v))}
-            tip={"Soft edge blend where the fill meets the rest of the canvas."
-              + (activeMask ? `\n\nRemembered with ${maskName}.` : "\n\nMask an area first.")}
-          />
-
-          <Slider
-            label={canResample ? "Harmonize" : "Harmonize — needs DDIM or DPM-Solver++"}
-            value={canResample ? resample : 1}
-            min={1}
-            max={8}
-            step={1}
-            onChange={(v) => setMaskParam(activeMask?.id, "harmonize", Math.round(v))}
-            disabled={!canResample || !activeMask}
-            fmt={(v) => (v <= 1 ? "off" : `${v} passes · about ${v}x slower`)}
-            tip={"Lets the fill settle into what is around it, instead of only matching at the "
-              + "edge. On at 2 passes by default; turn it off for the old single-pass behaviour, "
-              + "or when you need the speed."
-              + "\n\nEach pass is another trip over the same ground, so higher is slower."
-              + "\n\nNeeds the DDIM or DPM-Solver++ sampler."}
-          />
-          {!canResample && (
-            <p className="hint mb-0">
-              Switch the sampler to DDIM or DPM-Solver++ in Sample settings to enable this.
-            </p>
-          )}
+            <div className="fill-edge">
+              <div className="section-title">
+                <TipLabel tip="How the fill meets what is around it. Both settings belong to the mask and are remembered with it.">
+                  Fill edge
+                </TipLabel>
+              </div>
+              <Slider
+                label="Feather"
+                value={feather}
+                min={0}
+                max={32}
+                step={1}
+                disabled={!activeMask}
+                onChange={(v) => setMaskParam(activeMask?.id, "feather", Math.round(v))}
+                tip={"Soft edge blend where the fill meets the rest of the canvas."
+                  + (activeMask ? `\n\nRemembered with ${maskName}.` : "\n\nMask an area first.")}
+              />
+              <Slider
+                label={canResample ? "Harmonize" : "Harmonize — needs DDIM or DPM-Solver++"}
+                value={canResample ? resample : 1}
+                min={1}
+                max={8}
+                step={1}
+                onChange={(v) => setMaskParam(activeMask?.id, "harmonize", Math.round(v))}
+                disabled={!canResample || !activeMask}
+                fmt={(v) => (v <= 1 ? "off" : `${v} passes · about ${v}x slower`)}
+                tip={"Lets the fill settle into what is around it, instead of only matching at the "
+                  + "edge. On at 2 passes by default; turn it off for the old single-pass behaviour, "
+                  + "or when you need the speed."
+                  + "\n\nEach pass is another trip over the same ground, so higher is slower."
+                  + "\n\nNeeds the DDIM or DPM-Solver++ sampler."}
+              />
+              {!canResample && (
+                <p className="hint mb-0">
+                  Switch the sampler to DDIM or DPM-Solver++ in Setup to enable this.
+                </p>
+              )}
             </div>
           )}
+
         </div>
-      </div>
-
-      {/* ——— 2. Mask —————————————————————————————————— */}
-      <Disclose
-        title="Mask"
-        defaultOpen
-        className="create-section"
-        tip="Paint where a run may change things. Masks are rows in the Layers panel and stay until you hide or delete them."
-      >
-        <div className="row between center wrap gap-2 mb-2">
-          <span className="sub grow">
-            <TipLabel tip="Strokes go into this mask. Pick another mask row in the Layers panel to paint into that one instead; with no row picked, the topmost mask that is on takes them. Painting into a mask turns it on and shows it.">
-              Into <strong>{maskName}</strong>
-            </TipLabel>
-          </span>
-          <div className="row center gap-2">
-            <Tooltip text="Step back one edit (Ctrl+Z)">
-              <button type="button" className="btn ghost sm icon" onClick={undo} disabled={!canUndo} aria-label="Undo">
-                <UndoIcon />
-              </button>
-            </Tooltip>
-            <Tooltip text="Swap masked for unmasked (Ctrl+Shift+I)">
-              <button type="button" className="btn ghost sm icon" onClick={() => invertMask(activeMask?.id)} aria-label="Invert">
-                <InvertIcon />
-              </button>
-            </Tooltip>
-            <Tooltip text="Empty the mask, keeping its row and settings (Ctrl+D)">
-              <button type="button" className="btn ghost sm icon" onClick={() => activeMask && clearMask(activeMask.id)} disabled={!activeMask?.strokes.length} aria-label="Clear">
-                <ClearIcon />
-              </button>
-            </Tooltip>
-          </div>
-        </div>
-
-        {/* How the mask gets made: one row of tools, one at a time, icons only
-            so five fit a sidebar; the name of the one that is on sits beside
-            the row, and every button says what it is on hover. What follows
-            the row is that tool's own controls, and nothing else. */}
-        <div className="row center gap-2 mb-2 tool-row">
-          <div className="seg seg-icons" role="group" aria-label="Mask tool">
-            {MASK_TOOLS.map((t) => (
-              <Tooltip key={t.id} text={t.tip}>
-                <button type="button" className={maskTool === t.id ? "on" : ""} onClick={() => setMaskTool(t.id)} aria-label={t.label} aria-pressed={maskTool === t.id}>
-                  <t.Icon />
-                </button>
-              </Tooltip>
-            ))}
-          </div>
-          <span className="tool-name">
-            {MASK_TOOLS.find((t) => t.id === maskTool)?.label}
-            {maskTool === "shape" && <span className="sub"> · {SHAPE_KINDS.find((k) => k.id === shapeKind)?.label}</span>}
-          </span>
-        </div>
-
-        {(maskTool === "brush" || maskTool === "wand" || maskTool === "shape") && (
-          <div className="row gap-2 mb-2 wrap center">
-            {maskTool === "shape" && (
-              <div className="seg seg-icons" role="group" aria-label="Shape kind">
-                {SHAPE_KINDS.map((k) => (
-                  <Tooltip key={k.id} text={k.tip}>
-                    <button type="button" className={shapeKind === k.id ? "on" : ""} onClick={() => setShapeKind(k.id)} aria-label={k.label} aria-pressed={shapeKind === k.id}>
-                      <k.Icon />
-                    </button>
-                  </Tooltip>
-                ))}
-              </div>
-            )}
-            <div className="seg seg-sm" role="group" aria-label="Paint or erase">
-              <button type="button" className={!eraser ? "on" : ""} onClick={() => setEraser(false)} title="Add to the mask"><PaintIcon /> Paint</button>
-              <button type="button" className={eraser ? "on" : ""} onClick={() => setEraser(true)} title="Cut out of the mask"><EraseIcon /> Erase</button>
-            </div>
-            {maskTool === "brush" && (
-              <div className="seg seg-sm" role="group" aria-label="Brush edge">
-                <button type="button" className={!brushHard ? "on" : ""} onClick={() => setBrushHard(false)}>Soft</button>
-                <button type="button" className={brushHard ? "on" : ""} onClick={() => setBrushHard(true)}>Hard</button>
-              </div>
-            )}
-          </div>
-        )}
-
-        {maskTool === "brush" && (
-          <Slider label="Size" value={brushSize} min={8} max={160} step={2} onChange={setBrushSize}
-            tip="Brush diameter in canvas pixels." />
-        )}
-
-        {maskTool === "wand" && (
-          <Slider
-            label="Tolerance"
-            value={wandTolerance}
-            min={0}
-            max={100}
-            step={1}
-            onChange={setWandTolerance}
-            tip="How similar a neighboring pixel's color must be to join the mask. Click the canvas to add it."
-          />
-        )}
-
-        {maskTool === "move" && (
-          <p className="hint mb-2">
-            <TipLabel tip={`Drag anywhere on the canvas to move ${maskName}, or press the arrow keys: 1 px, or 10 with Shift. With any tool, the label on the mask's box drags it too.`}>
-              Drag the mask, or use the arrow keys
-            </TipLabel>
-          </p>
-        )}
-
-        {maskTool === "shape" && (
-          shapeKind === "pattern" ? (
-            <PatternPanel
-              genShape={genShape}
-              setGenShape={setGenShape}
-              canvasSize={canvasSize}
-              eraser={eraser}
-              addStroke={addStroke}
-              addMaskWithStroke={addMaskWithStroke}
-              maskName={maskName}
-            />
-          ) : (
-            <p className="hint mb-2">
-              <TipLabel tip={shapeKind === "polygon"
-                ? "Each click places a corner. Enter, a double-click, or a click on the first corner closes it; Backspace removes the last corner; Esc abandons it. Erase makes a polygon that cuts out of the mask instead."
-                : "Press and drag on the canvas. Shift keeps it square or round. Erase makes a shape that cuts out of the mask instead. Shapes are hard-edged: Feather softens the fill at its edge."}
-              >
-                {shapeKind === "polygon"
-                  ? (polyCount ? `${polyCount} corner${polyCount === 1 ? "" : "s"} placed — Enter closes, Esc cancels` : "Click on the canvas to place corners")
-                  : `Drag on the canvas to draw ${shapeKind === "ellipse" ? "an ellipse" : "a rectangle"}`}
+      ) : null}
+      {/* The outcome and the button sit under the scrolling settings, never
+          inside them: a long Fill edge must not push the button out of view. */}
+      {panelTab === "generate" && (
+        <div className="panel-foot">
+          <div className="create-generate-box outcome">
+            <span className="outcome-what">
+              <TipLabel tip={whatTip}>
+                {what}{!genPaused && variations > 1 ? ` · ${variations} variations` : ""}
               </TipLabel>
-            </p>
-          )
-        )}
-
-        {maskTool === "contrast" && (
-          <div className="contrast-arm">
-            <div className="row gap-2">
-              <div className="grow">
-                <Select label="Split by" value={splitMethod} onChange={setSplitMethod} options={SPLIT_METHODS}
-                  tip="Brightness splits light from dark; local contrast splits busy areas from flat ones." />
-              </div>
-              <div className="grow">
-                {splitMethod === "luminance" ? (
-                  <Slider label="Threshold" value={brightnessThreshold} min={1} max={255} step={1}
-                    onChange={setBrightnessThreshold}
-                    tip="Brightness level (1–255) that separates the two sides." />
+            </span>
+            {/* Where the result lands, and at what size. The layer is chosen in
+                the Layers panel; this is only the consequence, said next to the
+                button, with the reasons a hover away. */}
+            <span className="sub">
+              {queueing ? (
+                <TipLabel tip={
+                  "While a queue exists, every run lands in Results and the layer is left alone: "
+                  + "otherwise each run would replace the layer in turn, and which one stayed would "
+                  + "depend on which finished last. Put any of them into a layer from Results."
+                  + "\n\nEach image is also saved, with its recipe, to one folder per queue under "
+                  + "captures, so a long queue cannot push its first images out of Results."
+                }
+                >
+                  Lands in <strong>Results</strong> · saved to captures
+                </TipLabel>
+              ) : (
+                <TipLabel tip={[
+                  hasMask
+                    ? `The result lands in ${layerName}, over what that layer has in the masked area. `
+                      + "It starts from the canvas as shown: hide layers to start from what is under them."
+                    : `The result lands in ${layerName}, replacing what it has. `
+                      + "Add or duplicate a layer first to keep this attempt apart.",
+                  fill && canvasSize
+                    ? (scaledFill
+                      ? `Fills at ${fill.w}×${fill.h} and is scaled back to the ${canvasSize.w}×${canvasSize.h} canvas on return.`
+                      : `Fills at ${fill.w}×${fill.h}, the canvas's own size.`)
+                    : null,
+                  stepsTrimmed
+                    ? `Keeping part of the image means starting partway down the schedule, so ${sampleParams.steps - runSteps} early steps are skipped. Raise Change to use more.`
+                    : null,
+                ].filter(Boolean).join("\n\n")}
+                >
+                  {hasMask ? "Outside stays as it is · lands in " : "Lands in "}
+                  <strong>{layerName}</strong>
+                  {fill && canvasSize ? ` · ${fill.w}×${fill.h}` : ""}
+                </TipLabel>
+              )}
+            </span>
+            {/* Generate never locks: while anything is in flight it queues the
+                settings as they are at the click. Fills are the exception, see run(). */}
+            <button
+              type="button"
+              className="btn primary w-full mt-1 generate-btn"
+              onClick={run}
+              disabled={!modelPath || (hasMask && inFlight)}
+              title={hasMask && inFlight ? "A fill starts when nothing else is running" : undefined}
+            >
+              {generateLabel}
+            </button>
+            {genRunning && (
+              <div className="row gap-2">
+                {genPaused ? (
+                  <button type="button" className="btn primary grow" onClick={resume}>Resume</button>
                 ) : (
-                  <Slider label="Threshold" value={contrastThreshold} min={-40} max={40} step={1}
-                    onChange={setContrastThreshold}
-                    tip="Nudge the auto-detected local-contrast split." />
+                  <button type="button" className="btn grow" onClick={pause}>Pause</button>
                 )}
+                <Tooltip text="Stop now and keep what it has so far, in the layer it was going to">
+                  <button type="button" className="btn danger grow" onClick={stopAndSave}>Stop &amp; keep</button>
+                </Tooltip>
               </div>
-            </div>
-            <div className="row gap-2">
-              <div className="grow">
-                <Slider label="Edge soften" value={splitSoften} min={0} max={8} step={1} onChange={setSplitSoften}
-                  tip="Softens the edge of the generated region mask." />
-              </div>
-              <div className="grow">
-                <label className="row center gap-2 mb-2 mt-2">
-                  <input type="checkbox" checked={smoothOn} onChange={(e) => setSmoothOn(e.target.checked)} />
-                  <span className="sub">Blur first (fewer speckles)</span>
-                </label>
-                {smoothOn && (
-                  <Slider label="Blur radius" value={smoothRadius} min={1} max={6} step={1} onChange={setSmoothRadius}
-                    tip="Blur the canvas before calculating the split, to reduce speckles." />
-                )}
-              </div>
-            </div>
-            <div className="row gap-2 mb-2 center">
+            )}
+            <span className="sub generate-keys">
+              Ctrl+Enter {hasMask ? "fills" : "generates"}{!hasMask ? " · clicking while one runs queues it" : ""}
+            </span>
+          </div>
+        </div>
+      )}
+      {panelTab === "finish" && (
+        <div className="panel-body" role="tabpanel" aria-label="Finish">
+          <div className="row between center gap-2">
+            <span className="sub">
+              <TipLabel tip={hasMask
+                ? "With a mask on, the adjustments apply inside it only. They are a display stage over the layers, not an edit to them, so Download and Capture bake them in but the layers stay as they are."
+                : "Applied to the whole canvas as a display stage over the layers, not an edit to them: Download and Capture bake it in, the layers stay as they are."}
+              >
+                Applies to <strong>{hasMask ? `inside ${maskName}` : "the whole canvas"}</strong>
+              </TipLabel>
+            </span>
+          </div>
+
+          <div className="finish-block">
+            <div className="row between center">
+              <span className="finish-block-title">Post-process</span>
               <button
                 type="button"
-                className="btn sm"
-                onClick={calculateSplit}
-                // splitPreview is cleared by the effect above whenever the canvas or
-                // any split setting changes, so "we have a preview" is exactly "and
-                // nothing has moved since". No second piece of state to keep in sync.
-                disabled={!frame || splitBusy || !!splitPreview}
+                role="switch"
+                aria-checked={ppOn}
+                aria-label="Post-process"
+                className={`switch ${ppOn ? "on" : ""}`.trim()}
+                onClick={() => setPpOn(!ppOn)}
               >
-                {splitBusy ? "Calculating…" : splitPreview ? "Up to date" : "Calculate"}
+                <span />
               </button>
-              {splitPreview && (
-                <span className="sub">Split at {splitPreview.cut}{splitMethod === "luminance" ? " brightness" : " contrast"}</span>
-              )}
-              {!frame && <span className="sub">Put an image on the canvas first</span>}
             </div>
-            <div className="contrast-split-previews">
-              {SPLIT_SIDES.map((side) => (
-                <button
-                  key={side.id}
-                  type="button"
-                  className={`contrast-split-tile ${maskSide === side.id ? "on" : ""}`}
-                  onClick={() => setMaskSide(side.id)}
-                  disabled={!splitPreview}
-                >
-                  {splitPreview?.[side.id]
-                    ? <img src={splitPreview[side.id]} alt={`${side.label} preview`} />
-                    : <span className="sub">{side.label}</span>}
-                  <span className="contrast-split-label">
-                    {splitMethod === "luminance" ? side.luminance : side.contrast}
-                  </span>
-                </button>
-              ))}
+            {ppOn ? (
+              <>
+                <Slider label="Contrast" value={pp.contrast} min={0.5} max={2} step={0.05}
+                  onChange={(v) => setPpField("contrast", v)}
+                  tip="Boost or flatten contrast after sampling." />
+                <Slider label="Gamma" value={pp.gamma} min={0.5} max={2} step={0.05}
+                  onChange={(v) => setPpField("gamma", v)}
+                  tip="Brighten (lower) or darken (higher) midtones." />
+                <Slider label="Sharpen" value={pp.unsharp} min={0} max={4} step={0.1}
+                  onChange={(v) => setPpField("unsharp", v)}
+                  tip="Unsharp-mask strength on the finished image." />
+                <p className="hint mb-0">Unprocessed, on the picture, shows the layers without it.</p>
+              </>
+            ) : (
+              <p className="hint mb-0">Contrast, gamma and sharpening over the finished picture. The layers are never changed.</p>
+            )}
+          </div>
+
+          <div className="finish-block">
+            <div className="row between center gap-2">
+              <span className="finish-block-title">
+                <TipLabel tip="Enlarges the finished image with Lanczos resampling. Ignores masks, and flattens the layer stack into one layer at the new size; the masks are kept.">
+                  Upscale
+                </TipLabel>
+              </span>
+              <Seg
+                ariaLabel="Upscale factor"
+                size="sm"
+                value={String(srFactor)}
+                onChange={(v) => setSrFactor(Number(v))}
+                tabs={[2, 3, 4].map((f) => ({ id: String(f), label: `${f}×`, tip: `${f} times the size` }))}
+              />
             </div>
-            <AddToMaskButtons
-              thing="side"
-              maskName={maskName}
-              eraser={false}
-              busy={splitBusy && !!splitPreview}
-              disabled={!splitPreview || splitBusy}
-              onAdd={() => applySplit(maskSide, "active")}
-              onNew={() => applySplit(maskSide, "new")}
-              addTip="Replaces any earlier contrast side in this mask; brush and shape strokes stay."
-            />
-          </div>
-        )}
-
-        {!hasMask && (
-          <p className="hint mb-0 mt-2">Paint a mask to fill an area.</p>
-        )}
-      </Disclose>
-
-      {/* ——— 3. Finish ————————————————————————————————— */}
-      <Disclose
-        title="Finish"
-        defaultOpen
-        className="create-section"
-        extra={ppOn ? <span className="pill on">post-process on</span> : null}
-        tip={"Adjustments applied to the finished image, not to sampling. "
-          + "Post-process follows the mask when one is on; upscale always uses the whole canvas."}
-      >
-        <div className="row between center wrap gap-2 mb-2">
-          <span className="sub grow">
-            <TipLabel tip={hasMask
-              ? "With a mask on, the adjustments apply inside it only. They are a display stage over the layers, not an edit to them, so Download and Capture bake them in but the layers stay as they are."
-              : "Applied to the whole canvas as a display stage over the layers, not an edit to them: Download and Capture bake it in, the layers stay as they are."}
-            >
-              {hasMask ? `Inside ${maskName}` : "Whole canvas"}
-            </TipLabel>
-          </span>
-          <label className="row center gap-2">
-            <input
-              type="checkbox"
-              checked={ppOn}
-              onChange={(e) => setPpOn(e.target.checked)}
-            />
-            <span className="sub">Post-process</span>
-          </label>
-        </div>
-
-        <Slider label="Contrast" value={pp.contrast} min={0.5} max={2} step={0.05}
-          onChange={(v) => setPpField("contrast", v)} disabled={!ppOn}
-          tip="Boost or flatten contrast after sampling." />
-        <Slider label="Gamma" value={pp.gamma} min={0.5} max={2} step={0.05}
-          onChange={(v) => setPpField("gamma", v)} disabled={!ppOn}
-          tip="Brighten (lower) or darken (higher) midtones." />
-        <Slider label="Sharpen" value={pp.unsharp} min={0} max={4} step={0.1}
-          onChange={(v) => setPpField("unsharp", v)} disabled={!ppOn}
-          tip="Unsharp-mask strength on the finished image." />
-
-        <div className="section-title mt-2">
-          <TipLabel tip="Enlarges the finished image with Lanczos resampling. Ignores masks, and flattens the layer stack into one layer at the new size; the masks are kept.">
-            Upscale
-          </TipLabel>
-        </div>
-        <div className="row gap-2 center">
-          <div className="w-100">
-            <Num label="Scale" value={srFactor} onChange={setSrFactor} min={2} max={4} step={1}
-              tip="Upscale factor for the canvas image." />
-          </div>
-          <div className="grow">
             <Slider label="Sharpen" value={srSharpen} min={0} max={3} step={0.1} onChange={setSrSharpen}
               tip="Unsharp-mask strength applied after enlarging." />
-          </div>
-          <button
-            type="button"
-            className="btn sm self-end mb-2"
-            onClick={upscale}
-            disabled={srBusy || !frame}
-          >
-            {srBusy ? "…" : "Upscale"}
-          </button>
-        </div>
-      </Disclose>
-    </div>
-  );
-}
-
-
-// The shape generator's kinds and the one or two settings each exposes. The
-// backend does the work (app/core/tools/masks.py); this only names the knobs.
-const GEN_KINDS = [
-  { id: "blobs", label: "Blobs", tip: "Organic islands from layered noise",
-    params: [{ key: "scale", label: "Scale", min: 2, max: 8, step: 1, def: 4, tip: "Bigger numbers, smaller blobs" }] },
-  { id: "cells", label: "Cells", tip: "A patchwork of cells, some of them selected",
-    params: [
-      { key: "cells", label: "Cells", min: 4, max: 32, step: 1, def: 14, tip: "How many cells the canvas is cut into" },
-      { key: "jitter", label: "Wobble", min: 0, max: 1, step: 0.05, def: 0.35, tip: "How much the cell borders wander" },
-    ] },
-  { id: "stripes", label: "Stripes", tip: "Parallel bands at an angle",
-    params: [
-      { key: "angle", label: "Angle", min: 0, max: 179, step: 1, def: 45 },
-      { key: "count", label: "Bands", min: 1, max: 12, step: 1, def: 5 },
-      { key: "wobble", label: "Wobble", min: 0, max: 1, step: 0.05, def: 0.5, tip: "How much the band edges wander" },
-    ] },
-  { id: "split", label: "Split", tip: "The canvas cut into two or three pieces along a wavy line",
-    params: [
-      { key: "pieces", label: "Pieces", min: 2, max: 3, step: 1, def: 2 },
-      { key: "wave", label: "Wave", min: 0, max: 1, step: 0.05, def: 0.6, tip: "How much the cut wanders" },
-      { key: "orientation", label: "Cut", options: [{ value: "v", label: "Left to right" }, { value: "h", label: "Top to bottom" }], def: "v" },
-    ] },
-  { id: "shapes", label: "Scatter", tip: "Scattered circles and stars, some with holes",
-    params: [
-      { key: "count", label: "Shapes", min: 1, max: 12, step: 1, def: 6 },
-      { key: "holes", label: "Holes", options: [{ value: "yes", label: "Some" }, { value: "no", label: "None" }], def: "yes" },
-    ] },
-];
-
-const randomSeed31 = () => Math.floor(Math.random() * 2 ** 31);
-
-/** The Pattern arm of the Shape tool: a kind, its knobs, a seed, a live
- *  preview, and Add to mask. Every Add is one stroke; Shuffle rerolls. */
-function PatternPanel({ genShape, setGenShape, canvasSize, eraser, addStroke, addMaskWithStroke, maskName }) {
-  const { toast } = useApp();
-  const [preview, setPreview] = useState(null);
-  const [busy, setBusy] = useState(false);
-  const kind = GEN_KINDS.find((k) => k.id === genShape.kind) || GEN_KINDS[0];
-  const w = canvasSize?.w || 512;
-  const h = canvasSize?.h || 512;
-  const params = { ...Object.fromEntries(kind.params.map((p) => [p.key, p.def])), ...(genShape.params || {}) };
-  // What the backend takes: the same keys, with the select-style knobs decoded.
-  const backendParams = () => {
-    const out = { ...params };
-    if ("holes" in out) out.holes = out.holes !== "no";
-    return out;
-  };
-  const body = (pw, ph) => ({
-    kind: genShape.kind, width: pw, height: ph, seed: genShape.seed,
-    coverage: genShape.coverage, soften: genShape.soften, invert: false, params: backendParams(),
-  });
-  const set = (patch) => setGenShape({ ...genShape, ...patch });
-  const setParam = (key, v) => set({ params: { ...params, [key]: v } });
-
-  useEffect(() => {
-    let live = true;
-    const scale = 256 / Math.max(w, h);
-    const t = setTimeout(() => {
-      api.post("/tools/mask", body(Math.max(16, Math.round(w * scale)), Math.max(16, Math.round(h * scale))))
-        .then((d) => { if (live) setPreview(d.mask); })
-        .catch(() => { if (live) setPreview(null); });
-    }, 200);
-    return () => { live = false; clearTimeout(t); };
-  }, [genShape.kind, genShape.seed, genShape.coverage, genShape.soften, JSON.stringify(params), w, h]);
-
-  const add = async (target = "active") => {
-    setBusy(true);
-    try {
-      const d = await api.post("/tools/mask", body(w, h));
-      const { cache } = await maskUrlToCache(d.mask);
-      const stroke = {
-        ...cachedStroke("generated", cache, eraser && target === "active" ? "subtract" : "add"),
-        gen: { kind: genShape.kind, seed: genShape.seed, coverage: genShape.coverage, soften: genShape.soften, params: backendParams() },
-      };
-      if (target === "new") addMaskWithStroke(stroke, kind.label);
-      else addStroke(stroke);
-    } catch (e) { toast(e.message, "error"); }
-    setBusy(false);
-  };
-
-  return (
-    <div className="gen-panel">
-      <div className="seg seg-sm mb-2" role="group" aria-label="Pattern">
-        {GEN_KINDS.map((k) => (
-          <button key={k.id} type="button" className={genShape.kind === k.id ? "on" : ""} title={k.tip}
-            onClick={() => set({ kind: k.id, params: {} })}>{k.label}</button>
-        ))}
-      </div>
-      <div className="gen-body">
-        <div className="gen-knobs">
-          <Slider label="Coverage" value={Math.round(genShape.coverage * 100)} min={5} max={80} step={1}
-            onChange={(v) => set({ coverage: v / 100 })} fmt={(v) => `${v} %`}
-            tip="Roughly how much of the canvas the shape covers." />
-          <Slider label="Soften" value={genShape.soften} min={0} max={24} step={1}
-            onChange={(v) => set({ soften: v })}
-            tip="Blur the shape's edge, so it selects at partial strength there, like a soft brush." />
-          {kind.params.map((p) => (p.options ? (
-            <Select key={p.key} label={p.label} value={String(params[p.key])} options={p.options}
-              onChange={(v) => setParam(p.key, v)} tip={p.tip} />
-          ) : (
-            <Slider key={p.key} label={p.label} value={Number(params[p.key])} min={p.min} max={p.max} step={p.step}
-              onChange={(v) => setParam(p.key, v)} tip={p.tip} />
-          )))}
-          <div className="row center gap-2">
-            <Num label="Seed" value={genShape.seed} onChange={(v) => set({ seed: Math.max(0, Math.round(Number(v) || 0)) })}
-              tip="The same seed and settings give the same shape." />
-            <button type="button" className="btn sm" onClick={() => set({ seed: randomSeed31() })} title="A different shape with the same settings">Shuffle</button>
+            <button
+              type="button"
+              className="btn sm w-full"
+              onClick={upscale}
+              disabled={srBusy || !frame}
+            >
+              {srBusy
+                ? "Upscaling…"
+                : canvasSize
+                  ? `Upscale to ${canvasSize.w * srFactor} × ${canvasSize.h * srFactor}`
+                  : "Upscale"}
+            </button>
+            <p className="hint mb-0">Flattens the layers into one; the masks are kept. The result also lands in Results.</p>
           </div>
         </div>
-        <div className="gen-preview" title="What Add to mask will add, white where the mask goes">
-          {preview ? <img src={preview} alt="" /> : <span className="sub">…</span>}
-        </div>
-      </div>
-      <AddToMaskButtons
-        thing="shape"
-        maskName={maskName}
-        eraser={eraser}
-        busy={busy}
-        onAdd={() => add("active")}
-        onNew={() => add("new")}
-      />
-    </div>
-  );
-}
-
-/** The pair every way of producing an area ends in: into the mask being
- *  painted, or into a mask of its own. Other masks are left as they are --
- *  a composition is several masks on at once, and the bar already says so. */
-function AddToMaskButtons({ onAdd, onNew, eraser, busy, disabled, maskName, thing, addTip }) {
-  const addText = eraser ? `Cut this ${thing} out of ${maskName}` : `Add this ${thing} to ${maskName}`;
-  return (
-    <div className="add-pair mt-2">
-      <Tooltip text={addTip ? `${addText}. ${addTip}` : addText}>
-        <button type="button" className="btn sm primary" onClick={onAdd} disabled={busy || disabled}>
-          <AddIcon /> {busy ? "Working…" : eraser ? "Cut from mask" : "Add to mask"}
-        </button>
-      </Tooltip>
-      <Tooltip text={eraser
-        ? "Erase cuts out of a mask; there is nothing to cut from a new one"
-        : `Put this ${thing} in a mask of its own, on and selected. Other masks stay as they are.`}
-      >
-        <button type="button" className="btn sm" onClick={onNew} disabled={busy || disabled || eraser}>
-          <NewMaskIcon /> New mask
-        </button>
-      </Tooltip>
-    </div>
+      )}
+    </section>
   );
 }

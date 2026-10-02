@@ -44,6 +44,8 @@
   --canvas-max-w: 1100px;
   --canvas-max-h: 960px;
   --rail-w: 232px;
+  --inspector-w: 340px;
+  --toolrail-w: 52px;
   font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
 }
 
@@ -167,8 +169,8 @@ body {
   width: 100%; margin-inline: auto;
   max-width: calc(var(--sidebar-w) + var(--canvas-max-w) + var(--rail-w) + 2 * var(--s-3));
 }
+.play.fill { max-width: calc(var(--toolrail-w) + var(--canvas-max-w) + var(--inspector-w) + 2 * var(--s-3)); }
 .play-body { display: grid; grid-template-columns: minmax(260px, var(--sidebar-w)) minmax(0, 1fr); gap: var(--s-3); align-items: start; }
-.play-tools { min-width: 0; }
 @media (max-width: 900px) {
   .play-body { grid-template-columns: 1fr; }
 }
@@ -228,17 +230,6 @@ body {
 }
 .hero.pan-ready, .hero.pan-ready .mask-overlay { cursor: grab; }
 .hero.panning, .hero.panning .mask-overlay { cursor: grabbing; }
-.hero-zoom {
-  position: absolute; top: 6px; right: 6px; z-index: 3;
-  display: flex; align-items: center; gap: 1px; padding: 2px;
-  background: rgba(20, 22, 30, .85); border: 1px solid var(--line); border-radius: 999px;
-}
-.hero-zoom button {
-  background: transparent; border: none; color: var(--text-dim); cursor: pointer;
-  font: inherit; font-size: var(--fs-sm); line-height: 1; padding: 3px 7px; border-radius: 999px;
-}
-.hero-zoom button:hover { background: var(--bg-3); color: var(--text); }
-.hero-zoom .zoom-pct { font-size: var(--fs-xs); min-width: 44px; text-align: center; }
 
 /* A strip directly above the picture saying what the next run will do. The
    controls for it live in the Layers panel; this is only the consequence, which
@@ -363,103 +354,109 @@ body {
 .btn.xs { padding: 1px 6px; font-size: var(--fs-xs); }
 .btn.xs.w-full { width: 100%; margin-top: 4px; }
 
-/* The canvas with Results under it, and the right rail (Assets, Layers). The
-   rail drops under the canvas on narrow viewports, where a side column would
-   squeeze the image too far. */
-.play-main { display: flex; flex-direction: column; gap: var(--s-3); min-width: 0; }
-.play-main > .col { min-width: 0; }
-.play-rail {
+/* Canvas: the picture over its results strip, and the inspector beside them.
+   The tab fills the window (the Play pane is given the content area's height)
+   instead of scrolling, so the picture takes the height that is left and the
+   results are always on screen. Narrow windows go back to one scrolling
+   column further down. */
+.pane-play { height: 100%; }
+.play.fill { height: 100%; }
+.play-body.canvas-layout {
+  flex: 1; min-height: 0;
+  grid-template-columns: var(--toolrail-w) minmax(0, 1fr) var(--inspector-w);
+  align-items: stretch;
+}
+.canvas-col { display: flex; flex-direction: column; gap: var(--s-3); min-width: 0; min-height: 0; }
+/* The picture's column: the bar, any notice, then the stage. No card around
+   the stage: the picture sits straight on the ground. */
+.canvas-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: var(--s-2); }
+.canvas-wrap .callout, .canvas-wrap .selection-bar { margin: 0; }
+/* The picture fits the stage both ways. The stage is a size container, so the
+   image's caps are the stage's own box rather than a guess from 100vh. */
+.canvas-layout .canvas-card .hero {
+  flex: 1; min-height: 240px; max-height: none; container-type: size;
+}
+.canvas-layout .canvas-card .hero img { max-width: 100cqw; max-height: 100cqh; }
+.canvas-inspector {
   display: flex; flex-direction: column; gap: var(--s-3);
-  min-width: 0; position: sticky; top: 0;
-  max-height: calc(100vh - var(--topbar-h) - var(--content-pad-y) * 2);
-  overflow-y: auto;
+  min-width: 0; min-height: 0; overflow: hidden;
 }
-@media (max-width: 1100px) { .play-rail { position: static; max-height: none; overflow: visible; } }
-.play-stage.with-rail {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) var(--rail-w);
-  gap: var(--s-3);
-  align-items: start;
+@media (max-width: 1180px) {
+  .play-body.canvas-layout { --inspector-w: 300px; }
 }
-@media (max-width: 1100px) {
-  .play-stage.with-rail { grid-template-columns: 1fr; }
-  /* One column: Layers belongs next to the picture it edits, so the rail goes
-     between the canvas and Results rather than under a long results grid. */
-  .play-main { display: contents; }
-  .play-rail { order: 1; }
-  .results-panel { order: 2; }
+@media (max-width: 1000px) {
+  .play.fill { height: auto; }
+  .play-body.canvas-layout { grid-template-columns: var(--toolrail-w) minmax(0, 1fr); }
+  .canvas-inspector { grid-column: 1 / -1; }
+  .canvas-layout .canvas-card .hero { flex: none; height: min(70vh, 620px); min-height: 420px; }
+  .canvas-inspector { overflow: visible; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+  .canvas-inspector .inspector-panel { max-height: none; min-height: 0; }
+  .canvas-inspector .panel-body { overflow: visible; }
 }
 
-/* Queue: one chip per run in flight, between the canvas and Results. */
-.queue-strip { padding: var(--s-2) var(--s-3); min-width: 0; }
-.queue-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--s-2); }
-.queue-chip {
-  display: inline-flex; align-items: stretch; max-width: 100%;
-  border: 1px solid var(--line); border-radius: 999px; background: var(--bg-2);
+/* Results: runs in flight, then this session's images, in one fixed-height
+   strip that scrolls sideways. Fixed so the picture never jumps when the first
+   result lands. */
+.results-strip {
+  flex: 0 0 auto; height: 140px; min-width: 0;
+  display: flex; gap: var(--s-3); padding: 10px 12px;
 }
-.queue-chip.on { border-color: var(--accent); background: var(--accent-soft); }
-.queue-chip-main {
-  display: inline-flex; align-items: center; gap: 6px; min-width: 0;
-  padding: 3px 4px 3px 6px; background: none; border: 0; color: inherit; cursor: pointer;
+.results-strip-head { width: 120px; flex-shrink: 0; display: flex; flex-direction: column; gap: 6px; }
+.results-strip-head .sub { font-size: var(--fs-xs); line-height: 1.35; }
+.results-strip-clear { margin-top: auto; align-self: flex-start; }
+.results-strip-row {
+  flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 10px;
+  overflow-x: auto; overflow-y: hidden; padding-bottom: 4px;
 }
-.queue-chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.queue-chip-x {
-  padding: 0 10px 0 6px; background: none; border: 0; color: var(--text-dim);
-  cursor: pointer; font-size: 15px; line-height: 1;
+.results-strip-empty { margin: 0; align-self: center; max-width: 360px; }
+.strip-tile { position: relative; flex: 0 0 94px; width: 94px; display: flex; flex-direction: column; gap: 4px; }
+.strip-thumb {
+  position: relative; width: 94px; height: 94px; padding: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+  border: 2px solid var(--line); border-radius: var(--radius-sm); overflow: hidden;
+  background: var(--bg-3); color: var(--text); cursor: pointer; font: inherit;
 }
-.queue-chip-x:hover { color: var(--accent); }
-/* A ring, not a disc: the mask cuts the middle out, so it sits on any chip colour. */
+.strip-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.strip-tile.on .strip-thumb { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.strip-cap {
+  font-size: var(--fs-xs); color: var(--text-dim); text-align: center;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.strip-tile.on .strip-cap { color: var(--text); }
+/* Keep, layer and set ride on the bottom of the thumbnail, shown on hover or
+   keyboard focus, so the strip stays one tile tall. */
+.strip-actions {
+  position: absolute; left: 4px; right: 4px; top: 66px;
+  display: flex; gap: 2px; justify-content: center;
+  opacity: 0; pointer-events: none; transition: opacity 0.12s ease;
+}
+.strip-actions .tip-wrap { display: flex; }
+.strip-actions .btn.xs {
+  padding: 2px 5px; font-size: 10.5px; min-width: 0;
+  background: rgba(14, 15, 19, 0.88); border-color: rgba(255, 255, 255, 0.12);
+}
+.strip-x {
+  position: absolute; top: 4px; right: 4px; width: 20px; height: 20px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; border: 1px solid var(--line); background: rgba(14, 15, 19, 0.85);
+  color: var(--text-dim); font-size: 14px; line-height: 1; cursor: pointer;
+  opacity: 0; transition: opacity 0.12s ease;
+}
+.strip-x:hover { color: var(--accent); border-color: var(--accent); }
+.strip-tile:hover .strip-actions, .strip-tile:focus-within .strip-actions { opacity: 1; pointer-events: auto; }
+.strip-tile:hover .strip-x, .strip-tile:focus-within .strip-x, .queue-tile .strip-x { opacity: 1; }
+.queue-tile .strip-thumb { background: var(--bg-2); }
+.queue-tile.on .strip-thumb { background: var(--accent-soft); }
+.queue-tile-state { font-size: var(--fs-xs); color: var(--text-dim); }
+/* A ring, not a disc: the mask cuts the middle out, so it sits on any colour. */
 .queue-ring {
   flex: 0 0 auto; width: 16px; height: 16px; border-radius: 50%;
   background: conic-gradient(var(--accent) calc(var(--p) * 1turn), var(--line) 0);
   -webkit-mask: radial-gradient(closest-side, transparent 58%, #000 62%);
   mask: radial-gradient(closest-side, transparent 58%, #000 62%);
 }
-.queue-place { flex: 0 0 auto; min-width: 16px; text-align: center; opacity: 0.8; }
-
-/* Results: a grid as wide as the canvas. No scroller of its own -- the session
-   keeps at most HISTORY_MAX images, so the page scrolls instead. */
-.results-panel { padding: var(--s-2) var(--s-3) var(--s-3); min-width: 0; }
-.results-grid {
-  display: grid;
-  /* 144px is the narrowest cell whose four actions still fit one row. */
-  grid-template-columns: repeat(auto-fill, minmax(144px, 1fr));
-  gap: var(--s-3) 10px;
-}
-.results-panel .play-result { width: 100%; min-width: 0; }
-.results-panel .play-result-thumb {
-  width: 100%;
-  height: auto;
-  aspect-ratio: 1;
-}
-.play-result {
-  flex: 0 0 auto;
-  width: 112px;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-.play-result-thumb {
-  position: relative;
-  width: 112px;
-  height: 112px;
-  padding: 0;
-  border: 2px solid var(--line);
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-  background: var(--bg-3);
-  cursor: pointer;
-}
-.play-result-thumb img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-.play-result.on .play-result-thumb {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent);
-}
+.queue-ring.big { width: 40px; height: 40px; }
+.queue-place { flex: 0 0 auto; min-width: 16px; text-align: center; opacity: 0.8; font-size: var(--fs-lg); }
 .play-result-idx {
   position: absolute;
   top: 4px;
@@ -471,35 +468,6 @@ body {
   border-radius: 3px;
   background: rgba(14, 15, 19, 0.78);
   color: var(--text);
-}
-.play-result-seed {
-  display: block;
-  font-size: var(--fs-xs);
-  color: var(--text-dim);
-  text-align: center;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.play-result-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 3px;
-  justify-content: center;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.12s ease;
-}
-.play-result:hover .play-result-actions,
-.play-result.on .play-result-actions,
-.play-result:focus-within .play-result-actions {
-  opacity: 1;
-  pointer-events: auto;
-}
-.play-result-actions .btn.xs {
-  padding: 3px 6px;
-  font-size: var(--fs-xs);
-  min-width: 0;
 }
 
 .model-thumbs { display: flex; gap: 6px; overflow-x: auto; padding-bottom: var(--s-1); }
@@ -1357,9 +1325,71 @@ body {
   background: var(--bg-2);
 }
 
-.create-panel {
-  gap: var(--s-3);
+/* The two tabbed panels of the Canvas inspector: Generate | Finish over
+   Layers | Assets. Each scrolls its own body. The make panel takes what its
+   content needs, up to most of the column; the manage panel the rest. */
+.inspector-panel { padding: 0; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.create-panel { flex: 0 1 auto; max-height: 76%; }
+.manage-panel { flex: 1 1 200px; min-height: 160px; }
+.manage-panel.drop-on { outline: 2px dashed var(--accent); outline-offset: -2px; }
+.panel-tabs { display: flex; flex-shrink: 0; padding: 0 6px; border-bottom: 1px solid var(--line); }
+.panel-tabs button {
+  flex: 1; height: 40px; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  background: transparent; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px;
+  color: var(--text-dim); font: inherit; font-size: var(--fs-md); font-weight: 600; cursor: pointer;
 }
+.panel-tabs button:hover { color: var(--text); }
+.panel-tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
+.panel-tab-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+.panel-body {
+  display: flex; flex-direction: column; gap: var(--s-3);
+  padding: var(--s-3); overflow-y: auto; min-height: 0;
+}
+.panel-body > .slider-row, .panel-body .field { margin-bottom: 0; }
+.panel-foot { flex-shrink: 0; padding: 0 var(--s-3) var(--s-3); }
+/* A rule above the footer, so settings scrolled under it never seem to run
+   into the outcome. */
+.panel-body + .panel-foot { padding-top: var(--s-3); border-top: 1px solid var(--line); }
+.steer-words input { width: 100%; }
+.create-generate-box.outcome { display: flex; flex-direction: column; gap: 6px; }
+.outcome-what { font-size: var(--fs-sm); color: var(--text-dim); line-height: 1.4; }
+.outcome-what strong, .outcome strong { color: var(--text); }
+.generate-btn { padding: 9px 12px; font-size: var(--fs-md); }
+.generate-keys { font-size: var(--fs-xs); text-align: center; }
+.finish-block {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: var(--s-3); border: 1px solid var(--line); border-radius: var(--radius-sm);
+}
+.finish-block-title { font-size: var(--fs-sm); font-weight: 650; color: var(--text); }
+.finish-block .slider-row { margin-bottom: 0; }
+/* Finish's sliders are one line each -- label, track, value -- so post-process
+   and upscale fit the panel together without it scrolling at 900px. */
+.finish-block .slider-row {
+  display: grid; grid-template-columns: 74px minmax(0, 1fr) 34px; align-items: center; gap: 8px;
+}
+.finish-block .slider-row .lab { display: contents; }
+.finish-block .slider-row .lab > :first-child { grid-column: 1; grid-row: 1; font-size: var(--fs-sm); color: var(--text-dim); }
+.finish-block .slider-row .val { grid-column: 3; grid-row: 1; text-align: right; font-size: var(--fs-sm); }
+.finish-block .slider-row input { grid-column: 2; grid-row: 1; width: 100%; margin: 0; }
+/* Layers | Assets */
+.manage-list { display: flex; flex-direction: column; gap: 4px; }
+.manage-group-head {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s-2);
+  font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim);
+  padding: 2px 2px 4px;
+}
+.manage-group-head .sub { text-transform: none; letter-spacing: 0; font-weight: 500; }
+.manage-group-head .btn { text-transform: none; letter-spacing: 0; }
+.manage-group-head .btn .ico, .layer-actions .btn .ico { margin-right: 4px; }
+.manage-sep { height: 1px; background: var(--line); margin: var(--s-2) 0; }
+.manage-panel .assets-grid { max-height: none; overflow: visible; }
+.asset-add {
+  aspect-ratio: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  border: 1px dashed var(--line); border-radius: var(--radius-sm); background: transparent;
+  color: var(--text-dim); font: inherit; font-size: var(--fs-xs); font-weight: 600; cursor: pointer;
+}
+.asset-add:hover { border-color: var(--accent); color: var(--accent); }
+.asset-add .ico { margin: 0; }
 .create-section {
   background: var(--bg-2);
   border-color: var(--line);
@@ -2214,9 +2244,6 @@ a { color: var(--accent); }
 .layer-actions .btn.icon .ico { width: 13px; height: 13px; }
 
 /* Under the canvas: one bar, two groups. */
-.canvas-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
-.canvas-bar-group { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
-.canvas-bar .tip-wrap { display: inline-flex; }
 .mask-thumb {
   background: repeating-conic-gradient(var(--bg-3) 0 25%, var(--bg-2) 0 50%) 0 0 / 8px 8px;
   border: 1px solid var(--line);
@@ -2238,3 +2265,131 @@ a { color: var(--accent); }
 .attn-level > .lbl { min-width: 190px; font-size: var(--fs-sm); color: var(--text-dim); }
 .attn-level > .lbl b { color: var(--text); font-weight: 600; }
 .attn-level label.field { flex: 1; min-width: 140px; margin: 0; }
+
+/* Canvas tools (CanvasTools.jsx). The rail holds the mask tools against the
+   picture's left edge, each with its key in the corner; the stage bar over the
+   picture holds the document menu, the active tool's settings, and what acts
+   on the whole picture. */
+.tool-rail {
+  display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px;
+  background: var(--bg-1); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  min-height: 0;
+}
+.tool-rail .tip-wrap { display: flex; }
+.tool-rail-btn {
+  position: relative; width: 40px; height: 40px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: transparent; border: 1px solid transparent; border-radius: 9px;
+  color: var(--text-dim); cursor: pointer;
+}
+.tool-rail-btn:hover:not(:disabled) { color: var(--text); background: var(--bg-3); }
+.tool-rail-btn.on { color: var(--accent); background: var(--accent-soft); border-color: rgba(255, 122, 69, 0.5); }
+.tool-rail-btn:disabled { opacity: 0.4; cursor: default; }
+.tool-rail-btn .ico { margin: 0; }
+.tool-rail-btn kbd {
+  position: absolute; right: 3px; bottom: 1px; font: 600 8.5px/1 inherit; font-family: inherit;
+  color: var(--text-dim); opacity: 0.8;
+}
+.tool-rail-sep { width: 26px; height: 1px; background: var(--line); margin: 6px 0; }
+
+.stage-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px;
+  min-height: 44px; padding: 5px 8px;
+  background: var(--bg-1); border: 1px solid var(--line); border-radius: var(--radius-sm);
+}
+.stage-bar .tip-wrap { display: inline-flex; }
+.stage-bar .btn.icon .ico { margin: 0; }
+.bar-sep { width: 1px; height: 20px; background: var(--line); flex-shrink: 0; }
+.tool-options { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; flex: 1 1 0; min-width: 260px; }
+.stage-bar-end { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.bar-into {
+  display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 8px;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 7px;
+  color: var(--text-dim); font: inherit; font-size: var(--fs-sm); white-space: nowrap; cursor: pointer;
+}
+.bar-into strong { color: var(--text); font-weight: 600; }
+.bar-into:hover, .bar-into.on { border-color: var(--accent); }
+.bar-into .ico { margin: 0; }
+.bar-range {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: var(--fs-sm); color: var(--text-dim); white-space: nowrap;
+}
+.bar-range input { accent-color: var(--accent); margin: 0; }
+.bar-range b { min-width: 26px; color: var(--text); font-weight: 600; }
+.bar-hint { flex: 1 1 0; min-width: 0; font-size: var(--fs-sm); color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bar-menu { display: flex; flex-direction: column; gap: 2px; min-width: 200px; }
+.bar-menu-title {
+  font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-dim); padding: 2px 8px 4px;
+}
+.bar-menu-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 8px;
+  background: transparent; border: 0; border-radius: 6px; color: var(--text);
+  font: inherit; font-size: var(--fs-sm); text-align: left; cursor: pointer;
+}
+.bar-menu-item:hover { background: var(--bg-3); }
+.bar-menu-item.on { color: var(--accent); background: var(--accent-soft); }
+.bar-menu-item.danger { color: var(--bad); }
+.bar-menu-item .ico { margin: 0; }
+.bar-menu-item .grow { flex: 1; }
+.bar-menu-sep { height: 1px; background: var(--line); margin: 6px 0; }
+.doc-menu { width: 280px; gap: 8px; }
+.doc-menu .bar-menu-title { padding-left: 0; }
+.doc-menu .bar-menu-item { margin: 0 -8px; width: calc(100% + 16px); }
+.doc-menu-btn { gap: 6px; }
+.doc-menu-btn .ico { margin: 0; }
+.bar-pop { width: 360px; }
+.bar-pop-body { display: flex; flex-direction: column; gap: var(--s-2); }
+.bar-pop-body .gen-panel { margin: 0; }
+.zoom-group { display: inline-flex; align-items: center; }
+.zoom-btn { min-width: 64px; justify-content: center; }
+
+/* On the picture: progress along its top edge, what it is at the top left,
+   how it is shown at the top right. The chips take the pointer; the strip
+   they sit in does not, so painting and panning reach the picture. */
+.hero-progress { position: absolute; left: 0; right: 0; top: 0; z-index: 4; }
+.hero-progress .progress { margin: 0; border-radius: 0; }
+.hero-chips {
+  position: absolute; top: 8px; z-index: 3; display: flex; gap: 6px; pointer-events: none;
+}
+.hero-chips.start { left: 8px; }
+.hero-chips.end { right: 8px; }
+.hero-chips .tip-wrap { display: inline-flex; }
+.hero-chip {
+  pointer-events: auto; display: inline-flex; align-items: center; gap: 6px;
+  font-size: var(--fs-xs); color: var(--text-dim);
+  background: rgba(20, 22, 30, 0.88); border: 1px solid var(--line); border-radius: 999px;
+  padding: 3px 9px; white-space: nowrap;
+}
+.hero-switch { cursor: pointer; }
+.hero-switch input { margin: 0; accent-color: var(--accent); }
+
+@media (max-width: 720px) {
+  .canvas-inspector { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* A blank canvas: what it is and what to do, over the checkerboard. The strip
+   it sits in lets the pointer through; only the card takes it. */
+.hero-blank {
+  position: absolute; inset: 0; z-index: 2; pointer-events: none;
+  display: flex; align-items: center; justify-content: center; padding: var(--s-4);
+}
+.hero-blank-card {
+  pointer-events: auto; max-width: 340px; text-align: center;
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  padding: 22px 24px; border: 1px dashed var(--text-faint); border-radius: var(--radius);
+  background: rgba(14, 15, 19, 0.85);
+}
+.hero-blank-card b { font-size: var(--fs-lg); }
+.hero-blank-card .sub { line-height: 1.5; }
+
+/* Short windows: smaller result tiles, so the height goes to the picture. */
+@media (max-height: 820px) {
+  .results-strip { height: 112px; padding: 8px 10px; }
+  .strip-tile { flex-basis: 72px; width: 72px; }
+  .strip-thumb { width: 72px; height: 72px; }
+  .strip-actions { top: 46px; }
+  .strip-actions .btn.xs { padding: 1px 3px; font-size: 10px; }
+  .queue-ring.big { width: 30px; height: 30px; }
+  .results-strip-head > .sub { display: none; }
+}

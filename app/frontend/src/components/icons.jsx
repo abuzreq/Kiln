@@ -185,6 +185,34 @@ export function AddIcon(props) {
   );
 }
 
+export function RedoIcon(props) {
+  return (
+    <Icon {...props}>
+      <path d="M15 14l5-5-5-5" />
+      <path d="M20 9H10a6 6 0 0 0 0 12h3" />
+    </Icon>
+  );
+}
+
+/** A small downward caret: this opens a menu. */
+export function ChevronDownIcon({ size = 12, ...props }) {
+  return (
+    <Icon size={size} {...props}>
+      <path d="m6 9 6 6 6-6" />
+    </Icon>
+  );
+}
+
+/** A page with a folded corner: the document, for the canvas menu. */
+export function FileIcon(props) {
+  return (
+    <Icon {...props}>
+      <path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z" />
+      <path d="M14 3v5h5" />
+    </Icon>
+  );
+}
+
 export function UpIcon(props) {
   return (
     <Icon {...props}>

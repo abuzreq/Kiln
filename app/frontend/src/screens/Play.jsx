@@ -7,8 +7,10 @@ import { useApp } from "../state.jsx";
 import { api, downloadPost, mediaUrl, thumbUrl } from "../api.js";
 import {
   EyeIcon, InvertIcon, ClearIcon, UpIcon, DownIcon, TrashIcon, DownloadIcon, CaptureIcon,
+  UndoIcon, RedoIcon, ChevronDownIcon, AddIcon,
 } from "../components/icons.jsx";
-import { Progress, Slider, Tooltip, TipLabel } from "../components/ui.jsx";
+import { Progress, Slider, Tooltip, TipLabel, Popover } from "../components/ui.jsx";
+import { ToolRail, ToolOptions } from "../components/CanvasTools.jsx";
 import { PlayCtx, usePlay, fileToDataUrl } from "./playContext.jsx";
 import {
   loadSampleParams, saveSampleParams, SampleSettingsPanel, paramsFromCard, cardLabel,
@@ -49,6 +51,8 @@ const CANVAS_TABS = new Set(["create"]);
 // Canvas bounds. The floor is a size a brush can still be aimed inside; the
 // ceiling is well past what these models sample at, and a fill is scaled down
 // to MAX_FILL_SIDE anyway, so nothing is gained by going bigger.
+// Which tab the Layers | Assets panel shows, remembered per browser.
+const MANAGE_KEY = "kiln.canvasManageTab";
 const CANVAS_MIN = 64;
 const CANVAS_MAX = 2048;
 // An opened image sets the canvas to its own size. Bigger than the typed-in
@@ -99,7 +103,8 @@ export default function Play() {
   const [brushSize, setBrushSize] = useState(48);
   const [brushHard, setBrushHard] = useState(false);
   const [eraser, setEraser] = useState(false);
-  const [maskTool, setMaskTool] = useState("brush");
+  // Move by default: a stray click on the picture then never paints.
+  const [maskTool, setMaskTool] = useState("move");
   // The Shape tool's kind, and the Generate panel's settings; both live here
   // so a tab switch does not reset them.
   const [shapeKind, setShapeKind] = useState("rect");
@@ -141,6 +146,19 @@ export default function Play() {
   const setLivePreviewOn = useCallback((on) => {
     setLivePreviewOnState(on);
     try { localStorage.setItem("kiln.livePreview", on ? "on" : "off"); } catch { /* not fatal */ }
+  }, []);
+
+  // The Create panel's run, so the blank canvas's own Generate button can
+  // start the same run the panel would. Set by CreatePanel on every render.
+  const generateRef = useRef(null);
+  // Which tab the Layers | Assets panel shows. Here rather than in the panel
+  // so the blank canvas can point at Assets. Remembered per browser.
+  const [manageTab, setManageTabState] = useState(() => {
+    try { return localStorage.getItem(MANAGE_KEY) === "assets" ? "assets" : "layers"; } catch { return "layers"; }
+  });
+  const setManageTab = useCallback((t) => {
+    setManageTabState(t);
+    try { localStorage.setItem(MANAGE_KEY, t); } catch { /* not fatal */ }
   }, []);
 
   // --- Generation queue --------------------------------------------------
@@ -1144,6 +1162,7 @@ export default function Play() {
   }, [loadFile]);
 
   const value = {
+    generateRef, manageTab, setManageTab,
     tab, frame, postFrame, setPostFrame, showRaw, setShowRaw, canvasImage,
     clearCanvas,
     frameCard, pendingCard, setPendingCard, applyCard, lockSeed, activeSeed,
@@ -1189,7 +1208,7 @@ export default function Play() {
 
   return (
     <PlayCtx.Provider value={value}>
-      <div className="play">
+      <div className={`play ${CANVAS_TABS.has(tab) ? "fill" : ""}`.trim()}>
         <PlaySetup
           model={activeModel}
           params={sampleParams}
@@ -1217,25 +1236,28 @@ export default function Play() {
             </div>
           </div>
         </PlaySetup>
-        <div className={`play-body ${CANVAS_TABS.has(tab) ? "" : "solo"}`}>
-          {tab === "create" && <div className="play-tools"><CreatePanel /></div>}
+        {/* Canvas: the picture with its results strip under it, and everything
+            you make and manage with in one column on the right. The tab fills
+            the window instead of scrolling, so the picture takes whatever
+            height is left and the results never fall below the fold. */}
+        <div className={`play-body ${CANVAS_TABS.has(tab) ? "canvas-layout" : "solo"}`}>
           {CANVAS_TABS.has(tab) && (
-            <div
-              className={`play-stage ${dragOver ? "drop-on" : ""} with-rail`}
-              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-              onDragLeave={() => setDragOver(false)}
-              onDrop={(e) => { e.preventDefault(); setDragOver(false); const f = e.dataTransfer.files?.[0]; if (f) loadFile(f); }}
-            >
-              <div className="play-main">
+            <>
+              <ToolRail />
+              <div
+                className={`play-stage canvas-col ${dragOver ? "drop-on" : ""}`}
+                onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={(e) => { e.preventDefault(); setDragOver(false); const f = e.dataTransfer.files?.[0]; if (f) loadFile(f); }}
+              >
                 <PlayCanvas brushable={!!canvasImage} />
-                <QueueStrip />
-                <ResultsPanel />
+                <ResultsStrip />
               </div>
-              <div className="play-rail">
-                <AssetsPanel />
-                <LayersPanel />
-              </div>
-            </div>
+              <aside className="canvas-inspector" aria-label="Generate, layers and assets">
+                <CreatePanel />
+                <ManagePanel />
+              </aside>
+            </>
           )}
           {tab === "bend" && <div className="play-solo"><BendWorkspace stack={bendStack} setStack={setBendStack} /></div>}
           {tab === "merge" && <div className="play-solo"><Merge /></div>}
@@ -1250,13 +1272,14 @@ const ZOOM_MIN = 0.25;
 const ZOOM_MAX = 8;
 
 function PlayCanvas({ brushable }) {
-  const { toast } = useApp();
+  const { toast, modelPath } = useApp();
   const {
     postFrame, showRaw, setShowRaw, progress, heroRef, canvasImage, syncMaskOverlayRef, tab,
     livePreviewOn, setLivePreviewOn,
     frameCard, pendingCard, setPendingCard, applyCard, activeSeed,
     clearCanvas, canvasSize, setCanvasSize, newCanvas, loadFile,
-    activeMask, maskPixels, hasMask, liveMasks,
+    activeMask, maskPixels, hasMask, liveMasks, activeLayer,
+    undo, canUndo, redo, canRedo, canvasIsBlank, runs, generateRef, setManageTab,
   } = usePlay();
   const shown = canvasImage;
   const [busy, setBusy] = useState(false);
@@ -1343,7 +1366,7 @@ function PlayCanvas({ brushable }) {
    *  ground around the picture. Runs in the capture phase so the overlay
    *  never sees the press as a stroke. */
   const onHeroPointerDown = (e) => {
-    if (e.target.closest?.(".hero-zoom")) return;
+    if (e.target.closest?.(".hero-chips, .hero-blank-card")) return;
     const onGround = e.target === heroRef.current || e.target === viewRef.current;
     if (!(e.button === 1 || spaceRef.current || onGround)) return;
     e.preventDefault();
@@ -1375,148 +1398,227 @@ function PlayCanvas({ brushable }) {
     setBusy(false);
   };
 
+  // The picture's size on screen at 100% of the view, as a share of its real
+  // pixels. The zoom read-out is in real pixels, so "100%" means one image
+  // pixel per screen pixel, and Fit says how far the stage has shrunk it.
+  const imgRef = useRef(null);
+  const [fit, setFit] = useState(1);
+  const [natural, setNatural] = useState(null);
+  const measureFit = useCallback(() => {
+    const im = imgRef.current;
+    if (!im || !im.naturalWidth) return;
+    setFit(im.offsetWidth / im.naturalWidth);
+    setNatural({ w: im.naturalWidth, h: im.naturalHeight });
+  }, []);
+  useEffect(() => {
+    const hero = heroRef.current;
+    if (!hero || typeof ResizeObserver === "undefined") return undefined;
+    const ro = new ResizeObserver(measureFit);
+    ro.observe(hero);
+    return () => ro.disconnect();
+  }, [heroRef, measureFit]);
+  const atFit = view.s === 1 && view.x === 0 && view.y === 0;
+  const pct = Math.round(view.s * fit * 100);
+  const zoomText = atFit ? `Fit · ${pct}%` : `${pct}%`;
+  const zoomTo = (p) => zoomStep((p / 100 / fit) / view.s);
+  const size = natural || canvasSize;
+
   return (
-    <div className="col">
-      <div className="card canvas-card">
-        <div className="row between center mb-2">
-          <h3 className="mb-0">Canvas</h3>
-          <div className="row center gap-2">
-            {progress && <span className="sub">{progress.message}</span>}
-            {activeSeed != null && !progress && (
-              <span className="pill mono" title="Seed that produced this image">seed {activeSeed}</span>
-            )}
-            <Tooltip text="Show the picture while it is being made. The preview is the raw image; Finish is applied to the result only. Turn it off to keep the current picture on the canvas until the result lands, which saves a little time per run.">
-              <label className="row center gap-1 has-tip">
-                <input type="checkbox" checked={livePreviewOn} onChange={(e) => setLivePreviewOn(e.target.checked)} />
-                <span className="sub">Live preview</span>
+    <div className="canvas-card canvas-wrap">
+      {/* One bar over the picture: the document on the left, the active tool's
+          settings in the middle, and what acts on the whole picture on the
+          right -- undo, zoom, and getting it out. */}
+      <div className="stage-bar" role="toolbar" aria-label="Canvas">
+        <Popover
+          label="Canvas"
+          triggerClass="btn ghost sm doc-menu-btn"
+          align="start"
+          triggerLabel={`Canvas, ${size.w} × ${size.h}: new, open, clear`}
+          trigger={<><span className="tnum">{size.w} × {size.h}</span><ChevronDownIcon /></>}
+        >
+          {(close) => (
+            <div className="bar-menu doc-menu">
+              <div className="bar-menu-title">New canvas</div>
+              <div className="row center gap-2">
+                <span className="canvas-size-pair">
+                  <input
+                    type="number" className="canvas-size-input" aria-label="Canvas width"
+                    value={canvasSize.w} min={CANVAS_MIN} max={CANVAS_MAX} step={64}
+                    onChange={(e) => setCanvasSize({ w: e.target.value })}
+                  />
+                  <span className="sub">×</span>
+                  <input
+                    type="number" className="canvas-size-input" aria-label="Canvas height"
+                    value={canvasSize.h} min={CANVAS_MIN} max={CANVAS_MAX} step={64}
+                    onChange={(e) => setCanvasSize({ h: e.target.value })}
+                  />
+                </span>
+                <button type="button" className="btn sm primary" onClick={() => { newCanvas(canvasSize.w, canvasSize.h); close(); }}>
+                  New
+                </button>
+              </div>
+              <p className="sub mb-0">A blank canvas at this size. What is on it now stays in Results.</p>
+              <span className="bar-menu-sep" />
+              <button type="button" className="bar-menu-item" onClick={() => { openRef.current?.click(); close(); }}>
+                <span className="grow">Open an image…</span><span className="sub">or drop, or paste</span>
+              </button>
+              {shown && (
+                <button type="button" className="bar-menu-item danger" onClick={() => { clearCanvas(); close(); }}
+                  title="Back to blank at the current size, dropping every layer and mask. The image itself stays in Results.">
+                  <TrashIcon /> <span className="grow">Clear canvas</span>
+                </button>
+              )}
+            </div>
+          )}
+        </Popover>
+        {/* Outside the menu, which unmounts on close: the file picker outlives it. */}
+        <input
+          ref={openRef}
+          type="file"
+          accept="image/*"
+          className="hidden-file"
+          onChange={(e) => { loadFile(e.target.files?.[0]); e.target.value = ""; }}
+        />
+        <span className="bar-sep" aria-hidden="true" />
+        <ToolOptions />
+        <div className="stage-bar-end">
+          <Tooltip text="Step back one edit: a fill, a stroke, a delete, a reorder (Ctrl+Z)">
+            <button type="button" className="btn ghost sm icon" onClick={undo} disabled={!canUndo} aria-label="Undo">
+              <UndoIcon />
+            </button>
+          </Tooltip>
+          <Tooltip text="Put back what Undo took away (Ctrl+Shift+Z)">
+            <button type="button" className="btn ghost sm icon" onClick={redo} disabled={!canRedo} aria-label="Redo">
+              <RedoIcon />
+            </button>
+          </Tooltip>
+          {shown && (
+            <>
+              <span className="bar-sep" aria-hidden="true" />
+              <div className="zoom-group" role="group" aria-label="Zoom">
+                <button type="button" className="btn ghost sm icon" onClick={() => zoomStep(1 / 1.25)} aria-label="Zoom out" title="Zoom out">−</button>
+                <Popover label="Zoom" triggerClass="btn ghost sm zoom-btn tnum" trigger={zoomText}
+                  triggerLabel={`Zoom: ${zoomText}. The wheel over the picture zooms too; drag the ground, the middle button, or Space to pan.`}>
+                  {(close) => (
+                    <div className="bar-menu">
+                      <button type="button" className={`bar-menu-item ${atFit ? "on" : ""}`}
+                        onClick={() => { setView({ s: 1, x: 0, y: 0 }); close(); }}>
+                        <span className="grow">Fit</span><span className="sub tnum">{Math.round(fit * 100)}%</span>
+                      </button>
+                      {[50, 100, 200, 400].map((p) => (
+                        <button key={p} type="button" className={`bar-menu-item ${!atFit && pct === p ? "on" : ""}`}
+                          onClick={() => { zoomTo(p); close(); }}>
+                          <span className="grow tnum">{p}%</span>
+                          {p === 100 && <span className="sub">actual pixels</span>}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </Popover>
+                <button type="button" className="btn ghost sm icon" onClick={() => zoomStep(1.25)} aria-label="Zoom in" title="Zoom in">+</button>
+              </div>
+              {/* Nothing to keep from a blank canvas. */}
+              {!canvasIsBlank && (
+                <>
+                  <span className="bar-sep" aria-hidden="true" />
+                  <CaptureButton image={shown} card={frameCard} label={<><CaptureIcon /> Capture</>} />
+                  <Tooltip text="Download the canvas as a PNG. The settings that made it are written into the file, so dropping it back into Kiln restores them.">
+                    <button type="button" className="btn sm icon" onClick={download} disabled={busy} aria-label="Download">
+                      {busy ? "…" : <DownloadIcon />}
+                    </button>
+                  </Tooltip>
+                </>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+      {pendingCard && (
+        <div className="callout row between center wrap gap-2">
+          <span>
+            This image carries Kiln settings{cardLabel(pendingCard) ? ` — ${cardLabel(pendingCard)}` : ""}.
+          </span>
+          <div className="row gap-2">
+            <button type="button" className="btn sm primary" onClick={() => applyCard(pendingCard)}>
+              Restore settings
+            </button>
+            <button type="button" className="btn ghost sm" onClick={() => setPendingCard(null)}>
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+      <div
+        className={`hero ${brushable ? "brushable" : ""} ${spaceHeld ? "pan-ready" : ""} ${panning ? "panning" : ""}`}
+        ref={heroRef}
+        onPointerDownCapture={onHeroPointerDown}
+        onPointerMove={onHeroPointerMove}
+        onPointerUp={endPan}
+        onPointerCancel={endPan}
+      >
+        {progress && <div className="hero-progress"><Progress value={progress.value} /></div>}
+        {shown ? (
+          <div
+            className="hero-view"
+            ref={viewRef}
+            style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.s})` }}
+          >
+            <img ref={imgRef} src={shown} alt="canvas" draggable={false} onLoad={measureFit} />
+            <MaskOverlay active={brushable} />
+          </div>
+        ) : (
+          <span className="sub">Generate, drop, or paste an image.</span>
+        )}
+        {/* A blank canvas says what it is and what to do with it, rather than
+            showing an empty checkerboard. Gone as soon as there is anything:
+            a run, a mask, a picture. */}
+        {canvasIsBlank && !progress && !hasMask && !runs.length && (
+          <div className="hero-blank">
+            <div className="hero-blank-card">
+              <b>A blank {size.w} × {size.h} canvas</b>
+              <p className="sub mb-0">
+                Generate a first image, or bring one in to rework. Drop or paste an image anywhere on this page.
+              </p>
+              <div className="row center gap-2">
+                <button type="button" className="btn primary" onClick={() => generateRef.current?.()}
+                  disabled={!modelPath}>
+                  Generate
+                </button>
+                <button type="button" className="btn" onClick={() => openRef.current?.click()}>
+                  Open an image…
+                </button>
+              </div>
+              <button type="button" className="btn ghost sm" onClick={() => setManageTab("assets")}>
+                or pick one from Assets →
+              </button>
+            </div>
+          </div>
+        )}
+        {/* What the picture is, and how it is being shown, on the picture
+            itself rather than in a header above it. */}
+        <div className="hero-chips start">
+          {progress ? (
+            <span className="hero-chip">{progress.message}</span>
+          ) : activeSeed != null ? (
+            <span className="hero-chip mono" title="Seed that produced this image">
+              seed {activeSeed}{activeLayer ? ` · ${activeLayer.name}` : ""}
+            </span>
+          ) : null}
+        </div>
+        <div className="hero-chips end">
+          <Tooltip text="Show the picture while it is being made. The preview is the raw image; Finish is applied to the result only. Turn it off to keep the current picture on the canvas until the result lands, which saves a little time per run.">
+            <label className="hero-chip hero-switch">
+              <input type="checkbox" checked={livePreviewOn} onChange={(e) => setLivePreviewOn(e.target.checked)} />
+              Live preview
+            </label>
+          </Tooltip>
+          {postFrame && (
+            <Tooltip text="Show the layer stack as it is, before post-processing. Useful for judging what the models actually produced.">
+              <label className="hero-chip hero-switch">
+                <input type="checkbox" checked={showRaw} onChange={(e) => setShowRaw(e.target.checked)} />
+                Unprocessed
               </label>
             </Tooltip>
-            {postFrame && (
-              <Tooltip text="Show the layer stack as it is, before post-processing. Useful for judging what the models actually produced.">
-                <label className="row center gap-1 has-tip">
-                  <input type="checkbox" checked={showRaw} onChange={(e) => setShowRaw(e.target.checked)} />
-                  <span className="sub">Unprocessed</span>
-                </label>
-              </Tooltip>
-            )}
-          </div>
-        </div>
-        {progress && <Progress value={progress.value} />}
-        {pendingCard && (
-          <div className="callout row between center wrap gap-2">
-            <span>
-              This image carries Kiln settings{cardLabel(pendingCard) ? ` — ${cardLabel(pendingCard)}` : ""}.
-            </span>
-            <div className="row gap-2">
-              <button type="button" className="btn sm primary" onClick={() => applyCard(pendingCard)}>
-                Restore settings
-              </button>
-              <button type="button" className="btn ghost sm" onClick={() => setPendingCard(null)}>
-                Dismiss
-              </button>
-            </div>
-          </div>
-        )}
-        {/* What the next run will do, stated beside the picture. The controls
-            for it live in the Layers panel; this is only the consequence, which
-            is the part that has to be legible at the instant you press the
-            button. */}
-        {hasMask && (
-          <div className="selection-bar" role="status">
-            <span className="sub grow">
-              <TipLabel tip="The next run changes only this area; the rest of the canvas is kept. Turn the mask off in the Layers panel to run on the whole canvas.">
-                <strong>{liveMasks.length > 1
-                  ? `${liveMasks.length} masks on`
-                  : activeMask?.name || "Mask on"}</strong>
-              </TipLabel>
-            </span>
-          </div>
-        )}
-        <div
-          className={`hero ${brushable ? "brushable" : ""} ${spaceHeld ? "pan-ready" : ""} ${panning ? "panning" : ""}`}
-          ref={heroRef}
-          onPointerDownCapture={onHeroPointerDown}
-          onPointerMove={onHeroPointerMove}
-          onPointerUp={endPan}
-          onPointerCancel={endPan}
-        >
-          {shown ? (
-            <div
-              className="hero-view"
-              ref={viewRef}
-              style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.s})` }}
-            >
-              <img src={shown} alt="canvas" draggable={false} />
-              <MaskOverlay active={brushable} />
-            </div>
-          ) : (
-            <span className="sub">Generate, drop, or paste an image.</span>
-          )}
-          {shown && (
-            <div className="hero-zoom" role="group" aria-label="Zoom">
-              <Tooltip text="Zoom out. The wheel over the picture zooms too.">
-                <button type="button" onClick={() => zoomStep(1 / 1.25)} aria-label="Zoom out">−</button>
-              </Tooltip>
-              <Tooltip text="Back to 100%, centred. Pan by dragging the ground around the picture, with the middle button, or with Space held.">
-                <button type="button" className="zoom-pct mono" onClick={() => setView({ s: 1, x: 0, y: 0 })}>
-                  {Math.round(view.s * 100)}%
-                </button>
-              </Tooltip>
-              <Tooltip text="Zoom in">
-                <button type="button" onClick={() => zoomStep(1.25)} aria-label="Zoom in">+</button>
-              </Tooltip>
-            </div>
-          )}
-        </div>
-        {/* One bar under the picture: the canvas itself on the left (size, new,
-            open), what to do with the picture on the right (download, capture,
-            clear). Words where the action is a verb people scan for; the
-            destructive one is an icon with a tooltip, out at the end. */}
-        <div className="canvas-bar mt-2">
-          <div className="canvas-bar-group">
-            <Tooltip text="Canvas size in pixels. Changing it starts a new blank canvas with New.">
-              <span className="sub has-tip">Canvas</span>
-            </Tooltip>
-            <span className="canvas-size-pair">
-              <input
-                type="number" className="canvas-size-input" aria-label="Canvas width"
-                value={canvasSize.w} min={CANVAS_MIN} max={CANVAS_MAX} step={64}
-                onChange={(e) => setCanvasSize({ w: e.target.value })}
-              />
-              <span className="sub">×</span>
-              <input
-                type="number" className="canvas-size-input" aria-label="Canvas height"
-                value={canvasSize.h} min={CANVAS_MIN} max={CANVAS_MAX} step={64}
-                onChange={(e) => setCanvasSize({ h: e.target.value })}
-              />
-            </span>
-            <Tooltip text="Start again on a blank canvas at this size. Whatever is on the canvas now stays in Results, so this does not lose it.">
-              <button type="button" className="btn sm" onClick={() => newCanvas(canvasSize.w, canvasSize.h)}>New</button>
-            </Tooltip>
-            <Tooltip text="Open an image from disk. Dropping one onto the canvas, or pasting it, does the same thing.">
-              <button type="button" className="btn sm ghost" onClick={() => openRef.current?.click()}>Open…</button>
-            </Tooltip>
-            <input
-              ref={openRef}
-              type="file"
-              accept="image/*"
-              className="hidden-file"
-              onChange={(e) => { loadFile(e.target.files?.[0]); e.target.value = ""; }}
-            />
-          </div>
-          <div className="spacer" />
-          {shown && (
-            <div className="canvas-bar-group">
-              <Tooltip text="Download the canvas as a PNG. The sampling settings that made it are written into the file, so dropping it back into Kiln restores them.">
-                <button type="button" className="btn sm" onClick={download} disabled={busy}>
-                  <DownloadIcon /> {busy ? "Preparing…" : "Download"}
-                </button>
-              </Tooltip>
-              <CaptureButton image={shown} card={frameCard} label={<><CaptureIcon /> Capture</>} />
-              <Tooltip text="Clear the canvas: back to blank at the current size, dropping every layer and mask. The image itself stays in Results.">
-                <button type="button" className="btn sm danger" onClick={clearCanvas}><TrashIcon /> Clear canvas</button>
-              </Tooltip>
-            </div>
           )}
         </div>
       </div>
@@ -1541,39 +1643,47 @@ function CaptureButton({ image, card, label = "Save", className = "btn sm" }) {
   );
 }
 
-/** Every image this session produced, newest first.
+/** Results and the queue, in one strip under the picture.
  *
- *  Sits directly under the canvas, as wide as it, in a wrapping grid. A side
- *  rail left it a 232px column under Assets and Layers, where only the first
- *  few ever showed; under the picture it has the canvas's full width, and it is
- *  where a batch or a queue of runs lands.
+ *  Fixed height and always on screen: as a grid that grew under the canvas,
+ *  results sat below the fold at 900px, so every Generate ended in a scroll.
+ *  Runs in flight come first (a progress ring, or a place in line), then every
+ *  image this session made, newest first. The strip scrolls sideways; the page
+ *  does not.
  */
-/** Every run the Create panel has in flight, one chip each.
- *
- *  A running chip shows a progress ring, a waiting one its place in line.
- *  Clicking a chip watches it; the x cancels it, and what it had is dropped. */
-function QueueStrip() {
-  const { runs, watchedId, watch, cancelRun, queueFolder } = usePlay();
-  if (!runs.length) return null;
+function ResultsStrip() {
+  const {
+    history, frame, placeHistory, removeHistory, clearHistory,
+    addHistoryAsLayer, applyCard, activeLayer,
+    runs, watchedId, watch, cancelRun, queueFolder,
+  } = usePlay();
   const live = runs.filter((r) => r.job.status === "running").length;
   const waiting = runs.length - live;
   // Where they land, as the landing rule decided: a lone run still goes to its
   // layer, and a queue (or a fill, which is never queued) says so too.
   const toResults = runs.filter((r) => r.toResults).length;
-  const lands = toResults === runs.length ? `Lands in Results, saved to captures/${queueFolder}`
+  const lands = toResults === runs.length ? `Lands here, saved to captures/${queueFolder}`
     : toResults === 0 ? (runs.some((r) => r.fill) ? "Lands over the mask" : "Lands in the layer")
-      : "Fill lands over the mask, the rest in Results";
+      : "Fill lands over the mask, the rest here";
+
   return (
-    <section className="card queue-strip" aria-label="Queue">
-      <div className="row between center">
-        <h3 className="mb-0">
-          Queue <span className="sub">· {live} running{waiting ? `, ${waiting} waiting` : ""}</span>
-        </h3>
-        <span className="sub">{lands}</span>
+    <section className="card results-strip" aria-label="Results">
+      <div className="results-strip-head">
+        <h3 className="mb-0">Results <span className="sub">· {history.length}</span></h3>
+        {runs.length > 0 ? (
+          <span className="sub">
+            {live} running{waiting ? `, ${waiting} waiting` : ""}. {lands}.
+          </span>
+        ) : history.length > 0 ? (
+          <span className="sub">Click one to put it into {activeLayer?.name || "the active layer"}.</span>
+        ) : null}
+        {history.length > 0 && (
+          <button type="button" className="btn ghost xs results-strip-clear" onClick={clearHistory}>Clear</button>
+        )}
       </div>
-      <div className="queue-chips">
+      <div className="results-strip-row">
         {runs.map((r) => (
-          <QueueChip
+          <QueueTile
             key={r.id}
             run={r}
             watched={r.id === watchedId}
@@ -1581,6 +1691,47 @@ function QueueStrip() {
             onCancel={() => cancelRun(r.id)}
           />
         ))}
+        {history.map((h, i) => {
+          const seed = h.card?.params?.seed;
+          return (
+            <div key={h.id} className={`strip-tile ${h.img === frame ? "on" : ""}`}>
+              <button
+                type="button"
+                className="strip-thumb"
+                onClick={() => placeHistory(h)}
+                aria-label={`Result ${i + 1}${seed != null ? `, seed ${seed}` : ""}`}
+                title={`${cardLabel(h.card) || `Result ${i + 1}`} — click to put it into ${activeLayer?.name || "the active layer"}`}
+              >
+                <img src={h.img} alt="" />
+                <span className="play-result-idx">#{i + 1}</span>
+              </button>
+              <span className="strip-cap mono">{seed != null ? seed : "—"}</span>
+              <div className="strip-actions">
+                <Tooltip text="Add on top of the layer stack, keeping what is there">
+                  <button type="button" className="btn xs" onClick={() => addHistoryAsLayer(h)}>Layer</button>
+                </Tooltip>
+                <CaptureButton image={h.img} card={h.card} label="Save" className="btn xs" />
+                <Tooltip text={h.card?.params ? "Load this image's settings into the sampler" : "No settings recorded for this image"}>
+                  <button type="button" className="btn xs" onClick={() => applyCard(h.card)} disabled={!h.card?.params}>
+                    Set
+                  </button>
+                </Tooltip>
+              </div>
+              <button
+                type="button"
+                className="strip-x"
+                onClick={() => removeHistory(h.id)}
+                aria-label={`Remove result ${i + 1}`}
+                title="Remove from results"
+              >×</button>
+            </div>
+          );
+        })}
+        {!runs.length && !history.length && (
+          <p className="sub results-strip-empty">
+            Everything you generate lands here too, so nothing is lost when the canvas changes.
+          </p>
+        )}
       </div>
     </section>
   );
@@ -1591,7 +1742,9 @@ function seedsOf(job) {
   return d.seeds || (d.seed != null ? [d.seed] : []);
 }
 
-function QueueChip({ run, watched, onWatch, onCancel }) {
+/** A run in flight. Clicking it watches it (its preview goes on the canvas);
+ *  the x cancels it, and what it had is dropped. */
+function QueueTile({ run, watched, onWatch, onCancel }) {
   const j = run.job;
   const running = j.status === "running";
   const paused = running && !!j.detail?.paused;
@@ -1601,91 +1754,27 @@ function QueueChip({ run, watched, onWatch, onCancel }) {
     ? (seeds.length > 1 ? `seeds ${Math.min(...seeds)}–${Math.max(...seeds)}` : `seed ${seeds[0]}`)
     : "";
   const place = j.detail?.queue?.position;
-  // A waiting chip's place is already its marker on the left.
   const state = running
     ? (paused ? "paused" : `${Math.round((j.progress || 0) * 100)}%`)
     : "waiting";
-  const label = [j.kind === "inpaint" ? "fill" : null, model, seedText]
-    .filter(Boolean).join(" · ");
+  const label = [j.kind === "inpaint" ? "fill" : null, model, seedText].filter(Boolean).join(" · ");
   return (
-    <div className={`queue-chip ${watched ? "on" : ""} ${running ? "running" : "waiting"}`}>
+    <div className={`strip-tile queue-tile ${watched ? "on" : ""} ${running ? "running" : "waiting"}`}>
       <button
         type="button"
-        className="queue-chip-main"
+        className="strip-thumb"
         onClick={() => onWatch(run.id)}
-        title={watched ? "Watching this run" : "Watch this run: its preview goes on the canvas"}
+        aria-label={`${label}, ${state}${watched ? ", watching" : ""}`}
+        title={watched ? `Watching: ${label}` : `Watch this run: its preview goes on the canvas. ${label}`}
       >
         {running
-          ? <span className="queue-ring" style={{ "--p": j.progress || 0 }} aria-hidden="true" />
+          ? <span className="queue-ring big" style={{ "--p": j.progress || 0 }} aria-hidden="true" />
           : <span className="queue-place mono" aria-hidden="true">{place ? `#${place}` : "…"}</span>}
-        <span className="queue-chip-label">{label}</span>
-        <span className="sub mono">{state}</span>
+        <span className="queue-tile-state mono">{state}</span>
       </button>
-      <button
-        type="button"
-        className="queue-chip-x"
-        onClick={onCancel}
-        aria-label="Cancel this run"
-        title="Cancel this run"
-      >×</button>
+      <span className="strip-cap" title={label}>{j.kind === "inpaint" ? "fill" : seedText || "run"}</span>
+      <button type="button" className="strip-x" onClick={onCancel} aria-label="Cancel this run" title="Cancel this run">×</button>
     </div>
-  );
-}
-
-function ResultsPanel() {
-  const {
-    history, frame, placeHistory, removeHistory, clearHistory,
-    addHistoryAsLayer, applyCard, activeLayer,
-  } = usePlay();
-  if (!history.length) return null;
-
-  return (
-    <section className="card results-panel" aria-label="Results">
-      <div className="row between center mb-2">
-        <h3 className="mb-0">Results <span className="sub">· {history.length}</span></h3>
-        <button type="button" className="btn ghost sm" onClick={clearHistory}>Clear</button>
-      </div>
-      <div className="results-grid">
-        {history.map((h, i) => {
-          const selected = h.img === frame;
-          const seed = h.card?.params?.seed;
-          return (
-            <div key={h.id} className={`play-result ${selected ? "on" : ""}`}>
-              <button
-                type="button"
-                className="play-result-thumb"
-                onClick={() => placeHistory(h)}
-                aria-label={`Result ${i + 1}${seed != null ? `, seed ${seed}` : ""}`}
-                title={`${cardLabel(h.card) || `Result ${i + 1}`} — click to put it into ${activeLayer?.name || "the active layer"}`}
-              >
-                <img src={h.img} alt="" />
-                <span className="play-result-idx">#{i + 1}</span>
-              </button>
-              <span className="play-result-seed mono">{seed != null ? `seed ${seed}` : "—"}</span>
-              <div className="play-result-actions">
-                <Tooltip text="Add on top of the layer stack, keeping what is there">
-                  <button type="button" className="btn xs" onClick={() => addHistoryAsLayer(h)}>Layer</button>
-                </Tooltip>
-                <CaptureButton image={h.img} card={h.card} label="Save" className="btn xs" />
-                <Tooltip text={h.card?.params ? "Load this image's settings into the sampler" : "No settings recorded for this image"}>
-                  <button
-                    type="button"
-                    className="btn xs"
-                    onClick={() => applyCard(h.card)}
-                    disabled={!h.card?.params}
-                  >
-                    Set
-                  </button>
-                </Tooltip>
-                <Tooltip text="Remove from results">
-                  <button type="button" className="btn xs ghost" onClick={() => removeHistory(h.id)} aria-label="Remove">×</button>
-                </Tooltip>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </section>
   );
 }
 
@@ -2355,108 +2444,185 @@ function EntityRow({
   );
 }
 
+/** What the canvas is made of, and the images kept at hand: Layers | Assets.
+ *
+ *  One panel with two tabs, where there were three cards (Assets, Layers,
+ *  Inpaint Masks) that took turns pushing each other below the fold. Files
+ *  dropped anywhere on it are kept as assets; the stage underneath would
+ *  otherwise open them as the canvas.
+ */
+function ManagePanel() {
+  const { rasterLayers, assets, addAssetFiles, manageTab: tab, setManageTab: setTab } = usePlay();
+  const [over, setOver] = useState(false);
+  const tabs = [
+    { id: "layers", label: <>Layers <span className="sub">· {rasterLayers.length}</span></> },
+    { id: "assets", label: <>Assets <span className="sub">· {assets.length}</span></> },
+  ];
+
+  return (
+    <section
+      className={`card inspector-panel manage-panel ${over ? "drop-on" : ""}`.trim()}
+      aria-label="Layers and assets"
+      onDragOver={(e) => {
+        if (![...(e.dataTransfer?.types || [])].includes("Files")) return;
+        e.preventDefault(); e.stopPropagation(); setOver(true);
+      }}
+      onDragLeave={() => setOver(false)}
+      onDrop={(e) => {
+        if (!e.dataTransfer?.files?.length) return;
+        e.preventDefault();
+        e.stopPropagation();
+        setOver(false);
+        addAssetFiles(e.dataTransfer.files);
+        setTab("assets");
+      }}
+    >
+      <div className="panel-tabs" role="tablist" aria-label="Layers and assets">
+        {tabs.map((t) => (
+          <button key={t.id} type="button" role="tab" aria-selected={tab === t.id}
+            className={tab === t.id ? "on" : ""} onClick={() => setTab(t.id)}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+      <div className="panel-body" role="tabpanel">
+        {tab === "layers" ? <LayersList /> : <AssetsGrid />}
+      </div>
+    </section>
+  );
+}
+
 /** Images the user keeps at hand: the workspace assets folder.
  *
  *  Anything opened onto the canvas lands here too, so a picture only ever has
  *  to be found in the file browser once. Click places into the active layer,
  *  fitted to the canvas; Open makes it the document at its own size.
  */
-function AssetsPanel() {
+function AssetsGrid() {
   const { assets, addAssetFiles, deleteAsset, placeAsset, openAsset, activeLayer } = usePlay();
-  const [over, setOver] = useState(false);
   const fileRef = useRef(null);
-
   return (
-    <aside
-      className={`card assets-panel ${over ? "drop-on" : ""}`}
-      aria-label="Assets"
-      onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setOver(true); }}
-      onDragLeave={() => setOver(false)}
-      onDrop={(e) => {
-        // Stop here: the stage underneath would open the file as the canvas.
-        e.preventDefault();
-        e.stopPropagation();
-        setOver(false);
-        addAssetFiles(e.dataTransfer.files);
-      }}
-    >
-      <div className="row between center mb-2">
-        <h3 className="mb-0">Assets <span className="sub">· {assets.length}</span></h3>
-        <Tooltip text="Keep images here to place on a layer later, without finding the file again. Dropping files on this panel does the same.">
-          <button type="button" className="btn ghost sm" onClick={() => fileRef.current?.click()}>Add…</button>
-        </Tooltip>
-        <input
-          ref={fileRef}
-          type="file"
-          accept="image/*"
-          multiple
-          className="hidden-file"
-          onChange={(e) => { addAssetFiles(e.target.files); e.target.value = ""; }}
-        />
-      </div>
-      {assets.length === 0 ? (
-        <p className="hint mb-0">Drop images here, or Add… — they stay for next time.</p>
-      ) : (
-        <div className="assets-grid">
-          {assets.map((a) => (
-            <div key={a.path} className="asset">
-              <button
-                type="button"
-                className="asset-thumb"
-                title={`${a.name}${a.size ? ` · ${a.size[0]}×${a.size[1]}` : ""} — click to place into ${activeLayer?.name || "the active layer"}`}
-                onClick={() => placeAsset(a)}
-              >
-                <img src={thumbUrl(a.path)} alt={a.name} loading="lazy" />
-              </button>
-              <div className="asset-actions">
-                <button type="button" className="btn xs ghost" title="Open as a new canvas at its own size"
-                  onClick={() => openAsset(a)}>Open</button>
-                <button type="button" className="btn xs ghost" title="Remove from assets" aria-label={`Remove ${a.name}`}
-                  onClick={() => deleteAsset(a)}>×</button>
-              </div>
+    <>
+      <div className="assets-grid">
+        {assets.map((a) => (
+          <div key={a.path} className="asset">
+            <button
+              type="button"
+              className="asset-thumb"
+              title={`${a.name}${a.size ? ` · ${a.size[0]}×${a.size[1]}` : ""} — click to place into ${activeLayer?.name || "the active layer"}`}
+              onClick={() => placeAsset(a)}
+            >
+              <img src={thumbUrl(a.path)} alt={a.name} loading="lazy" />
+            </button>
+            <div className="asset-actions">
+              <button type="button" className="btn xs ghost" title="Open as a new canvas at its own size"
+                onClick={() => openAsset(a)}>Open</button>
+              <button type="button" className="btn xs ghost" title="Remove from assets" aria-label={`Remove ${a.name}`}
+                onClick={() => deleteAsset(a)}>×</button>
             </div>
-          ))}
-        </div>
-      )}
-    </aside>
+          </div>
+        ))}
+        <button type="button" className="asset-add" onClick={() => fileRef.current?.click()}
+          title="Keep images here to place on a layer later, without finding the file again">
+          <AddIcon size={16} />
+          Add…
+        </button>
+      </div>
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="hidden-file"
+        onChange={(e) => { addAssetFiles(e.target.files); e.target.value = ""; }}
+      />
+      <p className="hint mb-0">
+        Drop images on this panel to keep them. Click one to place it in {activeLayer?.name || "the active layer"};
+        Open makes it the canvas.
+      </p>
+    </>
   );
 }
 
-/** Canvas entities, in the two groups InvokeAI splits them into.
+/** Canvas entities, in the two groups InvokeAI splits them into, in one list.
  *
  *  Masks come first because they decide what the next run does, so they have
  *  to stay in view. Raster layers are the picture: hiding, reordering or
  *  deleting one changes what the canvas is, and therefore what the next run
  *  starts from — and one of them is active, which is where the run lands.
  *  Layers are made by the user, never by a run. A mask is live for exactly as
- *  long as its row is shown — which is the answer to "should the mask survive
- *  a generation": it survives because nothing hid it.
+ *  long as it is used — which is the answer to "should the mask survive a
+ *  generation": it survives because nothing turned it off.
  */
-function LayersPanel() {
+function LayersList() {
   const {
     rasterLayers, inpaintMasks, setLayerOpacity, useLayerAsMask, activeLayer,
     addLayer, duplicateLayer, setEntityEnabled, setMaskVisible,
-    addMask, clearMask, invertMask, liveMasks, undo, canUndo, redo, canRedo, canvasSize, maskVersion,
+    addMask, clearMask, invertMask, liveMasks, canvasSize, maskVersion,
   } = usePlay();
 
   return (
-    <div className="layers-stack">
-    <aside className="card layers-panel" aria-label="Layers">
-      <div className="row between center mb-2">
-        <h3 className="mb-0">Layers <span className="sub panel-count">{rasterLayers.length}</span></h3>
-        <div className="row gap-1">
-          <Tooltip text="Step back one edit — a fill, a painted stroke, a delete, a reorder. (Ctrl+Z)">
-            <button type="button" className="btn ghost sm" onClick={undo} disabled={!canUndo}>Undo</button>
-          </Tooltip>
-          <Tooltip text="Put back what Undo took away. (Ctrl+Shift+Z)">
-            <button type="button" className="btn ghost sm" onClick={redo} disabled={!canRedo}>Redo</button>
-          </Tooltip>
-        </div>
+    <div className="manage-list">
+      <div className="manage-group-head">
+        <span>Masks <span className="sub">· {liveMasks.length ? `${liveMasks.length} used` : "none used"}</span></span>
+        <Tooltip text="A new empty mask, picked so strokes go into it. Every mask that is used counts for the next run.">
+          <button type="button" className="btn ghost xs" onClick={addMask}><AddIcon /> Mask</button>
+        </Tooltip>
       </div>
+      {inpaintMasks.length === 0 && (
+        <p className="hint mb-0">None yet. Paint one with the Brush (B), or take an area with Wand, Shape or Split.</p>
+      )}
+      {[...inpaintMasks].reverse().map((m) => (
+        <EntityRow
+          key={m.id}
+          entity={m}
+          thumb={<MaskThumb mask={m} w={canvasSize.w} h={canvasSize.h} version={maskVersion} />}
+          shown={maskShown(m)}
+          onShow={(v) => setMaskVisible(m.id, v)}
+          eyeTip={maskShown(m)
+            ? "Hide the hatching. Whether the next run uses the mask is Used / Off, not this."
+            : "Show the hatching"}
+          headExtra={(
+            <Tooltip text={!m.enabled
+              ? "Off: the next run ignores this area and it is not drawn. Click to use it."
+              : m.strokes.length
+                ? "Used: the next run changes this area. Click to turn it off; it is then not drawn either."
+                : "On, but empty: paint into it and the next run will change that area. Click to turn it off."}
+            >
+              <button
+                type="button"
+                className={`layer-onpill ${m.enabled ? "on" : ""}`}
+                aria-pressed={m.enabled}
+                aria-label={m.enabled ? `Stop using ${m.name}` : `Use ${m.name}`}
+                onClick={(e) => { e.stopPropagation(); setEntityEnabled(m.id, !m.enabled); }}
+              >
+                {!m.enabled ? "off" : m.strokes.length ? "used" : "empty"}
+              </button>
+            </Tooltip>
+          )}
+          actions={(
+            <>
+              <Tooltip text="Swap masked for unmasked (Ctrl+Shift+I)">
+                <button type="button" className="btn xs ghost"
+                  onClick={(e) => { e.stopPropagation(); invertMask(m.id); }}><InvertIcon /> Invert</button>
+              </Tooltip>
+              <Tooltip text="Empty it, keeping the row and its settings (Ctrl+D)">
+                <button type="button" className="btn xs ghost"
+                  onClick={(e) => { e.stopPropagation(); clearMask(m.id); }}
+                  disabled={!m.strokes.length}><ClearIcon /> Clear</button>
+              </Tooltip>
+            </>
+          )}
+        />
+      ))}
 
-      <Tooltip text="A new empty layer on top. Runs land in the active layer, so make one to keep the next attempt apart from what is here.">
-        <button type="button" className="btn sm w-full mb-2" onClick={addLayer}>Add layer</button>
-      </Tooltip>
+      <span className="manage-sep" aria-hidden="true" />
+      <div className="manage-group-head">
+        <span>Layers</span>
+        <Tooltip text="A new empty layer on top. Runs land in the active layer, so make one to keep the next attempt apart from what is here.">
+          <button type="button" className="btn ghost xs" onClick={addLayer}><AddIcon /> Layer</button>
+        </Tooltip>
+      </div>
       {/* Topmost first, which is how a stack reads. */}
       {[...rasterLayers].reverse().map((l) => (
         <EntityRow
@@ -2466,94 +2632,31 @@ function LayersPanel() {
           canDelete={rasterLayers.length > 1}
           thumb={l.image ? <img className="layer-thumb" src={l.image} alt="" /> : null}
           details={(
-            <>
-              <Slider
-                label="Opacity"
-                value={l.opacity ?? 1}
-                min={0}
-                max={1}
-                step={0.05}
-                onChange={(v) => setLayerOpacity(l.id, v)}
-                fmt={(v) => `${Math.round(v * 100)}%`}
-              />
-              <div className="layer-actions">
-                <Tooltip text="A copy of this layer above it, made active — try something else on the same ground and keep this one.">
-                  <button
-                    type="button"
-                    className="btn xs"
-                    onClick={(e) => { e.stopPropagation(); duplicateLayer(l.id); }}
-                  >
-                    Duplicate
-                  </button>
-                </Tooltip>
-                <Tooltip text="Select exactly the area this layer covers, and nothing else. On a layer that has only taken fills, that is the ground those fills covered.">
-                  <button
-                    type="button"
-                    className="btn xs ghost"
-                    onClick={(e) => { e.stopPropagation(); useLayerAsMask(l.id); }}
-                    disabled={!l.image}
-                  >
-                    Select area
-                  </button>
-                </Tooltip>
-              </div>
-            </>
-          )}
-        />
-      ))}
-
-    </aside>
-
-    <aside className="card layers-panel masks-panel" aria-label="Inpaint Masks">
-      <div className="row between center mb-2">
-        <h3 className="mb-0">Inpaint Masks</h3>
-        <span className="sub">{liveMasks.length ? `${liveMasks.length} on` : "none on"}</span>
-      </div>
-      <Tooltip text="A new empty mask, selected so the brush paints into it. Every mask that is on counts for the next run.">
-        <button type="button" className="btn sm w-full mb-2" onClick={addMask}>Add mask</button>
-      </Tooltip>
-      {[...inpaintMasks].reverse().map((m) => (
-        <EntityRow
-          key={m.id}
-          entity={m}
-          thumb={<MaskThumb mask={m} w={canvasSize.w} h={canvasSize.h} version={maskVersion} />}
-          shown={maskShown(m)}
-          onShow={(v) => setMaskVisible(m.id, v)}
-          eyeTip={maskShown(m)
-            ? "Hide the hatching. Whether the next run uses the mask is the on/off switch, not this."
-            : "Show the hatching"}
-          headExtra={(
-            <Tooltip text={m.enabled
-              ? "On — the next run changes this area. Click to turn it off; it is then not drawn either."
-              : "Off — the next run ignores this area and it is not drawn. Click to turn it on."}
-            >
-              <button
-                type="button"
-                className={`layer-onpill ${m.enabled ? "on" : ""}`}
-                aria-pressed={m.enabled}
-                aria-label={m.enabled ? `Turn ${m.name} off` : `Turn ${m.name} on`}
-                onClick={(e) => { e.stopPropagation(); setEntityEnabled(m.id, !m.enabled); }}
-              >
-                {m.enabled ? "on" : "off"}
-              </button>
-            </Tooltip>
+            <Slider
+              label="Opacity"
+              value={l.opacity ?? 1}
+              min={0}
+              max={1}
+              step={0.05}
+              onChange={(v) => setLayerOpacity(l.id, v)}
+              fmt={(v) => `${Math.round(v * 100)}%`}
+            />
           )}
           actions={(
             <>
-              <Tooltip text="Invert: swap masked for unmasked">
-                <button type="button" className="btn xs ghost icon" aria-label="Invert"
-                  onClick={(e) => { e.stopPropagation(); invertMask(m.id); }}><InvertIcon /></button>
+              <Tooltip text="A copy of this layer above it, made active — try something else on the same ground and keep this one.">
+                <button type="button" className="btn xs ghost"
+                  onClick={(e) => { e.stopPropagation(); duplicateLayer(l.id); }}>Duplicate</button>
               </Tooltip>
-              <Tooltip text="Clear: empty it, keep the row and its settings">
-                <button type="button" className="btn xs ghost icon" aria-label="Clear"
-                  onClick={(e) => { e.stopPropagation(); clearMask(m.id); }}
-                  disabled={!m.strokes.length}><ClearIcon /></button>
+              <Tooltip text="Select exactly the area this layer covers, and nothing else. On a layer that has only taken fills, that is the ground those fills covered.">
+                <button type="button" className="btn xs ghost"
+                  onClick={(e) => { e.stopPropagation(); useLayerAsMask(l.id); }}
+                  disabled={!l.image}>Select area</button>
               </Tooltip>
             </>
           )}
         />
       ))}
-    </aside>
     </div>
   );
 }
