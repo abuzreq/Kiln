@@ -1092,6 +1092,25 @@ export default function Play() {
   // pixels gives back the empty pixels it started from.
   const canvasIsBlank = (!!frame && frame === blankFrameRef.current)
     || !rasterLayers.some((l) => l.enabled && l.image);
+
+  /** A picture made elsewhere (a Sweep cell, a bend comparison) brought to
+   *  the canvas to keep working on. A blank canvas becomes that picture, at
+   *  its size, the way a dropped file does; anything already there is kept
+   *  and the picture goes on top as a layer of its own. It joins Results
+   *  either way. Callers switch to the tab and apply the recipe themselves. */
+  const commitFrame = useCallback(async (img, raw, card, name) => {
+    if (!img) return;
+    const seed = card?.params?.seed;
+    const label = name || (seed != null ? `Seed ${seed}` : "Opened");
+    if (canvasIsBlank) {
+      await openDocument(img, card ?? null, label, { keepMasks: true });
+    } else {
+      addRasterLayer({ image: img, card: card ?? null, name: label });
+      toast("Added as a layer on top", "success");
+    }
+    pushHistory(img, raw, card);
+    setLivePreview(null);
+  }, [canvasIsBlank, openDocument, addRasterLayer, pushHistory, toast]);
   // The recipe the canvas carries: that of the topmost shown layer that has
   // one. A stack has no single recipe, and this is the layer whose pixels are
   // most of what you see. It used to be a separate state that fills never
@@ -1166,7 +1185,7 @@ export default function Play() {
     tab, frame, postFrame, setPostFrame, showRaw, setShowRaw, canvasImage,
     clearCanvas,
     frameCard, pendingCard, setPendingCard, applyCard, lockSeed, activeSeed,
-    history, generateIntoLayer, fillIntoLayer, pushHistory, placeHistory, addHistoryAsLayer,
+    history, generateIntoLayer, fillIntoLayer, pushHistory, placeHistory, addHistoryAsLayer, commitFrame,
     removeHistory, clearHistory, loadFile, openDocument,
     progress,
     brushSize, setBrushSize, brushHard, setBrushHard, eraser, setEraser,
