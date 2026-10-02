@@ -121,13 +121,117 @@ def _label_of(name: str) -> str:
     return name.replace("downs.", "enc").replace("ups.", "dec").replace(".", " ")
 
 
+# What bending each point inside a level touches, for the map's hover card.
+# ``.conv`` carries a warning: the LayerNorm right after it normalises across
+# channels at every pixel, so a uniform Multiply or Add there is undone.
+_INNER_ROLES = {
+    "conv": "the convolution, before normalisation (a uniform Multiply or Add here is undone by the norm)",
+    "norm": "normalised, before the time step's scale and shift",
+    "film": "after the time step's scale and shift, before the activation",
+    "q": "attention queries: where each position looks",
+    "k": "attention keys: what each position is found by",
+    "v": "attention values: what gets carried across",
+    "out": "the attention's output projection",
+}
+_QKV_NAMES = ("qkv", "to_qkv")
+_OUT_NAMES = ("proj", "to_out")
+
+
+def _qkv_parts(name: str, mod: nn.Module) -> list[dict]:
+    """q, k and v of a conf attention's fused projection, as channel thirds.
+
+    Every conf attention class does ``qkv(x).chunk(3, dim=1)``, so the three
+    are contiguous channel ranges of one output: bending one is an output hook
+    on that conv that touches its third and leaves the other two alone.
+    """
+    c = getattr(mod, "out_channels", 0) // 3
+    if not c:
+        return []
+    return [{"id": f"{name}:{part}", "module": name, "hook": "out",
+             "start": k * c, "stop": (k + 1) * c, "role": part}
+            for k, part in enumerate("qkv")]
+
+
+def skip_points(model: nn.Module) -> list[dict]:
+    """Each skip connection, as a bend target of its own.
+
+    The tensor an encoder level pushes onto ``skips`` also carries on down the
+    main path, so bending its source module bends both. Bending only the skip
+    means rewriting the skip half of the decoder block's input after
+    ``cat((up(x), skip))``: a pre-hook on that block, on channels from
+    ``up.out_channels`` on. ``from`` and ``to`` are the main points the map
+    draws the arc between.
+    """
+    downs, ups = getattr(model, "downs", None), getattr(model, "ups", None)
+    if downs is None or ups is None or len(downs) != len(ups):
+        return []
+    down_attns = getattr(model, "down_attns", None)
+    out = []
+    for i in range(len(downs)):
+        j = len(downs) - 1 - i
+        split = getattr(ups[j][0], "out_channels", None)
+        if split is None:
+            continue
+        has_attn = down_attns is not None and i < len(down_attns) \
+            and not isinstance(down_attns[i], nn.Identity)
+        out.append({
+            "id": f"skip:{i}", "module": f"ups.{j}.1", "hook": "pre", "start": split, "stop": None,
+            "from": f"down_attns.{i}" if has_attn else f"downs.{i}.0", "to": f"ups.{j}.1",
+            "level": i,
+        })
+    return out
+
+
+def slice_points(model: nn.Module) -> dict[str, dict]:
+    """Targets that bend part of a module's input or output rather than a
+    whole module output: skips and conf's q/k/v. Keyed by target id."""
+    out = {s["id"]: s for s in skip_points(model)}
+    for name, mod in model.named_modules():
+        if name.rsplit(".", 1)[-1] in _QKV_NAMES and isinstance(mod, nn.Conv2d):
+            out.update({p["id"]: p for p in _qkv_parts(name, mod)})
+    return out
+
+
+def inner_points(model: nn.Module, points: list[str]) -> list[dict]:
+    """The layers inside each block and attention, in forward order.
+
+    ``.act`` is left out: it is the block's own output, already a point.
+    """
+    modules = dict(model.named_modules())
+    out = []
+    for parent in points:
+        mod = modules[parent]
+        kind = type(mod).__name__
+        if kind in BLOCK_TYPES:
+            for role in ("conv", "norm", "film"):
+                if f"{parent}.{role}" in modules:
+                    out.append({"id": f"{parent}.{role}", "module": f"{parent}.{role}",
+                                "parent": parent, "role": role})
+        elif kind in ATTENTION_TYPES:
+            for child in ("q", "k", "v"):
+                if isinstance(modules.get(f"{parent}.{child}"), nn.Conv2d):
+                    out.append({"id": f"{parent}.{child}", "module": f"{parent}.{child}",
+                                "parent": parent, "role": child})
+            for child in _QKV_NAMES:
+                fused = modules.get(f"{parent}.{child}")
+                if isinstance(fused, nn.Conv2d):
+                    out += [{**p, "parent": parent} for p in _qkv_parts(f"{parent}.{child}", fused)]
+            for child in _OUT_NAMES:
+                if isinstance(modules.get(f"{parent}.{child}"), nn.Conv2d):
+                    out.append({"id": f"{parent}.{child}", "module": f"{parent}.{child}",
+                                "parent": parent, "role": "out"})
+    return out
+
+
 def layer_graph(model: nn.Module, image_size: int = 64) -> dict:
     modules = dict(model.named_modules())
     points = _ordered_points(model)
+    inner = inner_points(model, points)
+    skips = skip_points(model)
 
     shapes: dict[str, tuple] = {}
     handles = []
-    for name in points:
+    for name in dict.fromkeys(points + [p["module"] for p in inner]):
         mod = modules[name]
 
         def _hook(m, inp, out, _n=name):
@@ -169,5 +273,55 @@ def layer_graph(model: nn.Module, image_size: int = 64) -> dict:
             "bendable": True,
             "attn_kind": _ATTN_KIND.get(tname),
         })
+    by_id = {n["id"]: n for n in nodes}
 
-    return {"nodes": nodes, "order": points, "ref_size": image_size}
+    def where(shape):
+        h = shape[2] if shape and len(shape) >= 3 else None
+        return {"h": h, "w": shape[3] if shape and len(shape) >= 4 else None,
+                "down_factor": round(image_size / h, 2) if h else None}
+
+    inner_nodes = []
+    for p in inner:
+        shp = shapes.get(p["module"])
+        parent = by_id[p["parent"]]
+        c = shp[1] if shp and len(shp) >= 2 else None
+        if p.get("hook") == "out" and c:      # one third of a fused qkv
+            c = p["stop"] - p["start"]
+        inner_nodes.append({
+            "id": p["id"],
+            "label": f"{parent['label']} · {p['role']}",
+            "type": p["role"],
+            "role": p["role"],
+            "about": _INNER_ROLES.get(p["role"], ""),
+            "parent": p["parent"],
+            "stage": parent["stage"],
+            "channels": c,
+            **where(shp),
+        })
+
+    skip_nodes = []
+    for s in skips:
+        src = by_id.get(s["from"])
+        dst = by_id.get(s["to"])
+        if not src or not dst:
+            continue
+        # Named by resolution, not by block index: "dec 2" in a layer label
+        # counts decoder blocks from the bottom, while the map names levels by
+        # resolution, so "enc 1 → dec 2" read as a skip to the wrong level.
+        df = src["down_factor"]
+        res = "full res" if not df or df <= 1 else f"1/{round(df)} res"
+        skip_nodes.append({
+            "id": s["id"],
+            "label": f"skip · {res}",
+            "type": "skip",
+            "stage": "skip",
+            "from": s["from"],
+            "to": s["to"],
+            "channels": src["channels"],
+            "h": src["h"],
+            "w": src["w"],
+            "down_factor": src["down_factor"],
+        })
+
+    return {"nodes": nodes, "order": points, "ref_size": image_size,
+            "inner": inner_nodes, "skips": skip_nodes}

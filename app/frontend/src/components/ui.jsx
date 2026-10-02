@@ -215,6 +215,83 @@ function focusables(root) {
     .filter((el) => !el.disabled && el.offsetParent !== null);
 }
 
+/** A small panel that drops from its own button and leaves the page usable.
+ *
+ *  For tools that belong to a screen but are not part of its main loop (share,
+ *  presets): a modal would hide the work they act on, and an inline panel pushes
+ *  that work down the page. Closes on Escape (focus goes back to the button) or
+ *  a press outside. `children` may be a function, handed `close`, for actions
+ *  that should shut it. Pass `open` and `onOpenChange` to open it from
+ *  elsewhere too (a second button that leads to the same panel).
+ */
+export function Popover({
+  label, trigger, triggerLabel, triggerClass = "btn sm", align = "end", children,
+  open: openProp, onOpenChange, panelClass = "",
+}) {
+  const [openState, setOpenState] = useState(false);
+  const open = openProp ?? openState;
+  const setOpen = useCallback((next) => {
+    const v = typeof next === "function" ? next(open) : next;
+    if (onOpenChange) onOpenChange(v); else setOpenState(v);
+  }, [open, onOpenChange]);
+  // The side it opens towards. Toolbars wrap, so a button that sits at the
+  // right edge on a wide window can be at the left on a narrow one, and a panel
+  // hung from its right edge would then leave the screen.
+  const [side, setSide] = useState(align);
+  const wrap = useRef(null);
+  const btn = useRef(null);
+  const panel = useRef(null);
+  const close = useCallback(() => { setOpen(false); btn.current?.focus(); }, [setOpen]);
+
+  useLayoutEffect(() => {
+    if (!open) { setSide(align); return; }
+    const r = panel.current?.getBoundingClientRect();
+    // Flip once at most: on a window too narrow for either side, swapping back
+    // and forth would never settle.
+    if (!r || side !== align) return;
+    if (side === "end" && r.left < 8) setSide("start");
+    else if (side === "start" && r.right > window.innerWidth - 8) setSide("end");
+  }, [open, side, align]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    focusables(panel.current)[0]?.focus();
+    const onDown = (e) => { if (!wrap.current?.contains(e.target)) setOpen(false); };
+    const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); close(); } };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+    // Bound once per opening: setOpen changes identity with `open`, and
+    // re-running would move focus back to the first control on every keystroke.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  return (
+    <span className="popover-anchor" ref={wrap}>
+      <button
+        ref={btn}
+        type="button"
+        className={`${triggerClass}${open ? " on" : ""}`}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-label={triggerLabel}
+        title={triggerLabel}
+        onClick={() => setOpen((o) => !o)}
+      >
+        {trigger}
+      </button>
+      {open && (
+        <div ref={panel} className={`popover popover-${side} ${panelClass}`.trim()} role="dialog" aria-label={label}>
+          {typeof children === "function" ? children(close) : children}
+        </div>
+      )}
+    </span>
+  );
+}
+
 export function Modal({ title, children, onClose, footer, wide = false }) {
   const box = useRef(null);
   const prev = useRef(typeof document !== "undefined" ? document.activeElement : null);

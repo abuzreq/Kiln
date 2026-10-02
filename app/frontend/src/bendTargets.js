@@ -7,9 +7,12 @@
 
 export const GROUPS = ["all", "encoder", "mid", "decoder", "attention", "blocks"];
 
-/** Node ids a single group name expands to, in map order. */
+/** Node ids a single group name expands to, in map order.
+ *
+ *  Only the main points: skips and the layers inside blocks (`extra`) are
+ *  targets you pick one by one, as the backend's groups never include them. */
 export function expandGroup(group, nodes) {
-  const all = nodes || [];
+  const all = (nodes || []).filter((n) => !n.extra);
   switch (group) {
     case "all": return all.map((n) => n.id);
     case "encoder":
@@ -41,11 +44,35 @@ export function resolveTargets(targets, nodes) {
   return ids;
 }
 
-/** Union of the resolved targets of every bend in `bends`. */
-export function resolveMany(bends, nodes) {
-  const ids = new Set();
-  (bends || []).forEach((b) => resolveTargets(b.targets, nodes).forEach((id) => ids.add(id)));
-  return ids;
+/**
+ * Which bends hold each layer: id -> [{ n, active }], `n` being the bend's
+ * 1-based place in the stack. That number is what the stack cards show, so the
+ * map can say "bend 1 is here" instead of only "something else is here".
+ * `skipId` leaves out the focused bend, which the map draws on its own.
+ */
+export function holdersOf(bends, nodes, skipId) {
+  const out = new Map();
+  (bends || []).forEach((b, i) => {
+    if (b.id === skipId) return;
+    resolveTargets(b.targets, nodes).forEach((id) => {
+      const list = out.get(id) || [];
+      list.push({ n: i + 1, active: b.active !== false });
+      out.set(id, list);
+    });
+  });
+  return out;
+}
+
+/** The bends holding any of `ids`, each once, in stack order. */
+export function holdersIn(holders, ids) {
+  const seen = new Map();
+  (ids || []).forEach((id) => (holders?.get(id) || []).forEach((h) => seen.set(h.n, h)));
+  return [...seen.values()].sort((a, b) => a.n - b.n);
+}
+
+/** True when an active bend other than the focused one holds `id`. */
+export function heldByActive(holders, id) {
+  return !!holders?.get(id)?.some((h) => h.active);
 }
 
 function orderTargets(targets, nodes) {

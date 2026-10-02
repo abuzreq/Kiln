@@ -58,9 +58,11 @@ def _resolve_targets(targets, model, backend=None) -> set[str]:
     backend = backend or _default_backend()
     modules = dict(model.named_modules())
     points = backend.bend_points(model)
+    # "skip:2", "mid_attn.qkv:v": only looked up when a target asks for one.
+    slices = backend.slice_points(model) if any(":" in str(t) for t in targets or []) else {}
     out: set[str] = set()
     for t in targets or []:
-        if t in modules:
+        if t in modules or t in slices:
             out.add(t)
         elif t == "all":
             out.update(points)
@@ -94,34 +96,78 @@ class BendRuntime:
 
     def attach(self, model):
         modules = dict(model.named_modules())
+        backend = self.backend or _default_backend()
+        slices = None
         by_module: dict[str, list[dict]] = defaultdict(list)
         for b in self.bends:
-            for name in _resolve_targets(b.get("targets", []), model, self.backend):
+            for name in _resolve_targets(b.get("targets", []), model, backend):
                 by_module[name].append(b)
         for name, bends in by_module.items():
-            h = modules[name].register_forward_hook(self._make_hook(bends))
+            if name in modules:
+                h = modules[name].register_forward_hook(self._make_hook(bends))
+            else:
+                # A slice target: part of some module's input or output.
+                slices = slices if slices is not None else backend.slice_points(model)
+                spec = slices[name]
+                mod = modules[spec["module"]]
+                if spec["hook"] == "pre":
+                    h = mod.register_forward_pre_hook(self._make_pre_slice_hook(bends, spec))
+                else:
+                    h = mod.register_forward_hook(self._make_slice_hook(bends, spec))
             self._handles.append(h)
         return self
 
+    def _mine(self) -> bool:
+        caller = getattr(_caller, "run", _NOBODY)
+        return caller is _NOBODY or caller is self      # else another run's forward
+
+    def _apply(self, bends, y):
+        frac = self._frac()
+        for b in bends:
+            s = float(b.get("step_start", 0.0))
+            e = float(b.get("step_end", 1.0))
+            if frac < s or frac > e:
+                continue
+            try:
+                y = apply_op(b["op"], y, b.get("params", {}), {"step": self.cur, "total": self.total})
+            except Exception:
+                continue
+        return y
+
     def _make_hook(self, bends):
         def hook(m, inp, out):
-            if not isinstance(out, torch.Tensor) or out.dim() != 4:
+            if not isinstance(out, torch.Tensor) or out.dim() != 4 or not self._mine():
                 return out
-            caller = getattr(_caller, "run", _NOBODY)
-            if caller is not _NOBODY and caller is not self:
-                return out                  # another run's forward pass
-            frac = self._frac()
-            y = out
-            for b in bends:
-                s = float(b.get("step_start", 0.0))
-                e = float(b.get("step_end", 1.0))
-                if frac < s or frac > e:
-                    continue
-                try:
-                    y = apply_op(b["op"], y, b.get("params", {}), {"step": self.cur, "total": self.total})
-                except Exception:
-                    continue
-            return y
+            return self._apply(bends, out)
+
+        return hook
+
+    @staticmethod
+    def _bend_slice(x, spec, fn):
+        """``x`` with channels [start, stop) replaced by ``fn`` of themselves."""
+        start, stop = spec["start"], spec.get("stop") or x.shape[1]
+        part = fn(x[:, start:stop])
+        if part.shape != x[:, start:stop].shape:
+            return x                    # an op that changed the shape cannot go back in
+        return torch.cat([x[:, :start], part, x[:, stop:]], dim=1)
+
+    def _make_slice_hook(self, bends, spec):
+        def hook(m, inp, out):
+            if not isinstance(out, torch.Tensor) or out.dim() != 4 or not self._mine():
+                return out
+            return self._bend_slice(out, spec, lambda y: self._apply(bends, y))
+
+        return hook
+
+    def _make_pre_slice_hook(self, bends, spec):
+        # The decoder block is called block(x, t): bend the skip half of x and
+        # hand t through untouched.
+        def hook(m, args):
+            if not args or not isinstance(args[0], torch.Tensor) or args[0].dim() != 4 \
+                    or not self._mine():
+                return None
+            x = self._bend_slice(args[0], spec, lambda y: self._apply(bends, y))
+            return (x, *args[1:])
 
         return hook
 

@@ -2,49 +2,87 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api, downloadPost, pollJob } from "../api.js";
 import { useApp } from "../state.jsx";
 import { usePlay, usePlayState } from "./playContext.jsx";
-import { Select, Num, Text, Disclose, Progress, Modal } from "../components/ui.jsx";
+import { Select, Num, Disclose, Progress, Modal, Seg, Popover } from "../components/ui.jsx";
+import { DownloadIcon, ExpandIcon, TilesIcon, TransferIcon } from "../components/icons.jsx";
 import UnetVisualizer from "../components/UnetVisualizer.jsx";
-import BendEditor from "../components/BendEditor.jsx";
-import BendPresetList from "../components/BendPresetList.jsx";
+import BendPipeline from "../components/BendPipeline.jsx";
+import BendEditor, { BendInspector } from "../components/BendEditor.jsx";
+import BendPresets from "../components/BendPresets.jsx";
+import {
+  CompareHistory, CompareMeta, CompareViewer, MODES, MODES_LARGE, StackChips,
+} from "../components/BendCompare.jsx";
 import { buildSamplePayload } from "../sampleSettings.jsx";
 import {
-  expandGroup, isGroup, resolveMany, resolveTargets, toggleNodeTargets,
+  expandGroup, holdersOf, isGroup, resolveTargets, toggleNodeTargets,
 } from "../bendTargets.js";
 import { bendCount, newBendId, normalizeStack } from "../bendStack.js";
+
+// How the model is shown while you pick what to bend. Simple is the signal
+// path in words; Structure is the map, at two grains. The geometry under the
+// two map grains is the same, so switching does not move anything.
+const VIEWS = [
+  { id: "simple", label: "Simple", tip: "The model as a signal path: encoder, bottleneck, decoder" },
+  { id: "structure", label: "Structure", tip: "The map of the network itself" },
+];
+// "overview" is the stored id from before the label became Levels; keeping it
+// keeps everyone's saved choice.
+const GRAINS = [
+  { id: "overview", label: "Levels", tip: "One capsule per resolution level" },
+  { id: "layers", label: "Layers", tip: "Every layer you can bend" },
+];
+const VIEW_KEY = "kiln.bendMapView";
+const COMPARE_MODE_KEY = "kiln.bendCompareMode";
+// Earlier tries kept for the session. Each holds two small images and a stack.
+const HISTORY_MAX = 6;
+const GRAIN_KEY = "kiln.bendMapDensity";
+const INNER_KEY = "kiln.bendMapInner";
+
+function loadPref(key, list, fallback) {
+  try {
+    const v = localStorage.getItem(key);
+    return list.some((d) => d.id === v) ? v : fallback;
+  } catch { return fallback; }
+}
+
+const MAP_HINT = {
+  simple: {
+    focus: "Click a stage to bend all of it, or pick single layers inside it.",
+    empty: "Click a stage to start a bend on it.",
+  },
+  overview: {
+    focus: "Click a level to target its layers, + to open it up, a dashed arc to bend that skip alone. Solid rings: this bend. Numbers: the others.",
+    empty: "Click a level to start a bend on it.",
+  },
+  layers: {
+    focus: "Click to target, shift+click for a range, drag a box (alt+drag removes), click a dashed arc to bend that skip alone. Solid rings: this bend. Numbers: the others.",
+    empty: "Click a layer to start a bend on it.",
+  },
+};
 
 const BEND_SWEEP_EMPTY = {
   bend: 0, param: "", from: 0, to: 1, count: 5,
   frames: null, busy: false, job: null, fps: 8, pingpong: true,
 };
 
-/** The two samples side by side. Same markup inline and in the modal, so the
- *  enlarged view cannot drift from the one in the column. */
-function ComparePair({ plain, bent, large = false, onEnlarge }) {
-  const box = (src, label, alt) => (
-    <div className="grow">
-      <div className="section-title">{label}</div>
-      <div className={`preview-box preview-square ${large ? "" : "preview-max"}`}>
-        {src ? (
-          onEnlarge
-            ? <img src={src} alt={alt} onClick={onEnlarge} className="clickable" />
-            : <img src={src} alt={alt} />
-        ) : <span className="sub">—</span>}
-      </div>
-    </div>
-  );
-  return (
-    <div className={`row gap-2 mt-2 ${large ? "compare-large" : ""}`}>
-      {box(plain, "Without bends", "without bends")}
-      {box(bent, "With bends", "with bends")}
-    </div>
-  );
+/** A stack as it was, without the ids that only mean something on screen. */
+const stackKey = (bends) => JSON.stringify((bends || []).map(({ id, ...b }) => b));
+
+/** Kiln's zip route wants data URLs; a pair handed over from Discoveries is
+ *  served files. */
+async function asDataUrl(src) {
+  if (!src || src.startsWith("data:")) return src;
+  const blob = await fetch(src).then((r) => r.blob());
+  return new Promise((resolve) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(fr.result);
+    fr.readAsDataURL(blob);
+  });
 }
 
 export function BendWorkspace({ stack, setStack }) {
   const { toast, modelPath, ops: sharedOps, setPlayTab, bendCompare, setBendCompare } = useApp();
   const { sampleParams, commitFrame, applyCard } = usePlay();
   const [graph, setGraph] = useState(null);
-  const [groups, setGroups] = useState([]);
   // The focused bend is the one the map edits. Focus and expansion are the same
   // thing, so there is always exactly one bend the map is talking about.
   const [focusedBendId, setFocusedBendId] = useState(null);
@@ -63,14 +101,35 @@ export function BendWorkspace({ stack, setStack }) {
   // state alongside the image itself so a tab switch does not silently
   // invalidate one without the other.
   const [cachedPlainKey, setCachedPlainKey] = usePlayState("bend.plainKey", null);
+  // Every compare this session, newest first: { id, plain, bent, card, stack,
+  // meta }. `shownTry` is the one in the viewer; null shows bend.plain/bent
+  // as they are (a pair handed over from Discoveries has no entry).
+  const [history, setHistory] = usePlayState("bend.history", []);
+  const [shownTry, setShownTry] = usePlayState("bend.shownTry", null);
+  const [compareMode, setCompareModeState] = useState(() => loadPref(COMPARE_MODE_KEY, MODES, "wipe"));
+  const [bigMode, setBigMode] = useState("split");
   const [compareOpen, setCompareOpen] = useState(false);
+  const [presetsOpen, setPresetsOpen] = useState(false);
+  const [view, setViewState] = useState(() => loadPref(VIEW_KEY, VIEWS, "simple"));
+  const [grain, setGrainState] = useState(() => loadPref(GRAIN_KEY, GRAINS, "overview"));
   const [gifBusy, setGifBusy] = useState(false);
 
   useEffect(() => {
-    // groups only ever come from this endpoint; the op list is shared via context
-    api.get("/craft/ops").then((d) => setGroups(d.groups || [])).catch(() => {});
     api.get("/craft/bends").then(setPresets).catch(() => {});
   }, []);
+
+  const remember = (key, value) => {
+    try { localStorage.setItem(key, value); } catch { /* private window: the session keeps it */ }
+  };
+  const setView = (v) => { setViewState(v); remember(VIEW_KEY, v); };
+  const setGrain = (g) => { setGrainState(g); remember(GRAIN_KEY, g); };
+  // The layers inside blocks, for those who want them: off unless asked for.
+  const [showInner, setShowInnerState] = useState(() => {
+    try { return localStorage.getItem(INNER_KEY) === "1"; } catch { return false; }
+  });
+  const setShowInner = (v) => { setShowInnerState(v); remember(INNER_KEY, v ? "1" : "0"); };
+  const setCompareMode = (m) => { setCompareModeState(m); remember(COMPARE_MODE_KEY, m); };
+  const shown = view === "simple" ? "simple" : grain;
 
   const ops = sharedOps || [];
   // Kiln's own recipes are listed apart from the user's: they are the answer to
@@ -84,6 +143,9 @@ export function BendWorkspace({ stack, setStack }) {
     setGraph(null);
     setGenPlain(null);
     setGenBent(null);
+    // tries of another model say nothing about this one
+    setHistory([]);
+    setShownTry(null);
     api.post("/craft/introspect", { model_path: modelPath })
       .then(setGraph)
       .catch((e) => toast(e.message, "error"));
@@ -102,6 +164,7 @@ export function BendWorkspace({ stack, setStack }) {
     // it: leaving a stale key here would let Compare skip rendering and show
     // the discovery's "before" as if it were this model's.
     setCachedPlainKey(null);
+    setShownTry(null);
     setBendCompare(null);
   }, [bendCompare]);
 
@@ -112,20 +175,45 @@ export function BendWorkspace({ stack, setStack }) {
   }, [stack, focusedBendId]);
 
   const nodes = graph?.nodes || [];
+  // Everything a bend can target: the main points, plus each skip connection
+  // and the layers inside blocks (`extra`). Lookups and highlights use all of
+  // them; counts, groups and the map's geometry stay on the main points.
+  const points = useMemo(() => [
+    ...nodes,
+    ...(graph?.skips || []).map((s) => ({ ...s, extra: "skip" })),
+    ...(graph?.inner || []).map((n) => ({ ...n, extra: "inner" })),
+  ], [graph]);
   const focusedBend = stack.find((b) => b.id === focusedBendId) || null;
   const focusIndex = stack.findIndex((b) => b.id === focusedBendId);
 
   const focusTargets = useMemo(
-    () => resolveTargets(focusedBend?.targets, nodes),
-    [focusedBend, nodes],
+    () => resolveTargets(focusedBend?.targets, points),
+    [focusedBend, points],
   );
-  // Everything the rest of the stack hits, so editing one bend never hides the others.
-  const otherTargets = useMemo(
-    () => resolveMany(stack.filter((b) => b.active && b.id !== focusedBendId), nodes),
-    [stack, focusedBendId, nodes],
+  // Which other bend holds each layer, by its number in the stack, so editing
+  // one bend never hides the others -- and the map can say which one it is.
+  // Bends that are off are included and flagged, and drawn faded.
+  const holders = useMemo(
+    () => holdersOf(stack, points, focusedBendId),
+    [stack, focusedBendId, points],
   );
 
   const updateBend = (id, patch) => setStack(stack.map((b) => (b.id === id ? { ...b, ...patch } : b)));
+  // Focus moves on by itself: the effect above re-points it at the first bend.
+  const removeBend = (id) => setStack(stack.filter((b) => b.id !== id));
+  // A copy straight after the original, focused, so the variation is the one
+  // being edited and the original is a click (or a switch-off) away.
+  const duplicateBend = (id) => {
+    const i = stack.findIndex((b) => b.id === id);
+    if (i < 0) return;
+    const src = stack[i];
+    const copy = {
+      ...src, id: newBendId(), params: { ...src.params }, targets: [...(src.targets || [])],
+    };
+    setStack([...stack.slice(0, i + 1), copy, ...stack.slice(i + 1)]);
+    setFocusedBendId(copy.id);
+    setNote(null);
+  };
 
   const addBend = (targets) => {
     const op = ops[0];
@@ -154,13 +242,15 @@ export function BendWorkspace({ stack, setStack }) {
   // The map is the picker: clicking layers writes straight into the focused bend.
   const onMapToggle = (ids, opts) => {
     if (!focusedBend) return;
-    const { targets, expanded } = toggleNodeTargets(focusedBend, ids, nodes, opts);
+    const { targets, expanded } = toggleNodeTargets(focusedBend, ids, points, opts);
     updateBend(focusedBend.id, { targets });
     setNote(expanded.length ? { bendId: focusedBend.id, groups: expanded } : null);
   };
 
-  const onCreateFromNode = (id) => {
-    if (addBend([id])) toast("Started a bend on that layer", "success");
+  const onCreateFromNode = (ids) => {
+    const list = (Array.isArray(ids) ? ids : [ids]).filter(Boolean);
+    if (!list.length || !addBend(list)) return;
+    toast(list.length > 1 ? `Started a bend on ${list.length} layers` : "Started a bend on that layer", "success");
   };
 
   // Turning a group on absorbs the individual layers it already covers, so
@@ -184,8 +274,28 @@ export function BendWorkspace({ stack, setStack }) {
       await api.post("/craft/bends", { name, bends: stack, model_hint: modelPath });
       toast(`Saved “${name}” — it will show up in Create`, "success");
       setSaveName("");
+      setPresetsOpen(false);
       api.get("/craft/bends").then(setPresets);
     } catch (e) { toast(e.message, "error"); }
+  };
+
+  // Keep the stack and put the preset's bends after it: the way to combine a
+  // starter with what you already have, which Load (a replacement) cannot do.
+  const addPreset = (name) => {
+    const p = presets.find((x) => x.name === name);
+    // Checked here as well as in setStack, so focus lands on a bend that survived.
+    const { bends, dropped } = normalizeStack(p?.bends);
+    if (!bends.length) {
+      if (dropped) toast(`“${name}” holds no bend this build can read`, "error");
+      return;
+    }
+    const added = bends.map((b) => ({ ...b, id: newBendId() }));
+    setStack([...stack, ...added]);
+    setFocusedBendId(added[0].id);
+    setNote(null);
+    setPresetsOpen(false);
+    const left = dropped ? `, leaving out ${bendCount(dropped, "entry", "entries")} this build cannot read` : "";
+    toast(`Added “${name.replace(/^starter-/, "")}” — ${bendCount(added.length)} after yours${left}`, dropped ? "warn" : "success");
   };
 
   const loadPreset = (name) => {
@@ -197,6 +307,7 @@ export function BendWorkspace({ stack, setStack }) {
       setStack(loaded);
       setFocusedBendId(loaded[0]?.id || null);
       setNote(null);
+      setPresetsOpen(false);
       if (dropped) toast(`Loaded “${name}”, leaving out ${bendCount(dropped, "entry", "entries")} this build cannot read as a bend`, "warn");
       else toast(`Loaded “${name}”`, "success");
     }
@@ -207,7 +318,7 @@ export function BendWorkspace({ stack, setStack }) {
   const exportBends = async () => {
     if (!stack.length) { toast("Nothing to export", "error"); return; }
     const resolved = stack.filter((b) => b.active).map((b) => ({
-      ...b, targets: [...resolveTargets(b.targets, nodes)],
+      ...b, targets: [...resolveTargets(b.targets, points)],
     }));
     if (!resolved.length) { toast("No active bends to export", "error"); return; }
     try {
@@ -219,8 +330,13 @@ export function BendWorkspace({ stack, setStack }) {
       }, `${name}.json`);
       let report = null;
       try { report = JSON.parse(headers?.get("X-Kiln-Export") || "null"); } catch { /* optional */ }
+      // Skips and q/k/v parts are Kiln's own: no other tool has a path for them.
+      const left = report?.kiln_only_targets?.length || 0;
+      const leftOut = left ? ` — left out ${left} skip/q·k·v target${left === 1 ? "" : "s"} no other tool can address` : "";
       if (report?.schedule_flattened) {
-        toast(`Exported ${report.bends_written} layer bends — the format has one schedule for the whole file, so the per-bend windows were merged`, "warn");
+        toast(`Exported ${report.bends_written} layer bends — the format has one schedule for the whole file, so the per-bend windows were merged${leftOut}`, "warn");
+      } else if (left) {
+        toast(`Exported ${report.bends_written} layer bends${leftOut}`, "warn");
       } else {
         toast(`Exported ${report?.bends_written ?? resolved.length} layer bends`, "success");
       }
@@ -232,7 +348,7 @@ export function BendWorkspace({ stack, setStack }) {
     try {
       const doc = JSON.parse(await file.text());
       const { bends, report } = await api.post("/craft/bends/import", {
-        doc, layers: nodes.map((n) => n.id),
+        doc, layers: points.map((n) => n.id),
       });
       if (!bends.length) { toast("That file had no bends this build understands", "error"); return; }
       const loaded = bends.map((b) => ({ ...b, id: newBendId() }));
@@ -288,13 +404,53 @@ export function BendWorkspace({ stack, setStack }) {
       setGenJob(j1);
       const bent = await pollJob(j1.id, setGenJob, 300);
       if (bent.status === "error") throw new Error(bent.message || "Sample with bends failed");
-      setGenBent(bent.detail?.frame || null);
+      const bentFrame = bent.detail?.frame || null;
+      setGenBent(bentFrame);
+      const entry = {
+        id: newBendId(),
+        plain: plainFrame,
+        bent: bentFrame,
+        card: bent.detail?.card || null,
+        stack: stack.map((b) => ({ ...b })),
+        meta: {
+          seed: bentBody.seed, steps: bentBody.steps, size: bentBody.image_size, reused: reusedPlain,
+        },
+      };
+      setHistory((h) => [entry, ...(h || [])].slice(0, HISTORY_MAX));
+      setShownTry(entry.id);
       toast(reusedPlain
         ? "Compared — reused the unbent image, only the bent side was sampled"
         : "Compared with vs without bends", "success");
     } catch (e) { toast(e.message, "error"); }
     setGenBusy(false);
     setGenJob(null);
+  };
+
+  const pair = (shownTry && history?.find((h) => h.id === shownTry))
+    || { plain: genPlain, bent: genBent, card: null, stack: null, meta: null };
+  const hasPair = !!(pair.plain || pair.bent);
+  const restorable = !!pair.stack && stackKey(pair.stack) !== stackKey(stack);
+
+  const restoreTry = (entry) => {
+    const loaded = entry.stack.map((b) => ({ ...b, id: newBendId() }));
+    setStack(loaded);
+    setFocusedBendId(loaded[0]?.id || null);
+    setNote(null);
+    toast("Restored the bends from that try — they replaced your stack", "success");
+  };
+
+  const downloadPair = async () => {
+    try {
+      const [plain, bent] = await Promise.all([asDataUrl(pair.plain), asDataUrl(pair.bent)]);
+      await downloadPost("/tools/zip", {
+        images: [
+          { image: plain, value: "without", card: null },
+          { image: bent, value: "with", card: pair.card },
+        ].filter((x) => x.image),
+        label: "bend",
+        name: `bend_compare_${Date.now().toString().slice(-6)}`,
+      }, "bend-compare.zip");
+    } catch (e) { toast(e.message || "Download failed", "error"); }
   };
 
   const runSweep = async () => {
@@ -385,147 +541,251 @@ export function BendWorkspace({ stack, setStack }) {
 
   return (
     <div className="col">
-      <div className="card">
-        <div className="row between center wrap gap-2">
-          <h3 className="mb-0">Bend</h3>
+      {/* One row for what the screen is and how to look at it. The map's view
+          controls live here rather than on the map card, so changing them never
+          moves the map. */}
+      <div className="bend-toolbar">
+        <div className="bend-toolbar-id">
+          <h2 className="bend-title">Bend</h2>
           {graph?.model && (
-            <span className="pill">{graph.model.mtype} · {graph.model.mults?.join("-")}{graph.model.attn ? ` · ${graph.model.attn}` : ""}</span>
+            <span className="pill tnum">{graph.model.mtype} · {graph.model.mults?.join("-")}{graph.model.attn ? ` · ${graph.model.attn}` : ""}</span>
           )}
+          <span className="sub">
+            Rewrites activations at the layers you pick, mid-generation. The model file is untouched.
+          </span>
         </div>
-        <p className="hint mb-0 mt-1">
-          Rewrites activations mid-generation at the layers you pick. Changes the output, not the
-          model file. Save a stack to reuse it in Create.
-        </p>
-      </div>
-
-      <div className="bend-layout">
-        <div className="bend-side">
-          <div className="card bend-save-card">
-            <h3>Save this setup</h3>
-            <p className="hint mb-2">Name it to reuse in Create.</p>
-            <div className="row center wrap gap-2">
-              <div className="grow">
-                <Text label="" value={saveName} onChange={setSaveName} placeholder="e.g. melt-decoder" />
-              </div>
-              <button type="button" className="btn primary" onClick={savePreset} disabled={!stack.length}>Save bend</button>
-            </div>
-            <p className="hint mb-0 mt-2">
-              Each starter changes one thing. Load one, Compare, then edit it. Hover for details.
-            </p>
-            <BendPresetList
-              groups={[
-                { label: "Starters", presets: starterPresets },
-                { label: "Saved", presets: savedPresets },
-              ]}
-              onLoad={loadPreset}
+        <div className="bend-toolbar-tools">
+          <Seg ariaLabel="How to show the model" tabs={VIEWS} value={view}
+               onChange={setView} size="sm" />
+          {view === "structure" && (
+            <Seg ariaLabel="How much detail the map shows" tabs={GRAINS} value={grain}
+                 onChange={setGrain} size="sm" />
+          )}
+          {view === "structure" && grain === "layers" && graph?.inner?.length > 0 && (
+            <button type="button" className={`btn sm ${showInner ? "on" : ""}`.trim()}
+              aria-pressed={showInner}
+              title="Show the layers inside each block and attention: conv, norm, film, q, k, v"
+              onClick={() => setShowInner(!showInner)}>
+              Inside blocks
+            </button>
+          )}
+          <span className="bend-toolbar-sep" aria-hidden="true" />
+          <Popover
+            label="Bend presets"
+            triggerClass="btn sm"
+            trigger={<><TilesIcon /> Presets</>}
+            open={presetsOpen}
+            onOpenChange={setPresetsOpen}
+            panelClass="bend-presets-pop"
+          >
+            <BendPresets
+              starters={starterPresets}
+              saved={savedPresets}
               ops={ops}
+              nodes={nodes}
+              saveName={saveName}
+              setSaveName={setSaveName}
+              canSave={stack.length > 0 && !!saveName.trim()}
+              onSave={savePreset}
+              onLoad={loadPreset}
+              onAdd={addPreset}
             />
-            <div className="section-title mt-2">Share with other tools</div>
-            <p className="hint mb-2">
-              The shared network-bending JSON. Layer paths are per-architecture, so an imported
-              file usually needs retargeting.
-            </p>
-            <div className="row center wrap gap-2">
-              <button type="button" className="btn sm" onClick={exportBends} disabled={!stack.length}>
-                Export JSON
-              </button>
-              <button type="button" className="btn sm" onClick={() => importRef.current?.click()}>
-                Import JSON
-              </button>
-              <input
-                ref={importRef}
-                type="file"
-                accept="application/json,.json"
-                className="hidden-file"
-                onChange={(e) => { importBends(e.target.files?.[0]); e.target.value = ""; }}
-              />
-            </div>
-          </div>
-        </div>
-        <div className="card">
-          <div className="row between center wrap gap-2">
-            <h3 className="mb-0">Model map</h3>
-            {focusedBend ? (
-              <span className="pill accent">
-                Editing #{focusIndex + 1} {opMap[focusedBend.op]?.label || focusedBend.op}
-              </span>
-            ) : (
-              <span className="pill">No bend selected</span>
+          </Popover>
+          <Popover
+            label="Share with other tools"
+            triggerLabel="Import or export bends as JSON"
+            triggerClass="btn icon"
+            trigger={<TransferIcon size={15} />}
+          >
+            {(close) => (
+              <div className="bend-share">
+                <div className="section-title">Share with other tools</div>
+                <p className="sub">
+                  The shared network-bending JSON, as other bending tools write it. Layer paths are
+                  per-architecture, so a file from elsewhere usually needs retargeting on the map.
+                </p>
+                <div className="row gap-2">
+                  <button type="button" className="btn sm" disabled={!stack.length}
+                    onClick={() => { close(); exportBends(); }}>
+                    <DownloadIcon /> Export JSON
+                  </button>
+                  <button type="button" className="btn sm"
+                    onClick={() => { importRef.current?.click(); close(); }}>
+                    Import JSON
+                  </button>
+                </div>
+              </div>
             )}
-          </div>
-          <p className="hint mt-1">
-            {focusedBend
-              ? "Click to target, shift+click a range, drag a span (alt+drag removes). Solid rings: this bend. Dashed: the rest."
-              : "Click a layer to start a bend on it."}
-          </p>
-          <div className="row wrap gap-2 bend-map-chips">
-            {groups.map((g) => (
-              <button type="button" key={g}
-                className={`pill chip ${focusedBend?.targets.includes(g) ? "on" : ""}`}
-                onClick={() => toggleGroup(g)}>{g}</button>
-            ))}
-          </div>
-          <UnetVisualizer
-            graph={graph}
-            focusTargets={focusTargets}
-            otherTargets={otherTargets}
-            hasFocus={!!focusedBend}
-            onToggle={onMapToggle}
-            onCreateFromNode={onCreateFromNode}
+          </Popover>
+          {/* Outside the popover, which unmounts on close: the file picker
+              outlives it. */}
+          <input
+            ref={importRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden-file"
+            onChange={(e) => { importBends(e.target.files?.[0]); e.target.value = ""; }}
           />
         </div>
-        <div className="bend-compare-col">
-          <div className="card bend-compare-card">
-            <div className="row between center wrap gap-2">
-              <h3 className="mb-0">Compare</h3>
-              {(genPlain || genBent) && (
-                <button type="button" className="btn ghost sm" onClick={() => setCompareOpen(true)}>
-                  Enlarge
-                </button>
-              )}
-            </div>
-            <p className="hint mb-2">
-              Same seed, plain then bent. The plain side is reused until the model, settings or seed change.
-            </p>
-            <div className="row center wrap gap-2">
-              {genBusy ? (
-                <button type="button" className="btn danger" onClick={async () => { if (genJob) await api.post(`/jobs/${genJob.id}/cancel`); }}>Stop</button>
-              ) : (
-                <button type="button" className="btn primary" onClick={generateCompare} disabled={!modelPath || !stack.length}>
-                  Compare samples
-                </button>
-              )}
-              {genBusy && genJob && <span className="sub">{genJob.message || "Generating…"}</span>}
-            </div>
-            {(genPlain || genBent) && (
-              <ComparePair plain={genPlain} bent={genBent} onEnlarge={() => setCompareOpen(true)} />
-            )}
-          </div>
-        </div>
       </div>
 
-      <div className="card bend-stack-card">
-        <BendEditor
-          ops={ops}
-          nodes={nodes}
-          stack={stack}
-          setStack={setStack}
-          focusedId={focusedBendId}
-          setFocusedId={(id) => { setFocusedBendId(id); setNote(null); }}
-          addBend={() => addBend()}
-          updateBend={updateBend}
-          note={note}
-        />
+      <div className="bend-work">
+        <div className="card bend-bench">
+          {/* The map and the settings of the bend it is editing, side by side:
+              the map sets where a bend acts, the panel everything else. They
+              wrap into one column when the card is too narrow for both. */}
+          <div className="bend-bench-top">
+            <div className="bend-bench-map">
+              <div className="row between center wrap gap-2">
+                <div className="row center wrap gap-2">
+                  <h3 className="mb-0">Model map</h3>
+                  {focusedBend ? (
+                    <span className="pill accent">
+                      Editing #{focusIndex + 1} {opMap[focusedBend.op]?.label || focusedBend.op}
+                    </span>
+                  ) : (
+                    <span className="pill">No bend selected</span>
+                  )}
+                </div>
+              </div>
+              <p className="hint mt-1 mb-2">{MAP_HINT[shown][focusedBend ? "focus" : "empty"]}</p>
+              {view === "simple" ? (
+                <BendPipeline
+                  graph={graph}
+                  focusTargets={focusTargets}
+                  holders={holders}
+                  hasFocus={!!focusedBend}
+                  activeGroups={(focusedBend?.targets || []).filter(isGroup)}
+                  onToggle={onMapToggle}
+                  onToggleGroup={toggleGroup}
+                  onCreateFromNode={onCreateFromNode}
+                />
+              ) : (
+                <UnetVisualizer
+                  graph={graph}
+                  focusTargets={focusTargets}
+                  holders={holders}
+                  hasFocus={!!focusedBend}
+                  density={grain}
+                  showInner={showInner}
+                  onToggle={onMapToggle}
+                  onCreateFromNode={onCreateFromNode}
+                />
+              )}
+            </div>
+            <BendInspector
+              b={focusedBend}
+              index={focusIndex}
+              opDef={opMap[focusedBend?.op]}
+              ops={ops}
+              nodes={nodes}
+              points={points}
+              note={note?.bendId === focusedBendId ? note.groups : null}
+              update={updateBend}
+              remove={removeBend}
+              duplicate={duplicateBend}
+            />
+          </div>
+
+          {/* The stack lives in the same card as the map: the map is how you set
+              the layers of whichever card below is focused. */}
+          <div className="bend-work-sep" />
+          <BendEditor
+            ops={ops}
+            nodes={nodes}
+            points={points}
+            stack={stack}
+            setStack={setStack}
+            focusedId={focusedBendId}
+            setFocusedId={(id) => { setFocusedBendId(id); setNote(null); }}
+            addBend={() => addBend()}
+            headExtra={(
+              <button type="button" className="btn ghost sm" disabled={!stack.length}
+                onClick={() => setPresetsOpen(true)}>
+                Save as preset…
+              </button>
+            )}
+          />
+        </div>
+
+        <div className="card bend-compare-card">
+          <div className="row between center gap-2">
+            <h3 className="mb-0">Compare</h3>
+            <div className="row center gap-2">
+              <Seg ariaLabel="How to show the pair" tabs={MODES} value={compareMode}
+                   onChange={setCompareMode} size="sm" />
+              <button type="button" className="btn icon" aria-label="Enlarge the compare"
+                title="Enlarge" disabled={!hasPair} onClick={() => setCompareOpen(true)}>
+                <ExpandIcon />
+              </button>
+            </div>
+          </div>
+          {hasPair ? (
+            <CompareViewer plain={pair.plain} bent={pair.bent} mode={compareMode} />
+          ) : (
+            <div className="cmp-empty sub">
+              {genBusy ? "Sampling…" : "The same seed, without and then with your bends, shows up here."}
+            </div>
+          )}
+          <CompareMeta meta={pair.meta} />
+          {genBusy ? (
+            <div className="col gap-1">
+              <button type="button" className="btn danger w-full"
+                onClick={async () => { if (genJob) await api.post(`/jobs/${genJob.id}/cancel`); }}>
+                Stop
+              </button>
+              {genJob && (
+                <>
+                  <Progress value={genJob.progress || 0} />
+                  <span className="sub">{genJob.message || "Generating…"}</span>
+                </>
+              )}
+            </div>
+          ) : (
+            <button type="button" className="btn primary w-full" onClick={generateCompare}
+              disabled={!modelPath || !stack.length}>
+              Compare samples
+            </button>
+          )}
+          <p className="hint mb-0">
+            Same seed, plain then bent. The plain side is reused until the model, settings or seed change.
+          </p>
+          <CompareHistory
+            history={history}
+            shownId={shownTry}
+            ops={ops}
+            onShow={setShownTry}
+            onRestore={restoreTry}
+            restorable={restorable}
+          />
+        </div>
       </div>
 
       {compareOpen && (
         <Modal
-          title="Compare: without vs with bends"
+          title="Compare"
           wide
           onClose={() => setCompareOpen(false)}
-          footer={<button type="button" className="btn ghost" onClick={() => setCompareOpen(false)}>Close</button>}
+          footer={(
+            <>
+              <button type="button" className="btn" onClick={downloadPair} disabled={!hasPair}>
+                <DownloadIcon /> Download pair
+              </button>
+              <button type="button" className="btn primary" disabled={!pair.bent}
+                onClick={() => { setCompareOpen(false); openFrameInCreate({ image: pair.bent, card: pair.card }); }}>
+                Open bent in Create
+              </button>
+              <button type="button" className="btn ghost" onClick={() => setCompareOpen(false)}>Close</button>
+            </>
+          )}
         >
-          <ComparePair plain={genPlain} bent={genBent} large />
+          <div className="row between center wrap gap-2 mb-2">
+            <Seg ariaLabel="How to show the pair" tabs={MODES_LARGE} value={bigMode}
+                 onChange={setBigMode} size="sm" />
+            <CompareMeta meta={pair.meta} />
+          </div>
+          <CompareViewer plain={pair.plain} bent={pair.bent} mode={bigMode} large />
+          <StackChips stack={pair.stack} ops={ops} />
         </Modal>
       )}
 

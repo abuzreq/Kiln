@@ -572,65 +572,379 @@ body {
 .merge-shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .merge-result-mark { display: flex; flex-direction: column; align-items: center; gap: var(--s-1); padding: var(--s-4); text-align: center; }
 .empty-shot { border-style: dashed; }
-.bend-layout {
+/* The Bend screen's header: what it is on the left, how to look at it on the
+   right. A row, not a card -- it was a whole card for a title and a sentence. */
+.bend-toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: var(--s-2) var(--s-3);
+}
+.bend-toolbar-id { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-2) var(--s-3); min-width: 0; }
+.bend-title { margin: 0; font-size: var(--fs-display); font-weight: 700; letter-spacing: -0.01em; }
+.bend-toolbar-tools { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-2); }
+.bend-toolbar-sep { width: 1px; height: 22px; background: var(--line); margin: 0 var(--s-1); }
+.bend-share { width: 300px; }
+.bend-share .sub { margin: 0 0 var(--s-3); line-height: 1.45; }
+
+/* Popover: a panel dropped from its own button (ui.jsx Popover). */
+.popover-anchor { position: relative; display: inline-flex; }
+.popover {
+  position: absolute; top: calc(100% + 6px); z-index: 150;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: var(--s-3); box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+}
+.popover-end { right: 0; }
+.popover-start { left: 0; }
+
+/* Numbers that change in place (amounts, counts, read-outs) keep their width. */
+.tnum { font-variant-numeric: tabular-nums; }
+
+/* The work area: the map and the stack it drives in one card on the left, the
+   two samples beside them on the right where they have room to be looked at. */
+.bend-work {
   display: grid;
-  /* Compare | map | stack. The comparison is the point of the screen -- it is
-     the only thing that says what a bend did -- so it gets a real column and the
-     map gives up the width for it. */
-  /* Save | map | compare. Compare is wider than the save column: it is the
-     only thing on the screen that shows what a bend actually did. */
-  grid-template-columns: minmax(260px, 330px) minmax(0, 1fr) minmax(330px, 440px);
+  /* Compare is capped: past ~420px its images only get taller, while the map
+     and the settings panel beside it use every pixel they are given. */
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 420px);
   gap: var(--s-3);
   align-items: start;
 }
 @media (max-width: 1100px) {
-  /* Below this the map would be narrower than the picture it draws, so compare
-     goes full width on top and the other two share the row. */
-  .bend-layout { grid-template-columns: minmax(260px, 330px) minmax(0, 1fr); }
-  .bend-compare-col { grid-column: 1 / -1; order: -1; }
+  /* minmax: a plain 1fr cannot shrink below its widest child, and the map
+     card held the whole column wider than the window. */
+  .bend-work { grid-template-columns: minmax(0, 1fr); }
 }
-.bend-side { display: flex; flex-direction: column; gap: var(--s-3); min-width: 0; }
-.bend-compare-col { min-width: 0; }
-/* The enlarged pair fills the modal: samples are small (128-512px), and a
-   lightbox that showed them at natural size would not be an enlargement. */
-.compare-large .preview-box { max-height: min(62vh, 560px); }
-.compare-large .preview-box img { width: 100%; height: 100%; }
-.preview-box img.clickable { cursor: zoom-in; }
-@media (max-width: 900px) {
-  .bend-layout { grid-template-columns: 1fr; }
+@media (min-width: 1101px) {
+  .bend-work > :last-child { position: sticky; top: var(--s-3); }
 }
-.bend-stack-card { min-height: 0; }
+.bend-work-sep { border-top: 1px solid var(--line); margin: var(--s-3) 0 0; }
+
+/* The map and the focused bend's settings. Side by side while the card has
+   room for both; the panel drops under the map when it does not. */
+.bend-bench-top { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--s-3) var(--s-4); }
+.bend-bench-map { flex: 1 1 440px; min-width: 0; }
+.bend-inspector {
+  flex: 0 1 320px; min-width: 280px;
+  display: flex; flex-direction: column; gap: var(--s-3);
+  padding: var(--s-3); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--bg-2);
+}
+.bend-inspector.empty { align-self: stretch; justify-content: center; border-style: dashed; background: transparent; text-align: center; }
+.bend-inspector .slider-row { margin-bottom: 0; }
+.bend-inspector .callout { margin: 0; }
+.bend-inspector-head { display: flex; align-items: center; gap: var(--s-2); }
+/* Op picker (OpPicker.jsx): ops grouped by what they do, with the one under the
+   pointer or cursor explained at the bottom before you switch to it. */
+.op-picker { position: relative; flex: 1 1 auto; min-width: 0; }
+.op-picker-btn {
+  width: 100%; display: flex; align-items: center; justify-content: space-between; gap: var(--s-2);
+  padding: 6px 10px; border-radius: var(--radius-sm); border: 1px solid var(--line);
+  background: var(--bg-1); color: var(--text); font: inherit; font-weight: 600; cursor: pointer;
+}
+.op-picker-btn:hover, .op-picker-btn[aria-expanded="true"] { border-color: var(--accent); }
+.op-picker-btn svg { flex-shrink: 0; color: var(--text-dim); }
+.op-picker-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.op-picker-pop {
+  position: absolute; top: calc(100% + 6px); left: -30px; right: -46px; z-index: 150;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45); overflow: hidden;
+}
+.op-picker-list { max-height: 320px; overflow-y: auto; padding: 6px; outline: none; }
+.op-picker-group { display: flex; align-items: baseline; gap: var(--s-2); padding: 5px 4px; }
+.op-picker-group + .op-picker-group { border-top: 1px solid var(--line); }
+.op-picker-cat {
+  flex: 0 0 74px; font-size: var(--fs-xs); font-weight: 600; letter-spacing: 0.05em;
+  text-transform: uppercase; color: var(--text-faint);
+}
+.op-picker-opts { display: flex; flex-wrap: wrap; gap: 3px; }
+.op-picker-opt {
+  padding: 3px 8px; border-radius: 6px; font-size: var(--fs-sm); color: var(--text); cursor: pointer;
+}
+.op-picker-opt.active { background: var(--bg-3); }
+.op-picker-opt.sel { color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); font-weight: 600; }
+.op-picker-list:focus-visible .op-picker-opt.active { outline: 2px solid var(--accent); outline-offset: 1px; }
+.op-picker-help {
+  margin: 0; padding: var(--s-2) var(--s-3); border-top: 1px solid var(--line);
+  font-size: var(--fs-sm); line-height: 1.45; color: var(--text-dim); min-height: 52px;
+}
+.op-picker-help b { color: var(--text); }
+
+/* Two params shown as one control (BendEditor PAIRS). */
+.param-pair { display: flex; flex-direction: column; gap: 6px; }
+.param-pair-label { font-size: var(--fs-sm); color: var(--text-dim); }
+.param-pair-ends { font-size: var(--fs-xs); }
+.param-xy { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-2); }
+.num-field {
+  display: flex; align-items: center; gap: var(--s-2);
+  padding: 2px 4px 2px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg-1);
+}
+.num-field:focus-within { border-color: var(--accent); }
+.num-field span { font-size: var(--fs-sm); color: var(--text-faint); font-weight: 600; }
+.num-field input {
+  flex: 1; min-width: 0; border: 0; background: transparent; color: var(--text);
+  text-align: right; font-variant-numeric: tabular-nums; padding: 4px 2px;
+}
+.num-field input:focus { outline: none; }
+.bend-inspector-help { margin: 0; line-height: 1.5; }
+.bend-inspector-section { display: flex; flex-direction: column; gap: var(--s-2); }
+/* Where: chips never widen the panel -- a long layer name truncates, and a long
+   list of single layers scrolls inside its own box. */
+.bend-inspector { max-width: 360px; }
+.where { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.where-chip { max-width: 100%; min-width: 0; padding: 4px 10px; }
+.where-chip > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.where-count { opacity: 0.8; font-weight: 400; }
+.where-toggle { align-self: flex-start; }
+.where-list {
+  display: flex; flex-direction: column; gap: 6px; max-height: 180px; overflow-y: auto;
+  padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg-1);
+}
+.where-level { display: grid; grid-template-columns: 74px minmax(0, 1fr); gap: 6px; align-items: start; }
+.where-level-name { font-size: var(--fs-xs); color: var(--text-faint); padding-top: 5px; }
+.where-level-chips { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+.bend-inspector-foot { display: flex; justify-content: flex-end; gap: var(--s-2); border-top: 1px solid var(--line); padding-top: var(--s-2); }
+.bend-cat {
+  display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 4px;
+  background: var(--bg-3); color: var(--text-dim);
+  font-size: var(--fs-xs); font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+}
+/* A bend's number is its place in the stack, which is also the order it runs. */
+.bend-badge {
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  width: 20px; height: 20px; border-radius: 50%;
+  background: var(--bg-3); border: 1px solid var(--line); color: var(--text-dim);
+  font-size: var(--fs-xs); font-weight: 700; font-variant-numeric: tabular-nums;
+}
+.bend-badge.on { background: var(--accent); border-color: var(--accent); color: #1a1206; }
+.bend-badge.sm { width: 16px; height: 16px; font-size: 9.5px; }
+.bend-badge.off { background: transparent; border-style: dashed; color: var(--text-faint); }
+.holder-badges { display: inline-flex; gap: 3px; margin-left: 6px; vertical-align: middle; }
+.unet-legend-this { margin-left: auto; }
+.unet-legend-ring { width: 14px; height: 10px; border-radius: 5px; border: 2px solid var(--accent); }
+.switch {
+  flex-shrink: 0; width: 34px; height: 20px; padding: 2px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--bg-3); cursor: pointer;
+  display: inline-flex; align-items: center;
+}
+.switch span { width: 14px; height: 14px; border-radius: 50%; background: var(--text-dim); transition: transform 120ms ease; }
+.switch.on { background: var(--accent); border-color: var(--accent); }
+.switch.on span { background: #1a1206; transform: translateX(14px); }
+
+/* Run window (RunWindow.jsx): when during sampling a bend acts. */
+.run-window { display: flex; flex-direction: column; gap: 6px; }
+.run-window-val { font-size: var(--fs-sm); color: var(--text); }
+/* Two-handle bar (DualRange.jsx): a span of values, the space between the
+   handles filled. */
+.dual-range {
+  position: relative; height: 26px; margin: 0 7px; cursor: pointer; touch-action: none;
+  background: linear-gradient(var(--bg-1), var(--bg-1)) 0 50% / 100% 10px no-repeat;
+  border-radius: 5px;
+}
+.dual-range-fill {
+  position: absolute; top: 8px; height: 10px; border-radius: 5px;
+  background: rgba(255, 122, 69, 0.55); /* where color-mix is missing */
+  background: color-mix(in srgb, var(--accent) 55%, transparent); border: 1px solid var(--accent);
+  box-sizing: border-box; pointer-events: none;
+}
+.dual-range-handle {
+  position: absolute; top: 3px; width: 12px; height: 20px; margin-left: -6px;
+  border-radius: 4px; background: var(--text); cursor: ew-resize;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+.dual-range-handle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.dual-range-handle.hi { z-index: 1; }
+/* The run window adds quarter ticks: where "early" and "late" split. */
+.run-window-track {
+  background:
+    linear-gradient(var(--line), var(--line)) 25% 50% / 1px 14px no-repeat,
+    linear-gradient(var(--line), var(--line)) 50% 50% / 1px 14px no-repeat,
+    linear-gradient(var(--line), var(--line)) 75% 50% / 1px 14px no-repeat,
+    linear-gradient(var(--bg-1), var(--bg-1)) 0 50% / 100% 10px no-repeat;
+}
+.run-window-ends { display: flex; justify-content: space-between; font-size: var(--fs-xs); }
+.run-window-shortcuts { display: flex; gap: var(--s-1); }
+.run-window-shortcuts .btn { flex: 1; }
+.run-mini { position: relative; display: block; height: 4px; border-radius: 2px; background: var(--bg-1); }
+.run-mini > span { position: absolute; top: 0; bottom: 0; border-radius: 2px; background: var(--text-dim); }
+.run-mini.hot > span { background: var(--accent); }
 .bend-editor { min-height: 0; }
+
+/* Presets popover (BendPresets.jsx): save the stack, then starters as cards
+   that lead with what they do, then your own as rows. */
+.bend-presets-pop { width: min(720px, calc(100vw - 32px)); max-height: min(78vh, 760px); overflow-y: auto; }
+.bend-presets { display: flex; flex-direction: column; gap: var(--s-3); }
+.preset-tabs { gap: var(--s-2); flex-wrap: wrap; }
+.preset-filter {
+  flex: 1 1 160px; max-width: 260px; padding: 5px 10px; border-radius: var(--radius-sm);
+  border: 1px solid var(--line); background: var(--bg-1); color: var(--text); font: inherit; font-size: var(--fs-sm);
+}
+.preset-filter:focus { outline: none; border-color: var(--accent); }
+.preset-save { display: flex; gap: var(--s-2); }
+.preset-save-field {
+  flex: 1; display: flex; align-items: center; gap: var(--s-2); min-width: 0;
+  padding: 0 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg-1);
+}
+.preset-save-field:focus-within { border-color: var(--accent); }
+.preset-save-field span { font-size: var(--fs-sm); color: var(--text-dim); white-space: nowrap; }
+.preset-save-field input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--text); padding: 7px 0; }
+.preset-save-field input:focus { outline: none; }
+.preset-note { margin: calc(-1 * var(--s-2)) 0 0; font-size: var(--fs-xs); }
+.preset-grid {
+  list-style: none; margin: 0; padding: 0;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: var(--s-2);
+}
+.preset-card {
+  display: flex; flex-direction: column; gap: 6px; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg-3);
+}
+.preset-card:hover, .preset-card:focus-within { border-color: var(--accent); }
+.preset-name { font-weight: 650; }
+.preset-lead { margin: 0; font-size: var(--fs-sm); line-height: 1.45; color: var(--text-dim); }
+.preset-bends { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.preset-bends li { display: grid; grid-template-columns: auto minmax(40px, 1fr); align-items: center; gap: var(--s-2); }
+.preset-bends li > span:first-child { font-size: var(--fs-xs); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Which stages a preset reaches, each segment as wide as its share of layers. */
+.preset-stages { display: flex; gap: 2px; width: 72px; height: 6px; flex-shrink: 0; }
+.preset-stages span { flex-basis: 0; border-radius: 2px; background: var(--bg-1); }
+.preset-stages span.on { background: var(--stage); }
+.preset-rows {
+  list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: var(--radius-sm);
+}
+.preset-rows li { display: flex; align-items: center; gap: var(--s-2); padding: 6px 10px; }
+.preset-rows li + li { border-top: 1px solid var(--line); }
+.preset-row-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; flex-shrink: 0; }
+.preset-row-sum { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Compare (BendCompare.jsx). */
+.bend-compare-card { display: flex; flex-direction: column; gap: var(--s-2); }
+.bend-compare-card .hint { margin: 0; }
+.cmp-empty {
+  display: flex; align-items: center; justify-content: center; aspect-ratio: 1; padding: var(--s-4);
+  text-align: center; border: 1px dashed var(--line); border-radius: var(--radius-sm);
+}
+.cmp-viewer { width: 100%; }
+.cmp-frame {
+  position: relative; margin: 0; overflow: hidden; border-radius: var(--radius-sm);
+  border: 1px solid var(--line); background: var(--bg-2);
+}
+.cmp-frame img, .cmp-frame canvas { display: block; width: 100%; height: auto; }
+.cmp-viewer.large .cmp-frame img, .cmp-viewer.large .cmp-frame canvas {
+  max-height: 68vh; object-fit: contain;
+}
+.cmp-viewer.large > .cmp-wipe, .cmp-viewer.large > .cmp-flip, .cmp-viewer.large > .cmp-diff {
+  max-width: min(68vh, 100%); margin: 0 auto;
+}
+.cmp-split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-2); }
+.cmp-tag {
+  position: absolute; top: 6px; padding: 2px 8px; border-radius: 999px;
+  background: rgba(14, 15, 19, 0.78); color: var(--text); font-size: var(--fs-xs); font-weight: 600;
+  pointer-events: none;
+}
+.cmp-tag.left { left: 6px; }
+.cmp-tag.right { right: 6px; }
+.cmp-tag.hot { color: var(--accent-2); }
+.cmp-missing { display: flex; align-items: center; justify-content: center; aspect-ratio: 1; }
+.cmp-wipe { cursor: ew-resize; touch-action: none; user-select: none; }
+.cmp-wipe-top { position: absolute; inset: 0; height: 100% !important; }
+.cmp-wipe-line { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--text); pointer-events: none; }
+.cmp-wipe-handle {
+  position: absolute; top: 50%; width: 26px; height: 26px; margin: -13px 0 0 -13px; border-radius: 50%;
+  background: var(--text); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+.cmp-wipe-handle::before {
+  content: "‹ ›"; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  color: var(--bg); font-size: 13px; font-weight: 700; letter-spacing: 1px;
+}
+.cmp-wipe-handle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.cmp-flip { display: block; width: 100%; padding: 0; cursor: pointer; font: inherit; color: inherit; }
+.cmp-flip-hint {
+  position: absolute; bottom: 6px; right: 6px; padding: 2px 8px; border-radius: 999px;
+  background: rgba(14, 15, 19, 0.78); color: var(--text-dim); font-size: var(--fs-xs);
+}
+.cmp-meta { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); flex-wrap: wrap; }
+.cmp-stack { list-style: none; margin: var(--s-3) 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.cmp-stack li {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px 3px 3px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--bg-2); font-size: var(--fs-sm);
+}
+.cmp-history { display: flex; flex-direction: column; gap: 6px; padding-top: var(--s-2); border-top: 1px solid var(--line); }
+.cmp-history-row { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; }
+.cmp-try {
+  display: flex; flex-direction: column; gap: 3px; padding: 0; border: 0; background: none;
+  color: var(--text-faint); font: inherit; font-size: var(--fs-xs); cursor: pointer; text-align: left;
+}
+.cmp-try img {
+  width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 5px;
+  border: 1px solid var(--line); box-sizing: border-box; opacity: 0.75;
+}
+.cmp-try:hover img { opacity: 1; }
+.cmp-try.on { color: var(--text); }
+.cmp-try.on img { border: 2px solid var(--accent); opacity: 1; }
+.cmp-restore { gap: var(--s-2); }
 /* The stack reads left to right across the full width: a bend is a step in a
    chain, and stacked vertically in a narrow column it could show two at a time
    before scrolling. Cards keep a fixed width so the row scrolls predictably. */
 .bend-stack {
   display: flex;
   flex-direction: row;
-  align-items: flex-start;
+  align-items: stretch;
   overflow-x: auto;
-  gap: var(--s-2);
   padding-bottom: var(--s-2);
   margin-top: var(--s-2);
 }
-/* Wide enough for the op name to read in full next to its number and category
-   pill -- at 260px "Fourier amplify" clipped to a few letters. */
-.bend-stack .bend-card { flex: 0 0 380px; width: 380px; }
-.bend-stack .bend-card.focused { flex-basis: 420px; width: 420px; }
-.bend-card-body { max-height: min(46vh, 420px); overflow-y: auto; }
+/* A card names its bend and nothing else (editing is beside the map), so it is
+   narrow: wide enough for "Fourier amplify" with its badge and amount. */
+.bend-stack .bend-card { flex: 0 0 236px; width: 236px; }
+.bend-stack-empty { flex: 1; margin-right: var(--s-2); }
 .bend-card {
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--bg-2);
   overflow: hidden;
+  transition: opacity 120ms ease;
 }
-.bend-card.dim { opacity: 0.55; }
-.bend-card.focused { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.bend-card.focused { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.bend-card.focused .bend-card-head { background: var(--accent-soft); }
+/* Off: kept in the stack but not applied, so it reads as an outline of itself. */
+.bend-card.off { border-style: dashed; background: transparent; }
+.bend-card.off .bend-card-head { background: transparent; color: var(--text-dim); }
+.bend-card.off .bend-card-op b { text-decoration: line-through; text-decoration-color: var(--text-faint); }
+/* On, but hooked into nothing: it would silently do nothing in a run. */
+.bend-card.idle:not(.focused) { border-color: rgba(251, 191, 36, 0.5); }
+.bend-card.dragging { opacity: 0.4; }
 .bend-card-head {
-  display: flex; flex-direction: column; gap: 6px; padding: var(--s-2) 10px;
+  display: flex; flex-direction: column; gap: 7px; padding: var(--s-2) 10px;
   cursor: pointer; user-select: none; background: var(--bg-3);
-  width: 100%; border: none; color: inherit; font: inherit; text-align: left;
+  width: 100%; height: 100%; border: none; color: inherit; font: inherit; text-align: left;
 }
+.bend-grip { flex-shrink: 0; fill: var(--text-faint); opacity: 0.6; cursor: grab; }
+.bend-card:hover .bend-grip { opacity: 1; }
+.bend-off-tag {
+  flex-shrink: 0; padding: 0 5px; border: 1px solid var(--line); border-radius: 4px;
+  font-size: var(--fs-xs); font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
+}
+.bend-card-warn { font-size: var(--fs-xs); color: var(--warn); line-height: 14px; }
+/* The gaps between cards: a › while the stack is still (it runs left to right),
+   an orange line where a dragged card would land. */
+.bend-join {
+  flex: 0 0 18px; display: flex; align-items: center; justify-content: center;
+  color: var(--text-faint); font-size: var(--fs-lg); position: relative;
+}
+.bend-join.edge { flex-basis: 8px; }
+.bend-join.edge:first-child { flex-basis: 0; margin-right: 8px; }
+.bend-join.drop { color: transparent; }
+.bend-join.drop::before {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 50%; width: 3px; margin-left: -1.5px;
+  border-radius: 2px; background: var(--accent);
+}
+.bend-add-tile {
+  flex: 0 0 110px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 2px; min-height: 76px; margin-left: var(--s-1);
+  border: 1px dashed var(--line); border-radius: var(--radius-sm); background: transparent;
+  color: var(--text-dim); font: inherit; font-size: var(--fs-sm); font-weight: 600; cursor: pointer;
+}
+.bend-add-tile span { font-size: 20px; line-height: 1; }
+.bend-add-tile:hover { border-color: var(--accent); color: var(--accent); }
+.bend-add-tile:disabled { opacity: 0.45; cursor: not-allowed; }
 .bend-card-head-main { display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0; }
 .bend-card-op {
   min-width: 0;
@@ -639,22 +953,92 @@ body {
   white-space: nowrap;
   font-size: var(--fs-sm);
 }
-.bend-card-head select.grow { width: auto; min-width: 0; }
 
 /* Per-bend footprint: the U in miniature, lit where this bend hooks in. */
 .bend-footprint { display: flex; align-items: center; gap: 8px; padding-left: 2px; }
-.bend-footprint svg { display: block; flex-shrink: 0; }
+.bend-footprint svg { display: block; flex: 1 1 auto; min-width: 0; height: auto; }
 .bend-footprint-count { white-space: nowrap; }
 .bend-footprint-count.none { color: var(--text-dim); font-style: italic; }
 
 /* Group quick-select sits with the map, so every way of picking layers is together. */
-.bend-map-chips { margin-bottom: var(--s-2); }
-.unet-map { touch-action: none; }
+/* The signal path: the model as three stages you can bend whole, with the
+   layers inside one of them on demand. Plain DOM, no geometry. */
+/* One line, noise to image: a path that wraps stops reading as a path. The
+   stages give up width instead, and the row scrolls only past that. */
+.bend-pipe { display: flex; align-items: stretch; gap: var(--s-2); overflow-x: auto; padding-bottom: 2px; }
+.bend-pipe-end {
+  flex-shrink: 0; align-self: center; display: flex; flex-direction: column; align-items: center; gap: 4px;
+  font-size: var(--fs-xs); color: var(--text-dim); letter-spacing: 0.04em; text-transform: uppercase;
+}
+.bend-pipe-swatch { width: 26px; height: 26px; border-radius: 6px; border: 1px solid var(--line); }
+.bend-pipe-swatch.noise {
+  background: repeating-linear-gradient(45deg, var(--bg-3) 0 3px, var(--bg-1) 3px 6px);
+}
+.bend-pipe-swatch.image { background: linear-gradient(135deg, var(--bg-3), var(--accent-soft)); }
+.bend-pipe-arrow { flex-shrink: 0; align-self: center; color: var(--text-dim); opacity: 0.6; }
+/* A stage card: its colour along the top edge (the same colour the map and its
+   legend use), the stage, a strip of its layers, and a footer that opens them. */
+.bend-pipe-stage {
+  display: flex; flex-direction: column; flex: 1 1 0; min-width: 112px;
+  border: 1px solid var(--line); border-top: 3px solid var(--stage, var(--line));
+  border-radius: var(--radius-sm); background: var(--bg-3); overflow: hidden;
+}
+.bend-pipe-pill {
+  flex: 1 1 auto; min-width: 0; text-align: left; cursor: pointer;
+  display: flex; flex-direction: column; gap: 4px;
+  padding: var(--s-2) 10px; border: 0; background: transparent; color: var(--text); font: inherit;
+}
+.bend-pipe-title { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); }
+.bend-pipe-pill b { font-size: 13px; }
+.bend-pipe-pill .sub { font-size: 11px; line-height: 1.25; }
+.bend-pipe-count { display: inline-flex; align-items: center; font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+.bend-pipe-count .holder-badges { margin-left: 5px; }
+/* One tick per layer, in order: filled for this bend, outlined for another. */
+.bend-pipe-ticks { display: flex; gap: 3px; margin-top: 3px; }
+.bend-pipe-ticks i {
+  flex: 1 1 0; max-width: 8px; min-width: 2px; height: 14px; border-radius: 2px;
+  background: var(--bg-1); box-sizing: border-box;
+}
+.bend-pipe-ticks i.other { background: transparent; border: 1px solid var(--text-dim); }
+.bend-pipe-ticks i.on { background: var(--accent); }
+.bend-pipe-stage:hover { border-color: var(--accent); border-top-color: var(--stage, var(--accent)); }
+.bend-pipe-stage.some { border-color: var(--accent); border-top-color: var(--stage); }
+.bend-pipe-stage.on {
+  border-color: var(--accent); border-top-color: var(--stage); box-shadow: 0 0 0 1px var(--accent);
+}
+.bend-pipe-stage.on .bend-pipe-count, .bend-pipe-stage.some .bend-pipe-count { color: var(--accent); }
+.bend-pipe-open {
+  border: 0; border-top: 1px solid var(--line); background: transparent; color: var(--text-dim);
+  padding: 5px 10px; text-align: left; font: inherit; font-size: var(--fs-xs); cursor: pointer;
+}
+.bend-pipe-open:hover { color: var(--accent); }
+.bend-pipe-stage.open .bend-pipe-open { color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+.bend-pipe-layers { margin-top: var(--s-3); }
+.pill.chip.num { min-width: 34px; justify-content: center; }
+.pill.chip.other { border-style: dashed; }
+
+/* The map draws itself at its own size and scales into the column; the
+   min-width floor is what makes a very narrow column scroll instead of
+   shrinking the layers into illegibility. */
+.unet-map { touch-action: none; width: 100%; height: auto; display: block; max-width: 100%; }
 .unet-map.dragging { cursor: crosshair; }
 .unet-node { cursor: pointer; outline: none; }
 .unet-node:focus-visible circle:last-of-type { stroke: var(--accent); stroke-width: 2.5; }
 .unet-marquee { fill: var(--accent); opacity: 0.14; pointer-events: none; }
-.bend-card-body { padding: 10px 12px 12px; border-top: 1px solid var(--line); }
+/* Skip arcs are targets: the wide transparent path is what you hit. */
+.unet-skip { cursor: pointer; outline: none; }
+.unet-skip:focus-visible path:nth-of-type(2) { stroke: var(--accent); stroke-width: 2.5; opacity: 1; }
+.unet-sat { cursor: pointer; }
+.bend-footprint-extra { color: var(--accent-2); }
+.unet-band line { pointer-events: none; }
+.unet-gutter, .unet-capsule g[role="button"], .unet-region, .unet-expand { cursor: pointer; outline: none; }
+.unet-gutter:hover text:first-of-type, .unet-expand:hover text { fill: var(--accent); }
+.unet-gutter:focus-visible rect, .unet-expand:focus-visible circle,
+.unet-capsule g[role="button"]:focus-visible rect, .unet-region:focus-visible path {
+  stroke: var(--accent); stroke-width: 2.5;
+}
+.unet-capsule rect, .unet-region path { transition: opacity 120ms ease; }
+.unet-capsule g[role="button"]:hover rect, .unet-region:hover path { opacity: 0.9; }
 
 .mb-grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--card-min, 200px), 1fr));
@@ -912,7 +1296,6 @@ body {
 .seed-random svg { display: block; }
 .sample-steps-seed { align-items: flex-end; }
 
-.bend-save-card { min-width: 0; }
 
 .studio-split, .work-split {
   display: grid;
@@ -1156,40 +1539,6 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .thumb.virtual-cell.clickable { cursor: zoom-in; }
 .thumb.virtual-cell.clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-/* Preset list: one row per stack, name over a one-line summary. Scrolls past a
-   handful rather than pushing the bend editor off screen. */
-.bend-preset-rows {
-  list-style: none;
-  margin: 0 0 var(--s-2);
-  padding: 0;
-  /* Two rows, then scroll. Nine presets listed in full pushed the bend editor
-     off the bottom of the card, which is the thing you are actually editing. */
-  max-height: 82px;
-  overflow-y: auto;
-}
-.bend-preset-row {
-  display: block;
-  width: 100%;
-  text-align: left;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  padding: 4px 7px;
-  cursor: pointer;
-  color: var(--text);
-  font-family: inherit;
-}
-.bend-preset-row:hover { background: var(--bg-3); border-color: var(--accent); }
-.bend-preset-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.bend-preset-row .name { display: block; font-size: var(--fs-sm); font-weight: 600; }
-.bend-preset-row .summary {
-  display: block;
-  font-size: var(--fs-xs);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .run-params { display: flex; flex-direction: column; gap: 2px; }
 .source-inner { position: relative; width: 100%; }
 .virtual-cell { position: absolute; }
@@ -1251,23 +1600,7 @@ input:disabled, select:disabled { opacity: 0.65; cursor: not-allowed; }
 .disclose-head:hover { background: var(--bg-2); }
 .disclose-head h3 { margin: 0; flex: 1; }
 .disclose-head .chev,
-.bend-card-chev {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 32px;
-  height: 32px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--line);
-  background: var(--bg-3);
-  color: var(--text);
-  font-size: var(--fs-lg);
-  line-height: 1;
-  font-weight: 700;
-}
-.disclose-head:hover .chev,
-.bend-card-head:hover .bend-card-chev {
+.disclose-head:hover .chev {
   border-color: var(--accent);
   color: var(--accent);
   background: var(--accent-soft);

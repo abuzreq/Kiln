@@ -65,6 +65,9 @@ def to_external(bends: list[dict], max_denoising_steps: int = DEFAULT_MAX_STEPS)
 
     ``targets`` are expected to be concrete layer names. Group names are written
     through unchanged and flagged, since no other tool knows what "encoder" means.
+    Kiln's slice targets ("skip:2", "mid_attn.qkv:v") are not layer paths at all
+    -- they bend part of a layer's input or output -- so they are left out and
+    counted instead of written as paths that would match nothing elsewhere.
     """
     steps = max(1, int(max_denoising_steps or DEFAULT_MAX_STEPS))
     active = [b for b in (bends or []) if b.get("active", True)]
@@ -72,10 +75,14 @@ def to_external(bends: list[dict], max_denoising_steps: int = DEFAULT_MAX_STEPS)
 
     entries = []
     groups_written = []
+    kiln_only = []
     for b in active:
         op = b.get("op")
         args = _out_args(op, b.get("params"))
         for target in b.get("targets") or []:
+            if ":" in str(target):
+                kiln_only.append(target)
+                continue
             if target in bending.GROUPS:
                 groups_written.append(target)
             entries.append({"path": target, "module_type": op, "module_args": args})
@@ -94,6 +101,7 @@ def to_external(bends: list[dict], max_denoising_steps: int = DEFAULT_MAX_STEPS)
         "skipped_inactive": skipped,
         "schedule_flattened": differ,
         "unexpanded_groups": sorted(set(groups_written)),
+        "kiln_only_targets": sorted(set(kiln_only)),
     }
     return doc, report
 
