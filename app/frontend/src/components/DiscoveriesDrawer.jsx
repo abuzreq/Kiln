@@ -3,6 +3,7 @@ import { api, mediaUrl, thumbUrl } from "../api.js";
 import { useApp } from "../state.jsx";
 import { ConfirmModal, Seg, Tooltip } from "./ui.jsx";
 import { bendPresetSummary } from "../bendSynopsis.js";
+import { bendCount, newBendId, normalizeStack } from "../bendStack.js";
 import DiscoveriesModal from "./DiscoveriesModal.jsx";
 
 // A drawer along the bottom of the app for what the novelty explorer found.
@@ -28,7 +29,6 @@ const METRIC_TABS = [
   { id: "dinov2", label: "DINOv2", tip: "Novelty by DINOv2 features: structure and texture, no language. Loads a 350 MB model the first time" },
 ];
 const METRIC_LABEL = Object.fromEntries(METRIC_TABS.map((t) => [t.id, t.label]));
-const newId = () => `b-${Math.random().toString(36).slice(2, 10)}`;
 
 const SCOPE_TABS = [
   { id: "all", label: "All models", tip: "Every model's discoveries" },
@@ -223,7 +223,15 @@ export default function DiscoveriesDrawer() {
   };
 
   const openInBend = (entry) => {
-    setBendStack((entry.bends || []).map((b) => ({ ...b, id: newId() })));
+    // An archive written by another build may hold bends in another shape.
+    // Opening one must not swap the current stack for nothing.
+    const { bends, dropped } = normalizeStack(entry.bends);
+    if (!bends.length) {
+      toast(dropped ? "This discovery's bends are in a shape this build cannot read" : "This discovery has no bends", "error");
+      return;
+    }
+    if (dropped) toast(`Left out ${bendCount(dropped, "entry", "entries")} of this discovery this build cannot read as a bend`, "warn");
+    setBendStack(bends.map((b) => ({ ...b, id: newBendId() })));
     // Both pictures already exist: the discovery itself, and the unbent render
     // the explorer measured its novelty against. Showing them beats re-running
     // a compare that would only reproduce them -- and on the same seed, so the

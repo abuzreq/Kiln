@@ -10,8 +10,7 @@ import { buildSamplePayload } from "../sampleSettings.jsx";
 import {
   expandGroup, isGroup, resolveMany, resolveTargets, toggleNodeTargets,
 } from "../bendTargets.js";
-
-const newBendId = () => Math.random().toString(36).slice(2);
+import { bendCount, newBendId, normalizeStack } from "../bendStack.js";
 
 const BEND_SWEEP_EMPTY = {
   bend: 0, param: "", from: 0, to: 1, count: 5,
@@ -192,11 +191,14 @@ export function BendWorkspace({ stack, setStack }) {
   const loadPreset = (name) => {
     const p = presets.find((x) => x.name === name);
     if (p) {
-      const loaded = (p.bends || []).map((b) => ({ ...b, id: newBendId() }));
+      // Checked here as well as in setStack, so focus lands on a bend that survived.
+      const { bends, dropped } = normalizeStack(p.bends);
+      const loaded = bends.map((b) => ({ ...b, id: newBendId() }));
       setStack(loaded);
       setFocusedBendId(loaded[0]?.id || null);
       setNote(null);
-      toast(`Loaded “${name}”`, "success");
+      if (dropped) toast(`Loaded “${name}”, leaving out ${bendCount(dropped, "entry", "entries")} this build cannot read as a bend`, "warn");
+      else toast(`Loaded “${name}”`, "success");
     }
   };
 
