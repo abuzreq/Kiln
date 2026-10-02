@@ -20,9 +20,12 @@ export const STRUCT = {
   // colW is the tightest a row is ever packed; maxStep is how far apart the
   // same row spreads when there is width to spend. The stair indent between
   // levels spreads the same way, between indentMin and indentMax.
-  colW: 34, maxStep: 80, indentMin: 18, indentMax: 56,
-  rowH: 40, wrapStep: 30, gutter: 70, marginR: 10, top: 18, bottom: 20,
+  colW: 34, maxStep: 96, indentMin: 18, indentMax: 72,
+  rowH: 46, wrapStep: 32, gutter: 70, marginR: 10, top: 20, bottom: 22,
   minContent: 240, maxContent: 440, rMin: 6, rMax: 13, capW: 86, capH: 20,
+  // Past this the sides would sit so far apart that a skip arc reads as a
+  // line across the page; the drawing scales up instead.
+  fillMax: 860,
 };
 
 /** Resolution level of a node: 0 at full res, 1 at a half, 2 at a quarter... */
@@ -123,13 +126,16 @@ export function layoutStructured(nodes, opts = {}) {
     ? Math.min(o.maxStep, Math.max(o.colW, half / (midLen - 1)))
     : o.colW;
 
-  // The drawing is as wide as the rows actually use -- no wider, so it never
-  // leaves a hole in the middle of a wide card.
+  // The drawing takes the whole box it is given (up to fillMax), with the
+  // encoder against the left edge and the decoder against the right, so the
+  // two sides of a level read as two sides and the skip arcs have a channel to
+  // cross. Without a measured box it is as wide as the rows use.
   const extent = rows.map((b, d) => d * indent + (rowLen[d] - 1) * step[d]);
   const contentW = Math.max(
     o.minContent,
     Math.max(...extent) * 2 + 1.5 * o.colW,
     (midLen - 1) * stepMid + o.colW,
+    o.available ? Math.min(o.fillMax, avail - o.gutter - o.marginR) : 0,
   );
   const width = o.gutter + contentW + o.marginR;
 

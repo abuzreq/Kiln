@@ -1,4 +1,4 @@
-"""Tools routes: super-resolution, sweep runner / contact sheets, GIF export."""
+"""Tools routes: super-resolution, sweep runner / contact sheets, GIF and video export."""
 import base64
 import io
 import time
@@ -72,6 +72,48 @@ def make_gif():
         "path": str(out),
         "frames": len(pal),
         "gif": "data:image/gif;base64," + base64.b64encode(buf.getvalue()).decode("ascii"),
+    })
+
+
+@bp.post("/video")
+def make_video():
+    """Assemble frames into a video: H.264 MP4, or WebM where H.264 is missing.
+
+    Same inputs as /gif. A video holds full colour where a GIF has 256, and is
+    what most places a sweep gets posted to want. Like the GIF, its recipe goes
+    in a sibling .json. The file is served by path rather than inlined: a few
+    seconds of 512px video is no size for a data URL.
+    """
+    import json
+
+    from app.core.tools.video import write_video
+
+    body = request.get_json(force=True, silent=True) or {}
+    (images,) = require(body, "images")
+    if len(images) < 2:
+        return err("a video needs at least two frames", 400)
+    fps = max(1.0, min(30.0, float(body.get("fps", 8))))
+    frames = [from_data_url(im) for im in images]
+    if body.get("pingpong"):
+        frames = frames + frames[-2:0:-1]
+    # A sweep of six frames at 8 fps is under a second; a player that does not
+    # loop would show it once and stop, so the whole run can be repeated.
+    frames = frames * as_int(body.get("repeat", 1), "repeat", 1, 20)
+
+    name = safe_name(body.get("name") or f"kiln_{int(time.time())}", "video name")
+    dest = workspace.sweeps if body.get("kind") == "sweep" else workspace.captures
+    try:
+        out, codec = write_video(frames, dest / name, fps)
+    except RuntimeError as e:
+        return err(str(e), 500)
+    if body.get("card"):
+        out.with_suffix(".json").write_text(json.dumps(body["card"], indent=2), encoding="utf-8")
+    return ok({
+        "path": str(out),
+        "frames": len(frames),
+        "codec": codec,
+        "format": out.suffix.lstrip("."),
+        "seconds": round(len(frames) / fps, 2),
     })
 
 

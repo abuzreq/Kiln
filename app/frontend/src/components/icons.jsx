@@ -260,6 +260,22 @@ export function PinIcon(props) {
   );
 }
 
+/** A die showing five: roll something random. */
+export function DiceIcon(props) {
+  return (
+    <Icon {...props}>
+      <rect x="3" y="3" width="18" height="18" rx="4" />
+      <g fill="currentColor" stroke="none">
+        <circle cx="8" cy="8" r="1.6" />
+        <circle cx="16" cy="8" r="1.6" />
+        <circle cx="12" cy="12" r="1.6" />
+        <circle cx="8" cy="16" r="1.6" />
+        <circle cx="16" cy="16" r="1.6" />
+      </g>
+    </Icon>
+  );
+}
+
 export function CaptureIcon(props) {
   return (
     <Icon {...props}>
