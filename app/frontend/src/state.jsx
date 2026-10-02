@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from "react";
 import { api } from "./api.js";
+import { bendCount, normalizeStack } from "./bendStack.js";
 
 const AppCtx = createContext(null);
 
@@ -17,13 +18,26 @@ const loadPlayTab = () => {
   return v;
 };
 
+// The stored stack, checked: another build or tool may have written this key in
+// a shape the Bend tab cannot draw. When anything had to be converted or
+// dropped, the fixed stack replaces it -- so the note shows once, not every
+// session -- and the original text is kept under kiln.bendStack.backup.
 function loadBendStack() {
+  let raw = null;
+  let result;
   try {
-    const raw = localStorage.getItem("kiln.bendStack");
-    return raw ? JSON.parse(raw) : [];
+    raw = localStorage.getItem("kiln.bendStack");
+    result = normalizeStack(raw ? JSON.parse(raw) : []);
   } catch {
-    return [];
+    result = { bends: [], dropped: 0, converted: 0, unreadable: true };
   }
+  if (raw && (result.dropped || result.converted || result.unreadable)) {
+    try {
+      localStorage.setItem("kiln.bendStack.backup", raw);
+      localStorage.setItem("kiln.bendStack", JSON.stringify(result.bends));
+    } catch { /* ignore quota */ }
+  }
+  return result;
 }
 
 export function AppProvider({ children }) {
@@ -36,7 +50,13 @@ export function AppProvider({ children }) {
   const [trainFromPath, setTrainFromPath] = useState("");
   const [trainDataset, setTrainDataset] = useState("");
   const [appMode, setAppModeState] = useState(loadAppMode);
-  const [bendStack, setBendStackState] = useState(loadBendStack);
+  // What loading the stored stack had to fix, reported once the toasts exist.
+  const bendLoadNote = useRef(null);
+  const [bendStack, setBendStackState] = useState(() => {
+    const result = loadBendStack();
+    bendLoadNote.current = result;
+    return result.bends;
+  });
   // A before/after handed to the Bend tab from outside it -- the Discoveries
   // drawer, which already has both pictures and should not make you re-render
   // them. Deliberately not persisted: it describes one click, and a stale one
@@ -141,15 +161,38 @@ export function AppProvider({ children }) {
     if (next) localStorage.setItem("kiln.playTab", next);
   }, []);
 
+  // Every writer goes through here, so the stack is always Kiln's shape. A plain
+  // value is checked before it is set, which is where an outside list (a
+  // discovery, a preset) arrives and where a drop can be reported. An updater
+  // derives from a stack that was already checked, so it is fixed up quietly.
   const setBendStack = useCallback((stackOrFn) => {
+    let value = stackOrFn;
+    if (typeof stackOrFn !== "function") {
+      const { bends, dropped } = normalizeStack(stackOrFn);
+      if (dropped) toast(`Left out ${bendCount(dropped, "entry", "entries")} this build cannot read as a bend`, "warn");
+      value = bends;
+    }
     setBendStackState((prev) => {
-      const next = typeof stackOrFn === "function" ? stackOrFn(prev) : stackOrFn;
+      const next = typeof value === "function" ? normalizeStack(value(prev)).bends : value;
       try {
         localStorage.setItem("kiln.bendStack", JSON.stringify(next));
       } catch { /* ignore quota */ }
       return next;
     });
-  }, []);
+  }, [toast]);
+
+  useEffect(() => {
+    const note = bendLoadNote.current;
+    bendLoadNote.current = null;
+    if (!note) return;
+    if (note.unreadable) {
+      toast("The saved bend stack could not be read, so the Bend tab starts empty. The original is kept in localStorage as kiln.bendStack.backup", "warn");
+    } else if (note.dropped) {
+      toast(`Left out ${bendCount(note.dropped, "saved entry", "saved entries")} the Bend tab cannot read${note.bends.length ? `; kept ${bendCount(note.bends.length)}` : ""}. The original is kept in localStorage as kiln.bendStack.backup`, "warn");
+    } else if (note.converted) {
+      toast(`Converted ${bendCount(note.converted, "saved bend")} from Bends JSON`, "info");
+    }
+  }, [toast]);
 
   const openPrepare = useCallback((opts = {}) => {
     if (opts.tab) setPrepareTab(opts.tab);
