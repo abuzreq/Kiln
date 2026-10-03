@@ -36,6 +36,42 @@ def read_meta(path: str | Path) -> ModelDescriptor:
     return backend.describe(ref)
 
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+# The install's own model folders. Models used to be kept here (xurdif's
+# convention), so they are still scanned for anyone who has files in them, but
+# the repository no longer ships them: the workspace is where models live.
+LEGACY_MODEL_DIRS = (
+    (_REPO_ROOT / "models" / "pretrained", "pretrained"),
+    (_REPO_ROOT / "models" / "fine_tuned", "fine-tuned"),
+    (_REPO_ROOT / "vendor" / "xurdif" / "models", "vendored"),
+)
+
+
+# The tails of those folders' paths, matched wherever the install was: recipes
+# record absolute paths, and the install recorded may be another checkout, or
+# this one before it moved.
+_LEGACY_TAILS = (("models", "pretrained"), ("models", "fine_tuned"), ("vendor", "xurdif", "models"))
+
+
+def _relocated(path: Path) -> Path | None:
+    """A checkpoint moved from an install's model folders into the workspace.
+
+    Only for paths in those legacy folders: a missing file anywhere else is
+    missing, and matching it to some other model of the same name would quietly
+    sample the wrong one. Mirrors relocateModelPath in the frontend.
+    """
+    from app.core.config import workspace
+
+    parts = tuple(x.lower() for x in Path(str(path).replace("\\", "/")).parent.parts)
+    if not any(parts[-len(t):] == t for t in _LEGACY_TAILS):
+        return None
+    moved = workspace.models / path.name
+    return moved if moved.is_file() else None
+
+
+backends.set_relocator(_relocated)
+
+
 def _sidecar_thumbnail(path: Path) -> str | None:
     """Back-compat shim; the rule is xurdif's and lives with it now."""
     from app.core.backends.xurdif import loader
@@ -65,12 +101,9 @@ class ModelManager:
         """Where models live, in priority order. App policy, not engine policy."""
         from app.core.config import workspace
 
-        repo_root = Path(__file__).resolve().parents[2]
         sources: list[tuple[Path, str]] = [
             (workspace.models, "workspace"),
-            (repo_root / "models" / "pretrained", "pretrained"),
-            (repo_root / "models" / "fine_tuned", "fine-tuned"),
-            (repo_root / "vendor" / "xurdif" / "models", "vendored"),
+            *LEGACY_MODEL_DIRS,   # silently, and only if they exist (scan skips missing)
         ]
         # workspace runs + any leftover per-project run folders
         runs = workspace.runs

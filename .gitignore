@@ -22,10 +22,8 @@ scripts/_scratch_run/
 Thumbs.db
 
 # Models / data (never commit weights or datasets)
-models/pretrained/*
-models/fine_tuned/*
-!models/pretrained/.gitkeep
-!models/fine_tuned/.gitkeep
+# The install's old model folders, no longer shipped; models live in the workspace
+/models/
 vendor/xurdif/models/*.pt
 
 # Keep vendored engine source, ignore its sample outputs

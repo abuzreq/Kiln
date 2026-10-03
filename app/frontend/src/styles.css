@@ -1974,6 +1974,7 @@ a { color: var(--accent); }
   padding: var(--s-3) 0 var(--s-4);
   border-bottom: 1px solid var(--line);
 }
+.open-folder { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .start-hero-text h2 {
   margin: 0 0 var(--s-1); font-size: var(--fs-hero); font-weight: 700;
   letter-spacing: -0.4px;

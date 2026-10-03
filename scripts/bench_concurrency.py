@@ -47,9 +47,9 @@ from app.core.model_manager import manager  # noqa: E402
 # Different architectures on purpose: two attn3 nets of the same shape would
 # flatter the overlap, since their kernels are identical.
 DEFAULT_MODELS = [
-    ROOT / "models" / "pretrained" / "txplsa-200.pt",        # attn3, 1,2,2,2
+    Path.home() / "kiln" / "models" / "txplsa-200.pt",         # attn3, 1,2,2,2
     Path.home() / "kiln" / "models" / "galaxies-step4000.pt",  # conf attn, 1,2,2,4
-    ROOT / "models" / "pretrained" / "tnxsyn-28.pt",          # attn3, 1,2,4
+    Path.home() / "kiln" / "models" / "tnxsyn-28.pt",          # attn3, 1,2,4
 ]
 
 RENDER_MODES = ("every", "10hz", "none")

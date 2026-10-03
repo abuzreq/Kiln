@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { api, mediaUrl, thumbUrl } from "../api.js";
 import { useApp } from "../state.jsx";
 import { Empty, Loading } from "../components/ui.jsx";
+import OpenFolder from "../components/OpenFolder.jsx";
 import { splitModels, tagStars } from "./ModelList.jsx";
 import { modelSubtitle } from "../components/modelMeta.jsx";
 import { cardLabel, mergeStoredSampleParams, paramsFromCard } from "../sampleSettings.jsx";
@@ -160,6 +161,7 @@ export default function Start() {
           <p className="hint mb-0">
             Everything you have made lives here. Pick up a model, or head somewhere to make more.
           </p>
+          <OpenFolder folder="root" label="Open workspace folder" className="mt-2" />
         </div>
         <div className="start-paths">
           <button type="button" className="start-path" onClick={() => openPrepare({ tab: "data" })}>
