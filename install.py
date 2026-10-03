@@ -217,6 +217,12 @@ def deps_satisfied() -> bool:
 # importing it here, before any dependency exists, is safe.
 sys.path.insert(0, str(ROOT))
 from utils import cuda as cuda_pick  # noqa: E402
+from utils import platform_mac  # noqa: E402
+
+# Apple's GPU backend (MPS) is in every macOS arm64 wheel on PyPI. 2.4 is a
+# floor for a usable one: per-device generators, the memory queries the device
+# badge reads, and two years of MPS operator coverage.
+MAC_TORCH = "torch>=2.4"
 
 
 def _nvidia_gpu_present() -> bool:
@@ -249,11 +255,51 @@ def _torch_build(py: Path) -> tuple:
         return (None, None, False)
 
 
-def install_cuda_torch(py: Path, force: bool = False) -> bool:
-    """Install the CUDA torch/torchvision build this machine's driver can run.
+def _torch_is_mps(py) -> bool:
+    try:
+        out = subprocess.check_output(
+            [str(py), "-c", "import torch;print(torch.backends.mps.is_available())"],
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+        return out == "True"
+    except Exception:  # noqa: BLE001
+        return False
 
-    Returns True when a usable CUDA build is in place afterwards.
+
+def install_mac_torch(py: Path, force: bool = False) -> bool:
+    """On a Mac: a torch that can use the Apple GPU, when there is one.
+
+    PyPI's default wheel is the right build here -- no index URL to choose --
+    but an old venv can hold a torch from before MPS was usable, so it is
+    upgraded to the floor. Returns True when MPS works afterwards.
     """
+    if not platform_mac.is_apple_silicon():
+        print("Intel Mac: installing the default PyTorch build. Kiln will run on the CPU, "
+              "and training needs Apple Silicon.")
+        return False
+    if not force and _torch_dist_present(py) and _torch_is_mps(py):
+        print("PyTorch with Apple GPU (MPS) support already installed — leaving it alone.")
+        return True
+    print("\nApple Silicon: installing PyTorch with Apple GPU (MPS) support.\n")
+    cmd = [str(py), "-m", "pip", "install", "--upgrade", MAC_TORCH, "torchvision"]
+    try:
+        run(cmd)
+    except Exception as e:  # noqa: BLE001
+        print(f"WARNING: that install failed ({e}). Kiln will fall back to CPU. "
+              "Retry with:\n  " + " ".join(cmd))
+        return False
+    return _torch_is_mps(py)
+
+
+def install_cuda_torch(py: Path, force: bool = False) -> bool:
+    """Install the GPU torch/torchvision build this machine can run.
+
+    On a Mac that is the Apple GPU build (``install_mac_torch``); elsewhere the
+    CUDA build this machine's driver can run. Returns True when a usable GPU
+    build is in place afterwards.
+    """
+    if platform_mac.is_mac():
+        return install_mac_torch(py, force)
     if not _nvidia_gpu_present():
         print("No NVIDIA GPU detected — installing the default (CPU) PyTorch build.")
         return False
@@ -362,6 +408,8 @@ def install_requirements(force: bool = False):
         _write_stamp(torch_build=_torch_build(py)[1], driver=cuda_pick.driver_version())
         return
 
+    _require_git_on_mac()
+
     # Only bump pip on a real install; not on every launch.
     run([str(py), "-m", "pip", "install", "--upgrade", "pip"])
 
@@ -388,7 +436,17 @@ def install_requirements(force: bool = False):
 
     _write_stamp(torch_build=_torch_build(py)[1], driver=cuda_pick.driver_version())
 
-    if _torch_is_cuda(py):
+    if platform_mac.is_mac():
+        if _torch_is_mps(py):
+            print("PyTorch reports the Apple GPU (MPS) is available — sampling and "
+                  "Diffusers training are ready. xurdif models sample here but train "
+                  "only on NVIDIA GPUs.")
+        elif platform_mac.is_apple_silicon():
+            print("WARNING: PyTorch in the venv cannot use the Apple GPU. Kiln will run on "
+                  f"the CPU. Repair it with:\n  {sys.executable} install.py --fix-torch")
+        else:
+            print("Intel Mac: Kiln runs on the CPU; training needs Apple Silicon.")
+    elif _torch_is_cuda(py):
         print("PyTorch reports CUDA is available — GPU training/sampling is ready.")
     elif _nvidia_gpu_present():
         version, build, _ = _torch_build(py)
@@ -403,6 +461,28 @@ def install_requirements(force: bool = False):
             "No NVIDIA GPU detected: dataset prep, model inspection, bending and "
             "merging work on CPU; training and sampling need CUDA."
         )
+
+
+def _require_git_on_mac():
+    """pip needs git for the CLIP requirement, and a fresh Mac has none.
+
+    Without the Command Line Tools, ``git`` is a stub that opens an install
+    dialog and fails, so pip dies midway with an error that never says git.
+    """
+    import shutil
+
+    if not platform_mac.is_mac():
+        return
+    try:
+        ok = bool(shutil.which("git")) and subprocess.run(
+            ["git", "--version"], capture_output=True, timeout=20).returncode == 0
+    except Exception:  # noqa: BLE001
+        ok = False
+    if not ok:
+        raise SystemExit(
+            "\nKiln's install needs git, which comes with Apple's Command Line Tools.\n"
+            "Install them with:\n    xcode-select --install\n"
+            "then run this launcher again.\n")
 
 
 def _check_native_libs(py: Path):
@@ -476,14 +556,26 @@ def main():
                     help="reinstall the PyTorch build this machine's driver can run, then exit")
     args, extra = ap.parse_known_args()
 
+    if platform_mac.under_rosetta():
+        # Checked before the venv exists: one made from this Python would hold
+        # an x86_64 torch that can never see the GPU, and would have to be
+        # deleted by hand to recover.
+        raise SystemExit(
+            "\nThis Python is an Intel build running under Rosetta on an Apple Silicon Mac:\n"
+            f"  {sys.executable}\n"
+            "PyTorch installed from it cannot use the Apple GPU. Install Python 3.10 or\n"
+            "newer for Apple Silicon from https://www.python.org/downloads/ and run this\n"
+            "launcher again.\n")
+
     ensure_venv()
     if args.fix_torch:
         py = venv_python()
         ok = install_cuda_torch(py, force=True)
         version, build, _ = _torch_build(py)
         state = "available" if ok else "NOT available"
-        print(f"\nPyTorch {version} (CUDA {build}) — GPU is {state} in {py}")
-        if not ok:
+        kind = "Apple GPU (MPS)" if platform_mac.is_mac() else f"CUDA {build}"
+        print(f"\nPyTorch {version} ({kind}) — GPU is {state} in {py}")
+        if not ok and not platform_mac.is_mac():
             report = cuda_pick.diagnose(version, build, cuda_pick.driver_version(), str(py))
             print(f"  {report['hint']}")
         if not args.launch:
