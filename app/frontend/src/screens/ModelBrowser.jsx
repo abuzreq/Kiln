@@ -5,6 +5,66 @@ import { Text, Select, Progress, Empty, Loading } from "../components/ui.jsx";
 import { RemoveModelModal, RenameModal } from "../components/modelMeta.jsx";
 import { ModelCards, tagStars } from "./ModelList.jsx";
 
+/**
+ * The sample models, fetched from Kiln's GitHub release in one click.
+ *
+ * The server pins each file's checksum and skips any already here, so "Get all"
+ * is safe to press again after a partial download; it only fetches what is
+ * missing. See app/core/sample_models.py.
+ */
+function SampleModels({ onDone }) {
+  const { toast } = useApp();
+  const [info, setInfo] = useState(null);
+  const [job, setJob] = useState(null);
+  const refresh = () => api.get("/library/samples").then(setInfo).catch(() => setInfo(null));
+  useEffect(() => { refresh(); }, []);
+
+  const get = async (files) => {
+    try {
+      const { job: j } = await api.post("/library/samples/download", files ? { files } : {});
+      if (!j) { toast("Already in your library", "success"); refresh(); return; }
+      setJob(j);
+      const done = await pollJob(j.id, setJob, 500);
+      toast(done.message, done.status === "done" ? "success" : "error");
+      if ((done.detail?.saved || []).length) onDone?.();
+    } catch (e) { toast(e.message, "error"); }
+    setJob(null);
+    refresh();
+  };
+
+  if (!info) return null;
+  const missing = info.models.filter((m) => !m.installed);
+  const missingMb = Math.round(missing.reduce((n, m) => n + m.size_mb, 0));
+  return (
+    <div className="col gap-2">
+      <div className="col gap-1">
+        {info.models.map((m) => (
+          <div key={m.file} className="row between center gap-2">
+            <span>
+              {m.name}
+              <span className="sub">{" · "}{m.mtype.replace("tinyunet_", "")} · {m.size_mb} MB</span>
+            </span>
+            {m.installed
+              ? <b className="sub" title={m.path}>here</b>
+              : <button type="button" className="btn ghost sm" onClick={() => get([m.file])} disabled={!!job}>Get</button>}
+          </div>
+        ))}
+      </div>
+      {job && <div><Progress value={job.progress} /><div className="sub">{job.message}</div></div>}
+      <button type="button" className="btn primary" onClick={() => get(null)} disabled={!!job || !missing.length}>
+        {missing.length
+          ? `Get ${missing.length === info.models.length ? "all" : `the other ${missing.length}`} · ${missingMb} MB`
+          : "All in your library"}
+      </button>
+      <p className="hint mb-0">
+        Shared with his permission by {info.author}, who wrote xurdif, the engine Kiln is built on.
+        Downloaded from <a href={info.release} target="_blank" rel="noreferrer">Kiln's release</a> into
+        your library, each checked against its published checksum.
+      </p>
+    </div>
+  );
+}
+
 function GetModels({ onDone }) {
   const { toast } = useApp();
   const [catalog, setCatalog] = useState([]);
@@ -437,6 +497,11 @@ export default function ModelBrowser() {
             Named library models you keep. ★ pins favorites. Training snapshots live under Train ▸ each run —
             save one here when you want to sample or merge it.
           </p>
+        </div>
+        <div className="card">
+          <h3>Sample models</h3>
+          <p className="hint">Trained xurdif models to start from: sample, bend and merge them, or fine-tune one on your data.</p>
+          <SampleModels onDone={load} />
         </div>
         <div className="card">
           <h3>Import a model</h3>
