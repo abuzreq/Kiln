@@ -376,7 +376,11 @@ def _detach_from_mmap(net):
 
 def scan(sources) -> list[ModelDescriptor]:
     """Model directories sitting in the folders Kiln already looks in."""
-    out: list[ModelDescriptor] = []
+    return list(iter_scan(sources))
+
+
+def iter_scan(sources):
+    """``scan``, yielding each model directory as soon as it has been read."""
     seen: set[str] = set()
     for d, label in sources:
         if not d.exists():
@@ -398,5 +402,4 @@ def scan(sources) -> list[ModelDescriptor]:
             thumb = child / "thumbnail.png"
             if thumb.exists():
                 meta.thumbnail = str(thumb)
-            out.append(meta)
-    return out
+            yield meta

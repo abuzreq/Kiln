@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from "react";
-import { api } from "./api.js";
+import { api, streamModels } from "./api.js";
 import { bendCount, normalizeStack } from "./bendStack.js";
 
 const AppCtx = createContext(null);
@@ -68,6 +68,11 @@ export function AppProvider({ children }) {
   // Which tabs currently have work running, so the nav can show it.
   const [busyTabs, setBusyTabs] = useState({});
   const [modelsBusy, setModelsBusy] = useState(false);
+  // The models read so far while a scan streams in, null otherwise. Kept apart
+  // from `models` on purpose: pickers treat a model missing from `models` as
+  // gone and move off it, so only the finished list may go there. The Start
+  // hub, which only displays, shows this one so cards appear as they are read.
+  const [modelsPartial, setModelsPartial] = useState(null);
   const modelsInflight = useRef(null);
 
   const setModelPath = useCallback((path) => {
@@ -99,13 +104,21 @@ export function AppProvider({ children }) {
     const run = (async () => {
       setModelsBusy(true);
       try {
-        const list = await api.get("/models");
+        let list;
+        try {
+          list = await streamModels(setModelsPartial);
+        } catch {
+          // A server without the streamed listing, or a stream that broke:
+          // fall back to the one-shot request.
+          list = await api.get("/models");
+        }
         setModels(list || []);
         return list || [];
       } catch {
         setModels((prev) => prev || []);
         return [];
       } finally {
+        setModelsPartial(null);
         setModelsBusy(false);
         modelsInflight.current = null;
       }
@@ -221,7 +234,7 @@ export function AppProvider({ children }) {
   const value = {
     modelPath, setModelPath, device, refreshDevice,
     workspace, toast, dismissToast, stars, toggleStar, refreshStars,
-    models, modelsBusy, refreshModels,
+    models, modelsPartial, modelsBusy, refreshModels,
     ops,
     busyTabs, setTabBusy,
     prepareTab, setPrepareTab, playTab, setPlayTab,

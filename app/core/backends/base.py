@@ -196,6 +196,14 @@ class Backend:
     def scan(self, sources: list[tuple[Path, str]]) -> list[ModelDescriptor]:
         raise NotImplementedError
 
+    def iter_scan(self, sources: list[tuple[Path, str]]):
+        """``scan``, one model at a time, for callers that show them as they come.
+
+        Reading a checkpoint is the slow part of a scan, so a backend that can
+        yield between reads should override this; the default waits for all.
+        """
+        yield from self.scan(sources)
+
     def describe(self, ref: ModelRef) -> ModelDescriptor:
         raise NotImplementedError
 

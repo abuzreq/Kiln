@@ -242,8 +242,12 @@ def load_net(path: str, device: str = "cpu", ema: bool = True):
 
 def scan(sources: "list[tuple[Path, str]]") -> list[ModelDescriptor]:
     """Every readable checkpoint under the given (directory, source-label) pairs."""
+    return list(iter_scan(sources))
+
+
+def iter_scan(sources: "list[tuple[Path, str]]"):
+    """``scan``, yielding each checkpoint as soon as it has been read."""
     seen: set[str] = set()
-    out: list[ModelDescriptor] = []
     for d, label in sources:
         if not d.exists():
             continue
@@ -257,7 +261,7 @@ def scan(sources: "list[tuple[Path, str]]") -> list[ModelDescriptor]:
                 thumb = sidecar_thumbnail(pt)
                 if thumb:
                     meta.thumbnail = thumb
-                out.append(meta)
             except Exception as e:  # noqa: BLE001
                 log.warning("skip unreadable checkpoint %s: %s", pt, e)
-    return out
+                continue
+            yield meta
