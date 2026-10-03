@@ -40,12 +40,14 @@ export function ShuffleIcon(props) {
   );
 }
 
+// Brush and wand are Lucide's "brush" and "wand-sparkles" (lucide.dev, ISC
+// licence): the shapes people already know from other editors.
 export function BrushIcon(props) {
   return (
     <Icon {...props}>
-      <path d="M14 3l7 7-8.5 8.5a3 3 0 0 1-4.2 0L7 17.2l7-7" />
-      <path d="M7 17.2L3 21" />
-      <path d="M10.5 6.5l7 7" />
+      <path d="m11 10 3 3" />
+      <path d="M6.5 21A3.5 3.5 0 1 0 3 17.5a2.62 2.62 0 0 1-.708 1.792A1 1 0 0 0 3 21z" />
+      <path d="M9.969 17.031 21.378 5.624a1 1 0 0 0-3.002-3.002L6.967 14.031" />
     </Icon>
   );
 }
@@ -53,9 +55,14 @@ export function BrushIcon(props) {
 export function WandIcon(props) {
   return (
     <Icon {...props}>
-      <path d="M15 4l5 5L7 22l-5-5L15 4z" />
-      <path d="M12 7l5 5" />
-      <path d="M19 2v3M17.5 3.5h3M4 10v2M3 11h2" />
+      <path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72" />
+      <path d="m14 7 3 3" />
+      <path d="M5 6v4" />
+      <path d="M19 14v4" />
+      <path d="M10 2v2" />
+      <path d="M7 8H3" />
+      <path d="M21 16h-4" />
+      <path d="M11 3H9" />
     </Icon>
   );
 }
