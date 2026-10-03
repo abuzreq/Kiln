@@ -38,8 +38,8 @@ class DiffusersBackend(Backend):
         # Pixel-space only. A latent pipeline needs encode/decode around the
         # loop, which is why StableDiffusion* is refused rather than adapted.
         latent=False,
-        train_devices=("cuda", "cpu"),
-        infer_devices=("cuda", "cpu"),
+        train_devices=("cuda", "mps", "cpu"),
+        infer_devices=("cuda", "mps", "cpu"),
     )
 
     def __init__(self):

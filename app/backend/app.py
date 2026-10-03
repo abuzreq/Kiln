@@ -64,7 +64,7 @@ def create_app() -> Flask:
 
     # Generations wait in lanes; size them (and the model cache) once.
     from app.core.engine import lanes
-    lanes.configure(lanes.DEFAULT_LANES)
+    lanes.configure(lanes.default_lanes())
 
     # --- static frontend --------------------------------------------------
     def _api_endpoint_exists(path: str) -> bool:

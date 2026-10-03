@@ -256,12 +256,8 @@ def _sample_worker(job, params, init_image, image_prompt, bends=None, mask=None,
             if not is_oom(e) or params.batch_size <= 1:
                 raise
             # VRAM too tight for a true batch — fall back to sequential seeds.
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except Exception:  # noqa: BLE001
-                pass
+            from app.core import devices
+            devices.empty_cache()
             n = params.batch_size
             base_seed = params.seed
             job.message = f"batch OOM — running {n} sequentially"

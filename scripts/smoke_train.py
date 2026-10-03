@@ -135,7 +135,7 @@ def check_lr_plan():
             assert json.loads(json.dumps(plan)) == plan, pid
             assert lrplan.summarize(plan), pid
 
-    # the author's own pattern, at the numbers the design doc quotes
+    # xurdif's author's own pattern: two drops, at 30% and 65% of a 280k run
     d2 = lrplan.compile_plan({"preset": "drops-2"}, lr=5e-4, train_steps=280000,
                              save_every=1000)
     assert [s["from"] for s in d2["segments"]] == [0, 84000, 182000], d2["segments"]

@@ -759,11 +759,8 @@ class Explorer:
                 except Exception as e:  # noqa: BLE001
                     if _is_oom(e):
                         self._set(error="GPU out of memory; trying again in 30 s")
-                        try:
-                            import torch
-                            torch.cuda.empty_cache()
-                        except Exception:  # noqa: BLE001
-                            pass
+                        from app.core import devices
+                        devices.empty_cache()
                         stop.wait(30.0)
                         continue
                     log.warning("candidate failed (%s): %s", source, e)

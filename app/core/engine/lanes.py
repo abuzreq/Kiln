@@ -42,6 +42,18 @@ DEFAULT_LANES = 2
 MAX_LANES = 3
 
 
+def default_lanes() -> int:
+    """Two lanes on CUDA and CPU; one on Apple Silicon.
+
+    MPS has no per-thread streams to keep two runs apart, and two threads
+    driving it at once is the least-proven thing Kiln could ask of it. Asked
+    of the platform rather than of torch, so startup does not import torch.
+    """
+    from utils import platform_mac
+
+    return 1 if platform_mac.is_apple_silicon() else DEFAULT_LANES
+
+
 def model_key(path: str) -> str:
     """The identity two runs must not share: the same one ``manager.evict`` uses."""
     from app.core import backends

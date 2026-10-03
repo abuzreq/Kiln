@@ -397,14 +397,37 @@ def _render_sample(model_dir: Path, cfg: DiffusersTrainConfig, out_png: Path):
     return out_png if last is not None else None
 
 
+def _device_overrides(cfg: DiffusersTrainConfig, device: str) -> list[str]:
+    """Settle the settings this device cannot honour yet; one note per change.
+
+    Apple's GPU trains in fp32 without torch.compile until mixed precision and
+    the compiler have been tried there: neither has been measured on MPS, and a
+    run that NaNs or fails to compile an hour in is worse than a slower one.
+    Changed before run.json is written, so the run records what actually ran.
+    """
+    notes = []
+    if device != "mps":
+        return notes
+    if cfg.precision != "no":
+        notes.append(f"precision {cfg.precision} is not used on the Apple GPU yet; training in fp32")
+        cfg.precision = "no"
+    if cfg.compile_model:
+        notes.append("torch.compile is not used on the Apple GPU yet; continuing without it")
+        cfg.compile_model = False
+    return notes
+
+
 def _run(job: Job, cfg: DiffusersTrainConfig):
     import torch
     from torch.utils.data import DataLoader
 
+    from app.core.devices import best_device
     from app.core.engine import lr_plan as lrplan
     from app.core.engine.trainer import (list_checkpoints, patch_run_meta,
                                          _rotate_run_log)
 
+    device = best_device()
+    device_notes = _device_overrides(cfg, device)
     out_dir = Path(cfg.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     plan = cfg.lr_plan or lrplan.compile_plan(
@@ -439,9 +462,15 @@ def _run(job: Job, cfg: DiffusersTrainConfig):
     try:
         from accelerate import Accelerator
 
+        # Left alone, accelerate picks CUDA, then MPS, then the CPU -- the same
+        # order as best_device, except that it cannot see KILN_DEVICE=cpu.
         accel = Accelerator(mixed_precision=cfg.precision,
-                            gradient_accumulation_steps=cfg.accum)
+                            gradient_accumulation_steps=cfg.accum,
+                            cpu=device == "cpu")
         emit(f"device: {accel.device}  precision: {cfg.precision}")
+        for line in device_notes:
+            emit(line)
+        job.detail["device"] = accel.device.type
 
         net, sched_cfg, trainable, note = _build_model(cfg)
         emit(note)

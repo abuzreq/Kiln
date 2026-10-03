@@ -29,8 +29,9 @@ class Capabilities:
     # that sets this true also needs an encode/decode step around the loop.
     latent: bool = False
     # Devices the backend can *train* on. xurdif's trainer hardcodes .cuda().
+    # Enforced by app.core.devices.train_block_reason.
     train_devices: tuple[str, ...] = ("cuda",)
-    infer_devices: tuple[str, ...] = ("cuda", "cpu")
+    infer_devices: tuple[str, ...] = ("cuda", "mps", "cpu")
 
     def to_dict(self) -> dict:
         return {

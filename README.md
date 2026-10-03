@@ -131,7 +131,7 @@ Kiln runs two backends, and the screens work the same way for both.
 | **Model format** | `.pt` checkpoints | `UNet2DModel`, `TinyUNet2DModel` |
 | **Sampling, painting, bending** | Yes | Yes |
 | **Merging** | Yes (matching layer sizes) | Yes (matching configs) |
-| **Training from scratch** | Yes (needs CUDA) | Yes |
+| **Training from scratch** | Yes (needs CUDA) | Yes (CUDA, Apple Silicon or CPU) |
 | **Fine-tuning** | Continue a run | Full fine-tune |
 | **LoRA** | No | Yes (via PEFT) |
 | **Loss** | Edge-weighted L1 (optional) + SSIM | MSE or edge-weighted L1 |
@@ -151,8 +151,8 @@ VRAM. **Prepare ▸ Models ▸ Re-home a model** converts a `.pt` into it withou
 
 * **Python 3.10+**
 * **Git** on your `PATH` (some dependencies, such as OpenAI CLIP, are fetched from source)
-* **An NVIDIA GPU with CUDA is strongly recommended.** Without one Kiln runs on the CPU — see
-  [Platforms](#platforms).
+* **A GPU:** an NVIDIA card with CUDA, or a Mac with Apple Silicon (see [macOS](#macos)).
+  Training xurdif models needs NVIDIA. Diffusers models train on either GPU, or slowly on the CPU.
 * **~6 GB of disk** for the CUDA PyTorch wheels and the rest of the dependencies.
 * **Internet on first use of some features.** Text steering downloads OpenAI's CLIP weights
   (about 350 MB) and the DINOv2 novelty metric downloads Meta's model (about 350 MB), each once.
@@ -163,15 +163,16 @@ VRAM. **Prepare ▸ Models ▸ Re-home a model** converts a `.pt` into it withou
 
 ### Platforms
 
-Kiln uses an NVIDIA GPU through CUDA when it has one, and the CPU otherwise:
+Kiln uses an NVIDIA GPU through CUDA or an Apple Silicon GPU through Metal when it has one, and the
+CPU otherwise:
 
-| | NVIDIA GPU (Windows, Linux) | CPU only (any machine, including Macs) |
-| --- | --- | --- |
-| **Sampling, painting, bending, merging** | Yes | Yes, slowly |
-| **Training xurdif models** | Yes | No — the xurdif trainer needs CUDA |
-| **Training and fine-tuning Diffusers models** | Yes | Yes, very slowly |
+| | NVIDIA GPU (Windows, Linux) | Apple Silicon Mac | CPU only |
+| --- | --- | --- | --- |
+| **Sampling, painting, bending, merging** | Yes | Yes | Yes, slowly |
+| **Training xurdif models** | Yes | No — the xurdif trainer needs CUDA | No |
+| **Training and fine-tuning Diffusers models** | Yes | Yes | Yes, very slowly (not on Intel Macs) |
 
-On a Mac, Kiln runs on the CPU: it does not use Apple-silicon GPUs (Metal) yet.
+The [macOS](#macos) section has the Mac specifics.
 
 ## Install and run
 
@@ -204,6 +205,30 @@ sudo apt install python3-gi gir1.2-webkit2-4.1  # optional: the desktop window
 Without the WebKit packages everything still works — Kiln prints its URL and you open it in a
 browser, which is what `./kiln.sh --no-window` does anyway. If the launcher lost its executable
 bit (downloading a zip rather than cloning does that), `chmod +x kiln.sh` restores it.
+
+### macOS
+
+Kiln uses the GPU on Apple Silicon Macs (M1 and later) through PyTorch's Metal backend (MPS):
+
+* **Sampling, painting, bending and merging** run on the GPU for every model, xurdif and
+  Diffusers alike.
+* **Training is for Diffusers models only:** from scratch, fine-tuning and LoRA. The xurdif trainer
+  is written for NVIDIA GPUs, so on a Mac the Train screen offers the Diffusers engine. To keep
+  training a `tinyunet_with_attention3` model, use **Prepare ▸ Models ▸ Re-home a model** to
+  convert it to Diffusers format first.
+* For now everything on the Apple GPU runs in fp32. Mixed precision and `torch.compile` are
+  switched off, and only one image generates at a time.
+
+Before the first run:
+
+* Install **Python 3.10 or newer** for Apple Silicon from [python.org](https://www.python.org/downloads/).
+  The `python3` that ships with macOS is 3.9, and `kiln.command` skips it. An Intel build of Python
+  running under Rosetta cannot reach the GPU, and the installer stops if it finds one.
+* Install the **Command Line Tools** with `xcode-select --install`. They provide `git`.
+
+If a model misbehaves on the GPU, run it on the CPU with `KILN_DEVICE=cpu ./kiln.command`.
+Kiln sets `PYTORCH_ENABLE_MPS_FALLBACK=1`, so the few operations Metal lacks run on the CPU
+instead of failing. Intel Macs run Kiln on the CPU, with training turned off.
 
 ### Setting up by hand
 
@@ -238,7 +263,7 @@ To pick one by hand, find your driver with `nvidia-smi` and use the matching ind
 # Windows
 .venv\Scripts\python.exe -m pip install --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu126
 
-# Linux / macOS
+# Linux
 .venv/bin/python -m pip install --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu126
 ```
 
@@ -310,6 +335,8 @@ python scripts/smoke_library.py           # preview failures, delete vs hide for
 python scripts/smoke_tinyunet_parity.py   # TinyUNet matches xurdif layer for layer
 python scripts/smoke_golden.py --check    # sampling regression, by checkpoint hash
 python scripts/smoke_cuda_pick.py         # driver to PyTorch build choice (no GPU needed)
+python scripts/smoke_mac.py               # macOS decisions, simulated (any machine)
+python scripts/smoke_mac.py --real        # on an Apple Silicon Mac: sample and train on MPS
 ```
 
 ### Layout

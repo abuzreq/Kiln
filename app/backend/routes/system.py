@@ -218,7 +218,9 @@ def resume_job(job_id):
 
 @bp.post("/gpu/free")
 def free_gpu():
-    """Release cached CUDA memory (best effort)."""
+    """Release cached GPU memory, CUDA or Apple's MPS (best effort)."""
+    from app.core import devices
+
     freed = False
     try:
         import torch
@@ -226,6 +228,9 @@ def free_gpu():
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
+            freed = True
+        elif devices.mps_available():
+            devices.empty_cache("mps")
             freed = True
     except Exception:  # noqa: BLE001
         pass
