@@ -57,8 +57,8 @@ function SampleModels({ onDone }) {
           : "All in your library"}
       </button>
       <p className="hint mb-0">
-        Shared with his permission by {info.author}, who wrote xurdif, the engine Kiln is built on.
-        Downloaded from <a href={info.release} target="_blank" rel="noreferrer">Kiln's release</a> into
+        Made freely available by {info.author}, who wrote xurdif, the engine Kiln is built on:
+        use them however you like. Downloaded from <a href={info.release} target="_blank" rel="noreferrer">Kiln's release</a> into
         your library, each checked against its published checksum.
       </p>
     </div>

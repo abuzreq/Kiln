@@ -360,8 +360,7 @@ def inpaint():
 # One button that composes something over the canvas out of what the user
 # already has: procedural shapes, the models in the library, the bend presets.
 # How it decides is hidden; everything it decided is in the card, and one seed
-# drives every choice, so a roll regenerates from its PNG. See
-# docs/exploration-design.md, "Randomize".
+# drives every choice, so a roll regenerates from its PNG.
 
 def _change_params(change: float, steps: int) -> dict:
     """The Create panel's Change slider, mapped as changeToParams does in JS."""

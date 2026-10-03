@@ -3,7 +3,8 @@ import React from "react";
 // One place for the small line glyphs the panels use. All are 24-unit stroke
 // icons in the current colour, so they take the accent when a seg button is
 // on and dim with a disabled button. Every one is aria-hidden: the button's
-// text or aria-label is what a reader gets.
+// text or aria-label is what a reader gets. A few are other icon sets' shapes,
+// credited where they are and in THIRD_PARTY_NOTICES.md.
 
 function Icon({ children, size = 14, className = "" }) {
   return (
@@ -27,7 +28,7 @@ export function EyeIcon({ off, size = 15 }) {
   );
 }
 
-/** Two crossing arrows: the shuffle glyph, for drawing a new seed. */
+/** Two crossing arrows: Feather's "shuffle" (MIT), for drawing a new seed. */
 export function ShuffleIcon(props) {
   return (
     <Icon {...props}>
@@ -40,8 +41,8 @@ export function ShuffleIcon(props) {
   );
 }
 
-// Brush and wand are Lucide's "brush" and "wand-sparkles" (lucide.dev, ISC
-// licence): the shapes people already know from other editors.
+// Brush and wand are Lucide's "brush" and "wand-sparkles" (lucide.dev, ISC):
+// the shapes people already know from other editors.
 export function BrushIcon(props) {
   return (
     <Icon {...props}>
@@ -211,6 +212,7 @@ export function RedoIcon(props) {
 }
 
 /** A small downward caret: this opens a menu. */
+/** Lucide's "chevron-down" (ISC). */
 export function ChevronDownIcon({ size = 12, ...props }) {
   return (
     <Icon size={size} {...props}>

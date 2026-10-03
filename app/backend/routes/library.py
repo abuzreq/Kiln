@@ -40,7 +40,7 @@ DOWNLOAD_CATALOG = [
             "AAT22M2b21Tf1yKe3Ji0HS0?rlkey=f1zdhexy36p3hffcun686m77c&dl=0"
         ),
         "description": (
-            "Hannu Toyryla, who wrote the xurdif engine, publishes a folder of "
+            "Hannu Töyrylä, who wrote the xurdif engine, publishes a folder of "
             "trained models. Open it, copy the download link for any .pt file, "
             "then paste that link into the box below. Kiln links to the folder "
             "and downloads nothing on its own."

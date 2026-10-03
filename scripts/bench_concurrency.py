@@ -1,6 +1,6 @@
 """Does running generations side by side on one GPU buy anything?
 
-The generation queue design (docs/generation-queue-design.md) lets runs on
+The generation queue lets runs on
 *different* models overlap. Whether that is worth more than a latency nicety
 depends on one number this measures: wall time for N runs in N threads against
 the same N runs back to back, in one process and one CUDA context -- exactly
@@ -58,7 +58,7 @@ RENDER_MODES = ("every", "10hz", "none")
 # --- second copies of a model -----------------------------------------------------
 # Kiln never runs two jobs on one model at once. The two-copy case asks whether
 # a second copy of the net, on its own stream, would make that worth doing; it
-# measured 1.03-1.14x (docs/generation-queue-design.md), so the app has no such
+# measured 1.03-1.14x, so the app has no such
 # thing and the benchmark brings its own. A thread inside using_copy(i > 0) gets
 # its own copy, loaded from the file, when the sampler asks the manager.
 _copy = threading.local()
