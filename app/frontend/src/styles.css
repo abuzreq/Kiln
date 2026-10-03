@@ -1440,6 +1440,19 @@ body {
      ratio rather than a fixed column -- and the snapshot grid scrolls, so it
      gives up width more gracefully than a chart does. */
   .work-split.run-split { grid-template-columns: minmax(0, 1.6fr) minmax(320px, 1fr); }
+
+  /* Prepare ▸ Models: five forms down the left, the library on the right. At
+     the default split the forms ran 1700px tall in 320px while the library
+     stopped at 560px with the rest of its 1200px column empty below. The forms
+     get a share of the width, and the library is pinned and fills the height
+     the page shows (--avail-h, measured), its grid taking whatever is left. */
+  .work-split.models-split { grid-template-columns: clamp(340px, 34%, 560px) minmax(0, 1fr); }
+  .models-split > .library-col { position: sticky; top: var(--content-pad-y); }
+  .models-split .library-card {
+    display: flex; flex-direction: column;
+    height: var(--avail-h, 80vh); overflow-y: auto;
+  }
+  .models-split .library-card .model-scroll { flex: 1 1 auto; max-height: none; min-height: 240px; }
 }
 
 /* Form fields side by side while there is room, stacked when there is not. A
