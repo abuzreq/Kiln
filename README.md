@@ -256,8 +256,9 @@ To pick one by hand, find your driver with `nvidia-smi` and use the matching ind
 The repository ships no weights. Five ways to get some:
 
 1. **The sample models** — seven xurdif checkpoints trained by Hannu Töyrylä, who wrote
-   xurdif, shared with his permission. **Prepare ▸ Models ▸ Sample models ▸ Get all**
-   fetches them (319 MB) from the [`sample-models-v1` release](https://github.com/abuzreq/kiln/releases/tag/sample-models-v1)
+   xurdif. He has made them freely available: use, change and share them however you like.
+   **Prepare ▸ Models ▸ Sample models ▸ Get all** fetches them (319 MB) from the
+   [`sample-models-v1` release](https://github.com/abuzreq/kiln/releases/tag/sample-models-v1)
    into your library, checking each against its pinned SHA-256.
 2. **A model you already have** — drop the `.pt` onto **Prepare ▸ Models ▸ Import a model**,
    or give it the path. Kiln copies it into `~/kiln/models` (or `$KILN_WORKSPACE/models`),

@@ -1,9 +1,10 @@
 """The sample models: xurdif checkpoints Kiln can fetch in one click.
 
-Trained by Hannu Töyrylä, who wrote xurdif, and redistributed with his
-permission. They are not in the repository -- weights in git history would ride
-along with every clone forever -- but attached to a GitHub release of Kiln, so
-they come from the same place as the code and nothing has to be copied by hand.
+Trained by Hannu Töyrylä, who wrote xurdif, and made freely available by him
+with no restrictions on their use. They are not in the repository -- weights in
+git history would ride along with every clone forever -- but attached to a
+GitHub release of Kiln, so they come from the same place as the code and nothing
+has to be copied by hand.
 
 Each entry pins the file's size and SHA-256. A download that does not match is
 discarded rather than kept: a truncated or substituted checkpoint would
