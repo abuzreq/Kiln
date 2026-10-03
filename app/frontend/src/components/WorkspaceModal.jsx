@@ -13,11 +13,12 @@ const FOLDERS = [
   { key: "captures", label: "Captures", hint: "Images you saved, with their settings embedded" },
   { key: "sweeps", label: "Sweeps", hint: "Parameter grids and sweep animations" },
   { key: "library", label: "Library", hint: "Saved bends, merge recipes and pins" },
-  // Not workspace folders, but Kiln scans them, so they are places models can be
-  // and therefore places to be able to find again.
-  { key: "models_pretrained", label: "Bundled models",
-    hint: "Models that ship with the install, or that you dropped in yourself" },
-  { key: "models_fine_tuned", label: "Bundled fine-tunes", hint: "Also scanned by Kiln" },
+  // The install's old model folders. Not workspace folders, and no longer
+  // shipped, but still scanned; the server names them only when they exist.
+  { key: "models_pretrained", label: "Install models (old)", legacy: true,
+    hint: "Models dropped into the install's models/pretrained. Still scanned; Models is the better home" },
+  { key: "models_fine_tuned", label: "Install fine-tunes (old)", legacy: true,
+    hint: "Still scanned; Models is the better home" },
 ];
 
 export default function WorkspaceModal({ onClose }) {
@@ -61,7 +62,7 @@ export default function WorkspaceModal({ onClose }) {
         <p className="sub">Loading…</p>
       ) : (
         <div className="col gap-2">
-          {FOLDERS.map((f) => (
+          {FOLDERS.filter((f) => !f.legacy || workspace[f.key]).map((f) => (
             <div key={f.key} className="asset-row static ws-row">
               <div className="meta">
                 <b>{f.label}</b>

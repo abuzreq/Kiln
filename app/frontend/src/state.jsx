@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from "react";
 import { api, streamModels } from "./api.js";
+import { relocateModelPath } from "./modelPaths.js";
 import { bendCount, normalizeStack } from "./bendStack.js";
 
 const AppCtx = createContext(null);
@@ -75,7 +76,13 @@ export function AppProvider({ children }) {
   const [modelsPartial, setModelsPartial] = useState(null);
   const modelsInflight = useRef(null);
 
-  const setModelPath = useCallback((path) => {
+  // Read by setModelPath without making it change identity on every scan.
+  const modelsRef = useRef(null);
+  modelsRef.current = models;
+
+  const setModelPath = useCallback((raw) => {
+    // A recipe may name a model where it was before it moved into the workspace.
+    const path = relocateModelPath(raw, modelsRef.current);
     setModelPathState(path || "");
     if (path) localStorage.setItem("kiln.model", path);
     else localStorage.removeItem("kiln.model");
@@ -112,6 +119,14 @@ export function AppProvider({ children }) {
           // fall back to the one-shot request.
           list = await api.get("/models");
         }
+        // The remembered pick may name a model where it was before it moved
+        // into the workspace; follow it there in the same render as the list,
+        // so nothing sees the stale path as a missing model and moves off it.
+        setModelPathState((prev) => {
+          const moved = relocateModelPath(prev, list || []);
+          if (moved !== prev) localStorage.setItem("kiln.model", moved);
+          return moved;
+        });
         setModels(list || []);
         return list || [];
       } catch {

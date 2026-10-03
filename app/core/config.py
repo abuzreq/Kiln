@@ -134,7 +134,7 @@ class Workspace:
         return self.root / "library" / "presets"
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "root": str(self.root),
             "source": str(self.source),
             "datasets": str(self.datasets),
@@ -144,11 +144,14 @@ class Workspace:
             "assets": str(self.assets),
             "sweeps": str(self.sweeps),
             "library": str(self.root / "library"),
-            # Outside the workspace, but Kiln's discovery scans them and users do
-            # put models there, so the UI can name and open them.
-            "models_pretrained": str(_PROJECT_ROOT / "models" / "pretrained"),
-            "models_fine_tuned": str(_PROJECT_ROOT / "models" / "fine_tuned"),
         }
+        # The install's old model folders: no longer shipped, but still scanned
+        # for anyone who has files in them, so named (and openable) only then.
+        for key, sub in (("models_pretrained", "pretrained"), ("models_fine_tuned", "fine_tuned")):
+            d = _PROJECT_ROOT / "models" / sub
+            if d.is_dir():
+                out[key] = str(d)
+        return out
 
 
 # Singleton, created on import.

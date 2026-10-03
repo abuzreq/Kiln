@@ -65,6 +65,20 @@ def get(name: str) -> Backend:
     return b
 
 
+# Where a .pt path that no longer exists may have gone. The app registers this
+# (see model_manager): it knows where models are kept, which the engine layer
+# deliberately does not. Recipes inside images name a model by its path, so a
+# model moved between Kiln's folders would otherwise stop every one of them
+# replaying.
+_relocator = None
+
+
+def set_relocator(fn) -> None:
+    """``fn(Path) -> Path | None``: a missing checkpoint's new home, if it has one."""
+    global _relocator
+    _relocator = fn
+
+
 def _split_prefix(s: str) -> tuple[str, str] | None:
     """Split an explicit ``<backend>:<locator>`` selector.
 
@@ -95,8 +109,12 @@ def parse_ref(value) -> ModelRef:
     #    be reinterpreted by a later rule.
     try:
         p = Path(s)
-        if p.suffix == ".pt" and p.exists():
-            return ModelRef("xurdif", s)
+        if p.suffix == ".pt":
+            if p.exists():
+                return ModelRef("xurdif", s)
+            moved = _relocator(p) if _relocator else None
+            if moved is not None:
+                return ModelRef("xurdif", str(moved))
     except OSError:
         pass
 
@@ -126,5 +144,5 @@ def resolve(value) -> "tuple[Backend, ModelRef]":
 
 __all__ = [
     "Backend", "BetaSchedule", "Capabilities", "ModelDescriptor", "ModelRef",
-    "available", "get", "parse_ref", "register", "resolve",
+    "available", "get", "parse_ref", "register", "resolve", "set_relocator",
 ]

@@ -245,11 +245,12 @@ The repository ships no weights. Four ways to get some:
 3. **Hugging Face**, under **Prepare ▸ Models ▸ From Hugging Face**.
 4. **Train your own**, which is what the rest of Prepare is for.
 
-Kiln also scans the install's own `models/pretrained` and `models/fine_tuned`, so a file
-dropped there shows up as well — but those are the install's folders, not yours, so Kiln
-will only ever hide such a model, never delete it. The workspace is the better home. A file
-Kiln finds but cannot read is listed under **Not loading** with the reason, instead of
-quietly not appearing.
+Models live in the workspace. Older installs kept them in the install's own
+`models/pretrained` and `models/fine_tuned`; Kiln no longer ships those folders, but if
+yours still has them it scans them, and a recipe naming a model there finds the same file
+once it has been moved into the workspace. Kiln will only ever hide a model outside the
+workspace, never delete it. A file Kiln finds but cannot read is listed under
+**Not loading** with the reason, instead of quietly not appearing.
 
 ---
 

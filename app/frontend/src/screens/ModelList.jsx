@@ -1,12 +1,14 @@
 import React, { useMemo, useState } from "react";
 import { thumbUrl } from "../api.js";
 import { useApp } from "../state.jsx";
+import { relocateModelPath } from "../modelPaths.js";
 import { modelSubtitle, RemoveModelBtn } from "../components/modelMeta.jsx";
 import { Empty, Loading, Modal } from "../components/ui.jsx";
 import { ThumbGalleryToolbar } from "../components/ThumbGalleryToolbar.jsx";
 
 export function pickDefaultModel(models, current) {
-  if (current && models.some((m) => m.path === current)) return current;
+  const moved = relocateModelPath(current, models);
+  if (moved && models.some((m) => m.path === moved)) return moved;
   const starred = models.find((m) => m.starred && m.role !== "checkpoint");
   if (starred) return starred.path;
   const main = models.find((m) => m.role !== "checkpoint");
