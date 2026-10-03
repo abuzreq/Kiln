@@ -44,6 +44,9 @@ function loadBendStack() {
 export function AppProvider({ children }) {
   const [modelPath, setModelPathState] = useState(() => localStorage.getItem("kiln.model") || "");
   const [device, setDevice] = useState(null);
+  // What each engine can train on *this machine* ({backends, default}). On a
+  // Mac the xurdif trainer has no GPU to run on; the server says so here.
+  const [trainEngines, setTrainEngines] = useState({ backends: [], default: "xurdif" });
   const [workspace, setWorkspace] = useState(null);
   const [stars, setStars] = useState([]);
   const [prepareTab, setPrepareTabState] = useState(loadPrepareTab);
@@ -242,12 +245,23 @@ export function AppProvider({ children }) {
     // Create (for preset summaries) and Bend (for the editor).
     api.get("/craft/ops").then((d) => setOps(d.ops || [])).catch(() => setOps([]));
     api.get("/workspace").then(setWorkspace).catch(() => {});
+    api.get("/train/backends").then((d) => setTrainEngines({
+      backends: d.backends || [], default: d.default || "xurdif",
+    })).catch(() => {});
     const id = setInterval(refreshDevice, 6000);
     return () => clearInterval(id);
   }, [refreshDevice, refreshStars, refreshModels]);
 
+  // Unknown engines count as trainable: until the list arrives, offer rather
+  // than hide, and let the server's refusal explain.
+  const trainableHere = useCallback((name) => {
+    const e = trainEngines.backends.find((b) => b.name === (name || "xurdif"));
+    return !e || e.trainable_here !== false;
+  }, [trainEngines]);
+
   const value = {
     modelPath, setModelPath, device, refreshDevice,
+    trainEngines, trainableHere,
     workspace, toast, dismissToast, stars, toggleStar, refreshStars,
     models, modelsPartial, modelsBusy, refreshModels,
     ops,

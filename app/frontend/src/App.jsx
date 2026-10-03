@@ -14,15 +14,23 @@ function DeviceBadge() {
   const { device, refreshDevice, toast } = useApp();
   if (!device) return null;
   const gpu = device.gpus?.[0];
-  const label = device.cuda
-    ? `${gpu?.name?.replace("NVIDIA GeForce ", "") || "CUDA"}${gpu?.used_pct != null ? ` · ${gpu.used_pct}%` : ""}`
+  // An NVIDIA card, or Apple Silicon's GPU (MPS). KILN_DEVICE=cpu can leave the
+  // GPU present but unused, which reads as CPU.
+  const onGpu = device.device === "cuda" || device.device === "mps";
+  const label = onGpu
+    ? `${gpu?.name?.replace("NVIDIA GeForce ", "") || (device.mps ? "Apple GPU" : "CUDA")}${gpu?.used_pct != null ? ` · ${gpu.used_pct}%` : ""}`
     : "CPU only";
   // Running on CPU is a huge slowdown, and the cause is usually a CPU-only
   // torch wheel — say so rather than leaving the user to guess.
-  const cls = device.cuda ? "pill good" : device.reason === "no_gpu" ? "pill" : "pill bad";
-  const tip = device.cuda
-    ? `${gpu?.name || "CUDA device"}${gpu?.total_mem_mb ? ` · ${gpu.free_mem_mb} of ${gpu.total_mem_mb} MiB free` : ""}`
-    : device.hint || "Running on CPU.";
+  const cls = onGpu ? "pill good" : device.reason === "no_gpu" || device.mps ? "pill" : "pill bad";
+  // Apple's GPU shares the machine's memory, so the numbers are what Kiln holds
+  // out of what Metal recommends for one app -- not a card's VRAM.
+  const mem = !gpu?.total_mem_mb ? ""
+    : gpu.shared ? ` · Kiln holds ${gpu.used_mem_mb} of ${gpu.total_mem_mb} MiB (shared memory)`
+    : ` · ${gpu.free_mem_mb} of ${gpu.total_mem_mb} MiB free`;
+  const tip = onGpu
+    ? `${gpu?.name || "GPU"}${mem}`
+    : device.mps ? "Apple GPU present; KILN_DEVICE keeps Kiln on the CPU." : device.hint || "Running on CPU.";
   const freeGpu = async () => {
     await api.post("/gpu/free");
     refreshDevice();
@@ -30,11 +38,11 @@ function DeviceBadge() {
   };
   return (
     <div className="row center gap-2">
-      {device.cuda && (
+      {onGpu && (
         <button type="button" className="btn ghost sm" onClick={freeGpu}>Free GPU</button>
       )}
       <Tooltip text={tip}>
-        <span className={cls}>{!device.cuda && device.reason !== "no_gpu" ? "⚠ " : ""}{label}</span>
+        <span className={cls}>{!onGpu && device.reason && device.reason !== "no_gpu" ? "⚠ " : ""}{label}</span>
       </Tooltip>
     </div>
   );

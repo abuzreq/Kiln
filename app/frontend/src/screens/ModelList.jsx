@@ -77,7 +77,7 @@ function StarBtn({ m, onStar }) {
 
 /** Compact row list used in the Library drawer. */
 export function ModelRows({ models, loading, onPick, onRename, onTrain, onDelete }) {
-  const { modelPath, stars, toggleStar } = useApp();
+  const { modelPath, stars, toggleStar, trainableHere } = useApp();
   const tagged = useMemo(() => tagStars(models, stars), [models, stars]);
   const { pinned, rest } = useMemo(() => splitModels(tagged), [tagged]);
   const ordered = [...pinned, ...rest];
@@ -115,7 +115,9 @@ export function ModelRows({ models, loading, onPick, onRename, onTrain, onDelete
               <StarBtn m={m} onStar={toggleStar} />
             </div>
             <div className="asset-actions-secondary">
-              <button type="button" className="btn ghost sm" onClick={() => onTrain?.(m)}>Train</button>
+              {trainableHere(m.backend) && (
+                <button type="button" className="btn ghost sm" onClick={() => onTrain?.(m)}>Train</button>
+              )}
               {m.renamable && (
                 <button type="button" className="btn ghost sm" onClick={() => onRename?.(m)}>Rename</button>
               )}
@@ -133,6 +135,7 @@ export function ModelCards({
   models, onUse, onStar, onTrain, onRename, onDelete,
   sort: sortProp, onSortChange, thumbLevel: sizeProp, onSizeChange,
 }) {
+  const { trainableHere } = useApp();
   const [sortLocal, setSortLocal] = useState("name");
   const [sizeLocal, setSizeLocal] = useState("md");
   const [lightbox, setLightbox] = useState(null);
@@ -177,7 +180,9 @@ export function ModelCards({
               <div className="mb-actions">
                 <button type="button" className="btn sm primary w-full" onClick={() => onUse?.(m)}>Use in Create</button>
                 <div className="mb-actions-row">
-                  <button type="button" className="btn sm" onClick={() => onTrain?.(m)}>Train</button>
+                  {trainableHere(m.backend) && (
+                    <button type="button" className="btn sm" onClick={() => onTrain?.(m)}>Train</button>
+                  )}
                   {m.renamable && (
                     <button type="button" className="btn ghost sm" onClick={() => onRename?.(m)}>Rename</button>
                   )}

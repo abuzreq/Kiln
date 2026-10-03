@@ -113,7 +113,7 @@ const MODE_TABS = [
  * by its name -- an install without peft reports lora:false and simply does not
  * offer the mode, rather than offering a button that fails.
  */
-function DiffusersOptions({ form, set, engine, seeded }) {
+function DiffusersOptions({ form, set, engine, seeded, onMps }) {
   const caps = engine?.capabilities || {};
   const presets = engine?.presets || {};
   const modes = [];
@@ -142,11 +142,14 @@ function DiffusersOptions({ form, set, engine, seeded }) {
       )}
 
       <div className="row gap-2">
-        <div className="grow">
-          <Select label="Precision" value={form.precision} onChange={(v) => set("precision", v)}
-            options={["no", "fp16", "bf16"]}
-            tip="Mixed precision. fp16 is faster and lighter on most NVIDIA cards; bf16 needs a newer one." />
-        </div>
+        {/* Apple's GPU trains in fp32 for now; the server would override it anyway. */}
+        {!onMps && (
+          <div className="grow">
+            <Select label="Precision" value={form.precision} onChange={(v) => set("precision", v)}
+              options={["no", "fp16", "bf16"]}
+              tip="Mixed precision. fp16 is faster and lighter on most NVIDIA cards; bf16 needs a newer one." />
+          </div>
+        )}
         <div className="grow">
           <Select label="Fit" value={form.fit} onChange={(v) => set("fit", v)} options={["resize", "crop"]} />
         </div>
@@ -163,7 +166,7 @@ function DiffusersOptions({ form, set, engine, seeded }) {
 
 export default function Train() {
   const {
-    device, toast, trainFromPath, setTrainFromPath,
+    device, toast, trainFromPath, setTrainFromPath, trainEngines, trainableHere,
     trainDataset, setTrainDataset, setModelPath, setAppMode, setPlayTab, models,
   } = useApp();
   const [info, setInfo] = useState(null);
@@ -175,7 +178,7 @@ export default function Train() {
   // "Custom" stays open once chosen even while the pickers happen to spell a
   // named layout, so the panel does not snap shut mid-edit.
   const [customLayout, setCustomLayout] = useState(false);
-  const [engines, setEngines] = useState([]);
+  const engines = trainEngines.backends;
   const [job, setJob] = useState(null);
   const [runView, setRunView] = useState(null);
   const [inspectRun, setInspectRun] = useState(null);
@@ -214,13 +217,21 @@ export default function Train() {
   const train = info?.train || { status: "not_started", label: "Not started" };
   const running = job && job.status === "running";
   const canStart = !running;
+  // The engine the form names, and why this machine cannot train it (a Mac
+  // has no GPU for the xurdif trainer), or null when it can.
+  const engineInfo = engines.find((e) => e.name === form.backend);
+  const engineBlocked = engineInfo?.trainable_here === false
+    ? (engineInfo.unavailable_reason || `${form.backend} cannot train on this machine.`)
+    : null;
+  const onMps = device?.device === "mps";
   const runs = info?.runs || [];
   const orderedRuns = useMemo(() => runs.slice().reverse(), [runs]);
   const hasRuns = orderedRuns.length > 0;
   const trimmedRunName = (form.run_name || "").trim();
+  // Only models some engine here can train: on a Mac that leaves Diffusers ones.
   const libraryModels = useMemo(
-    () => (models || []).filter((m) => m.role !== "checkpoint"),
-    [models],
+    () => (models || []).filter((m) => m.role !== "checkpoint" && trainableHere(m.backend)),
+    [models, trainableHere],
   );
   const baseModel = libraryModels.find((m) => m.path === form.resume);
 
@@ -243,6 +254,8 @@ export default function Train() {
     setFromMode("scratch");
     setForm((f) => ({
       ...EMPTY_FORM,
+      backend: trainEngines.default,
+      edge_loss: edgeLossDefault(trainEngines.default),
       dataset: f.dataset || info?.datasets?.[0]?.name || "",
       run_name: nextRunName(runsList || info?.runs || runs),
       mtype: f.mtype,
@@ -262,6 +275,27 @@ export default function Train() {
     setFromMode("library");
     setMode("new");
     presetSeeded.current = true;
+    // The model decides the engine. A Diffusers model fine-tunes (or takes an
+    // adapter) on the Diffusers trainer, and /train/continue/info reads only
+    // xurdif checkpoints -- so it is never asked about one.
+    const picked = (models || []).find((m) => m.path === path);
+    if (picked?.backend === "diffusers") {
+      const caps = engines.find((e) => e.name === "diffusers")?.capabilities || {};
+      setForm((f) => ({
+        ...f,
+        backend: "diffusers",
+        mode: caps.finetune ? "finetune" : caps.lora ? "lora" : "finetune",
+        resume: path,
+        image_size: picked.sample_size ?? f.image_size,
+        lr: FT_DEFAULT_LR,
+        lr_schedule: "constant", lr_plan: null,   // see SCRATCH_LR_SCHEDULE
+        edge_loss: edgeLossDefault("diffusers"),
+      }));
+      return;
+    }
+    if (picked && form.backend !== "xurdif") {
+      setForm((f) => ({ ...f, backend: "xurdif", edge_loss: edgeLossDefault("xurdif") }));
+    }
     try {
       const d = await api.get(`/train/continue/info?path=${encodeURIComponent(path)}`);
       setForm((f) => ({
@@ -368,9 +402,15 @@ export default function Train() {
       });
       if (d.default_attn) setForm((f) => ({ ...f, attn: f.attn || d.default_attn }));
     });
-    api.get("/train/backends").then((d) => setEngines(d.backends || [])).catch(() => {});
     return () => { cancelled = true; };
   }, []);
+
+  // EMPTY_FORM names xurdif; on a machine that cannot train it, start on the
+  // engine the server offers instead, once the list has arrived.
+  useEffect(() => {
+    if (trainableHere(form.backend)) return;
+    setForm((f) => ({ ...f, backend: trainEngines.default, edge_loss: edgeLossDefault(trainEngines.default) }));
+  }, [trainEngines]);
 
   useEffect(() => {
     if (!trainFromPath) return;
@@ -687,10 +727,15 @@ export default function Train() {
       {mode === "new" && (
         <div className="work-split form-first">
           <div className="col">
-            {!device?.cuda && canStart && (
+            {engineBlocked && canStart ? (
+              <div className="card">
+                <span className="pill warn">Not on this machine</span>
+                <p className="hint mt-2 mb-0">{engineBlocked}</p>
+              </div>
+            ) : !device?.cuda && !device?.mps && canStart && (
               <div className="card">
                 <span className="pill warn">No GPU</span>
-                <p className="hint mt-2 mb-0">Training requires an NVIDIA GPU.</p>
+                <p className="hint mt-2 mb-0">{device?.hint || "Training requires an NVIDIA GPU."}</p>
               </div>
             )}
 
@@ -873,7 +918,10 @@ export default function Train() {
                   <Select label="Engine" value={form.backend} onChange={(v) => {
                     setForm((f) => ({ ...f, backend: v, edge_loss: edgeLossDefault(v) }));
                   }}
-                    options={engines.map((e) => e.name)}
+                    options={engines.map((e) => ({
+                      value: e.name,
+                      label: e.trainable_here === false ? `${e.name} (not on this machine)` : e.name,
+                    }))}
                     tip="xurdif trains the compact models Kiln started with. diffusers trains Hugging Face UNet2DModel models and can fine-tune ones you import." />
                 )}
 
@@ -937,7 +985,7 @@ export default function Train() {
                       tip="How much structural similarity is mixed into the loss on top of the edge-aware L1. 0 turns it off. Raising it pushes the model toward matching local structure and texture rather than just pixel values; too high and training can stall." />
                   </>
                 ) : (
-                  <DiffusersOptions form={form} set={set} engine={engines.find((e) => e.name === form.backend)} seeded={fromMode === "library"} />
+                  <DiffusersOptions form={form} set={set} engine={engineInfo} seeded={fromMode === "library"} onMps={onMps} />
                 )}
                 <Tooltip text={form.backend === "xurdif"
                   ? "Weights the training loss toward the edges found in your images, so lines and texture stay sharp instead of averaging out. Costs a little speed per step.\n\nOn by default for xurdif — this is how Kiln's own models were trained. Turning it off leaves a plain L1 loss."
@@ -965,7 +1013,7 @@ export default function Train() {
               <button type="button" className="btn danger w-full" onClick={stop}>Stop training</button>
             ) : (
               <button type="button" className="btn primary w-full" onClick={start}
-                disabled={!form.dataset || (fromMode === "library" && !form.resume) || !nameAvailable || !trimmedRunName}>
+                disabled={!!engineBlocked || !form.dataset || (fromMode === "library" && !form.resume) || !nameAvailable || !trimmedRunName}>
                 Start training
               </button>
             )}
