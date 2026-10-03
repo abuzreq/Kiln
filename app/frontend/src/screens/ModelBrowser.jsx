@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, pollJob } from "../api.js";
 import { useApp } from "../state.jsx";
 import { Text, Select, Progress, Empty, Loading } from "../components/ui.jsx";
@@ -344,6 +344,28 @@ function ImportModel({ onDone }) {
 }
 
 
+/** The height from `ref`'s element down to the bottom of the page's scrolling
+ *  area, as `--avail-h` on it. The library is pinned beside a long column of
+ *  forms and should fill the screen beside them; that height is whatever the
+ *  app bar, tabs and intro line leave, which CSS cannot know once they wrap. */
+function useAvailableHeight(ref) {
+  useLayoutEffect(() => {
+    const el = ref.current;
+    const scroller = el?.closest(".content");
+    if (!el || !scroller) return undefined;
+    const measure = () => {
+      const offset = el.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+      const h = scroller.clientHeight - offset - parseFloat(getComputedStyle(scroller).paddingBottom);
+      el.style.setProperty("--avail-h", `${Math.max(0, Math.floor(h))}px`);
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(scroller);
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
+}
+
 export default function ModelBrowser() {
   const {
     toast, setModelPath, stars, toggleStar, setPrepareTab, setTrainFromPath,
@@ -351,6 +373,8 @@ export default function ModelBrowser() {
   } = useApp();
   const [renameModel, setRenameModel] = useState(null);
   const [pendingDel, setPendingDel] = useState(null);
+  const splitRef = useRef(null);
+  useAvailableHeight(splitRef);
   // Files that look like checkpoints and will not load. They are skipped with
   // only a log line, so without this a wrong-format .pt simply never appears and
   // there is nothing to act on.
@@ -405,7 +429,7 @@ export default function ModelBrowser() {
   if (!models) return <Loading>Loading models…</Loading>;
 
   return (
-    <div className="work-split">
+    <div className="work-split models-split" ref={splitRef}>
       <div className="col">
         <div className="card">
           <h3>Models</h3>
@@ -445,8 +469,8 @@ export default function ModelBrowser() {
         </div>
       </div>
 
-      <div className="col">
-        <div className="card">
+      <div className="col library-col">
+        <div className="card library-card">
           <h3>Library</h3>
           {library.length
             ? <ModelCards models={library} {...cardProps} />
