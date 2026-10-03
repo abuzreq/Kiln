@@ -94,21 +94,23 @@ class ModelManager:
         return sources
 
     def scan(self, extra_dirs: list[Path] | None = None) -> list[ModelDescriptor]:
+        return list(self.iter_scan(extra_dirs))
+
+    def iter_scan(self, extra_dirs: list[Path] | None = None):
+        """``scan``, yielding each model as soon as its backend has read it."""
         sources = self._sources(extra_dirs)
-        out: list[ModelDescriptor] = []
         seen: set[str] = set()
         for name in backends.available():
             try:
-                found = backends.get(name).scan(sources)
+                for meta in backends.get(name).iter_scan(sources):
+                    if meta.path in seen:
+                        continue
+                    seen.add(meta.path)
+                    yield meta
             except Exception as e:  # noqa: BLE001
+                # Models already yielded stay listed; the rest of this backend's
+                # are lost, as they were when scan() raised before yielding.
                 log.warning("backend %s failed to scan: %s", name, e)
-                continue
-            for meta in found:
-                if meta.path in seen:
-                    continue
-                seen.add(meta.path)
-                out.append(meta)
-        return out
 
     def scan_public(self, include_hidden: bool = False) -> list[dict]:
         """Scan plus role (main vs training checkpoint), starred and ownership flags.
@@ -117,12 +119,15 @@ class ModelManager:
         ``library.owned_by_kiln``); the UI offers Hide for everything else.
         Hidden models are left out unless ``include_hidden``.
         """
+        return list(self.iter_public(include_hidden))
+
+    def iter_public(self, include_hidden: bool = False):
+        """``scan_public``, one model at a time, for the streamed listing."""
         from app.core import library
 
         stars = {library._norm_star_path(p) for p in library.list_stars()}
         hidden = set(library.list_hidden())
-        out = []
-        for m in self.scan():
+        for m in self.iter_scan():
             is_hidden = library._norm_star_path(m.path) in hidden
             if is_hidden and not include_hidden:
                 continue
@@ -153,8 +158,7 @@ class ModelManager:
             if card and card.get("created_at"):
                 d["created_at"] = card["created_at"]
             d["mtime"] = card.get("created_at") if card and card.get("created_at") else mtime
-            out.append(d)
-        return out
+            yield d
 
     def skipped(self, extra_dirs: "list[Path] | None" = None) -> list[dict]:
         """Files that look like models but could not be read, and why.

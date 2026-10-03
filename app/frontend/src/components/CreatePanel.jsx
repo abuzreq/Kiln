@@ -15,6 +15,18 @@ const PANEL_KEY = "kiln.createPanelTab";
 
 const DEFAULT_PP = { contrast: 1, gamma: 1, saturation: 1, eqhist: 0, unsharp: 0, noise: 0 };
 
+// Resize factors in the Finish tab: shrinking as well as enlarging.
+const RESIZE_FACTORS = [
+  { f: 0.25, label: "¼×", tip: "A quarter of the size" },
+  { f: 0.5, label: "½×", tip: "Half the size" },
+  { f: 2, label: "2×", tip: "Twice the size" },
+  { f: 3, label: "3×", tip: "3 times the size" },
+  { f: 4, label: "4×", tip: "4 times the size" },
+];
+// Play's CANVAS_MIN: an opened image smaller than this would be stretched up
+// to it, so a shrink that lands below it is refused rather than undone.
+const RESIZE_MIN_SIDE = 64;
+
 function isIdentityPostproc(pp) {
   if (!pp) return true;
   return (
@@ -65,7 +77,11 @@ export default function CreatePanel() {
   const [srFactor, setSrFactor] = useState(2);
   const [srSharpen, setSrSharpen] = useState(0.5);
   const [srBusy, setSrBusy] = useState(false);
-  const [genChange, setGenChange] = useState(0.7);
+  // Full Change: Generate makes a new image, at the whole schedule's steps.
+  // Reworking what is on the canvas is the deliberate move, so it is the one
+  // you pull the slider down for -- starting at 0.7 meant the second Generate
+  // quietly restyled the first picture instead of making another.
+  const [genChange, setGenChange] = useState(1);
   // Generate or Finish. Remembered, so someone who is finishing a picture
   // comes back to Finish.
   const [panelTab, setPanelTabState] = useState(() => (loadStored(PANEL_KEY) === "finish" ? "finish" : "generate"));
@@ -423,20 +439,29 @@ export default function CreatePanel() {
     if (job) await api.post(`/jobs/${job.id}/cancel`);
   };
 
-  /** Upscaling flattens. Every layer would have to be resampled to stay
+  /** Resizing flattens. Every layer would have to be resampled to stay
    *  aligned, and resampling each one separately is worse than resampling the
    *  composite, so the stack collapses to a single layer at the new size. The
    *  masks stay: their strokes are normalised and replay at the new size. */
+  const shrinking = srFactor < 1;
+  const resizeVerb = shrinking ? "Downscale" : "Upscale";
+  const resized = canvasSize
+    ? { w: Math.max(1, Math.round(canvasSize.w * srFactor)), h: Math.max(1, Math.round(canvasSize.h * srFactor)) }
+    : null;
+  const resizeTooSmall = !!resized && Math.min(resized.w, resized.h) < RESIZE_MIN_SIDE;
+  const factorLabel = RESIZE_FACTORS.find((x) => x.f === srFactor)?.label || `${srFactor}×`;
   const upscale = async () => {
     const src = frame;
-    if (!src) return;
+    if (!src || resizeTooSmall) return;
     setSrBusy(true);
     try {
       const r = await api.post("/tools/superres", { image: src, factor: srFactor, sharpen: srSharpen });
-      const card = frameCard ? { ...frameCard, upscaled: srFactor } : null;
-      await openDocument(r.image, card, `Upscaled ${srFactor}x`, { keepMasks: true });
+      const card = frameCard
+        ? { ...frameCard, [shrinking ? "downscaled" : "upscaled"]: srFactor }
+        : null;
+      await openDocument(r.image, card, `${shrinking ? "Downscaled" : "Upscaled"} ${factorLabel}`, { keepMasks: true });
       pushHistory(r.image, null, card);
-      toast(`Upscaled to ${r.size[0]}×${r.size[1]} — layers flattened`, "success");
+      toast(`${shrinking ? "Downscaled" : "Upscaled"} to ${r.size[0]}×${r.size[1]} — layers flattened`, "success");
     } catch (e) { toast(e.message, "error"); }
     setSrBusy(false);
   };
@@ -790,35 +815,39 @@ export default function CreatePanel() {
           </div>
 
           <div className="finish-block">
-            <div className="row between center gap-2">
+            <div className="row between center gap-2 wrap">
               <span className="finish-block-title">
-                <TipLabel tip="Enlarges the finished image with Lanczos resampling. Ignores masks, and flattens the layer stack into one layer at the new size; the masks are kept.">
-                  Upscale
+                <TipLabel tip="Enlarges or shrinks the finished image with Lanczos resampling. Ignores masks, and flattens the layer stack into one layer at the new size; the masks are kept.">
+                  Resize
                 </TipLabel>
               </span>
               <Seg
-                ariaLabel="Upscale factor"
+                ariaLabel="Resize factor"
                 size="sm"
                 value={String(srFactor)}
                 onChange={(v) => setSrFactor(Number(v))}
-                tabs={[2, 3, 4].map((f) => ({ id: String(f), label: `${f}×`, tip: `${f} times the size` }))}
+                tabs={RESIZE_FACTORS.map(({ f, label, tip }) => ({ id: String(f), label, tip }))}
               />
             </div>
             <Slider label="Sharpen" value={srSharpen} min={0} max={3} step={0.1} onChange={setSrSharpen}
-              tip="Unsharp-mask strength applied after enlarging." />
+              tip={`Unsharp-mask strength applied after ${shrinking ? "shrinking" : "enlarging"}.`} />
             <button
               type="button"
               className="btn sm w-full"
               onClick={upscale}
-              disabled={srBusy || !frame}
+              disabled={srBusy || !frame || resizeTooSmall}
             >
               {srBusy
-                ? "Upscaling…"
-                : canvasSize
-                  ? `Upscale to ${canvasSize.w * srFactor} × ${canvasSize.h * srFactor}`
-                  : "Upscale"}
+                ? `${shrinking ? "Downscaling" : "Upscaling"}…`
+                : resized
+                  ? `${resizeVerb} to ${resized.w} × ${resized.h}`
+                  : resizeVerb}
             </button>
-            <p className="hint mb-0">Flattens the layers into one; the masks are kept. The result also lands in Results.</p>
+            <p className="hint mb-0">
+              {resizeTooSmall
+                ? `At ${factorLabel} this would be ${resized.w} × ${resized.h}, below the canvas minimum of ${RESIZE_MIN_SIDE} px a side.`
+                : "Flattens the layers into one; the masks are kept. The result also lands in Results."}
+            </p>
           </div>
         </div>
       )}

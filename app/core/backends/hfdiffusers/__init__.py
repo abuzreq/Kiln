@@ -77,6 +77,9 @@ class DiffusersBackend(Backend):
     def scan(self, sources):
         return loader.scan(sources)
 
+    def iter_scan(self, sources):
+        return loader.iter_scan(sources)
+
     def describe(self, ref: ModelRef):
         return loader.describe(ref.locator, ref.revision)
 

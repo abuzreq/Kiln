@@ -46,7 +46,7 @@ function usePageVisible() {
 
 export default function Start() {
   const {
-    models, stars, appMode, busyTabs, toast,
+    models, modelsPartial, stars, appMode, busyTabs, toast,
     setModelPath, openPrepare, openPlay,
   } = useApp();
 
@@ -60,11 +60,16 @@ export default function Start() {
   const motionAllowed = useMotionAllowed();
   const pageVisible = usePageVisible();
 
+  // The first scan streams in: show each model as it is read rather than an
+  // empty spinner until the slowest checkpoint opens. A later refresh keeps the
+  // finished list on screen instead of shrinking it back to the first few.
+  const listed = models ?? (modelsPartial?.length ? modelsPartial : null);
+  const stillReading = !models && !!modelsPartial;
   const cards = useMemo(() => {
-    if (!models) return null;
-    const { pinned, rest } = splitModels(tagStars(models, stars));
+    if (!listed) return null;
+    const { pinned, rest } = splitModels(tagStars(listed, stars));
     return [...pinned, ...rest];
-  }, [models, stars]);
+  }, [listed, stars]);
 
   // --- fill the preview cache -----------------------------------------
   // One polled call does double duty: it reports what is cached and keeps the
@@ -190,7 +195,9 @@ export default function Start() {
       <div className="start-section">
         <div className="row between center wrap gap-2">
           <h3 className="mb-0">Models{cards?.length ? ` (${cards.length})` : ""}</h3>
-          {cards?.length > 0 && (
+          {stillReading ? (
+            <span className="sub"><span className="spinner sm" aria-hidden /> Reading more models…</span>
+          ) : cards?.length > 0 && (
             <span className="sub">Click a card to open that seed</span>
           )}
         </div>

@@ -4,7 +4,7 @@ import json
 from dataclasses import replace
 from functools import partial
 
-from flask import Blueprint, request, send_file
+from flask import Blueprint, Response, request, send_file, stream_with_context
 
 from app.core.engine.inpaint import fill_size
 from app.core.engine.lanes import enqueue, is_oom
@@ -26,7 +26,24 @@ bp = Blueprint("perform", __name__, url_prefix="/api")
 
 @bp.get("/models")
 def list_models():
-    return ok(manager.scan_public(include_hidden=request.args.get("hidden") == "1"))
+    include_hidden = request.args.get("hidden") == "1"
+    if request.args.get("stream") != "1":
+        return ok(manager.scan_public(include_hidden=include_hidden))
+
+    # One JSON model per line, written as each checkpoint is read, so the Start
+    # hub can show the first cards while the rest are still being opened. The
+    # last line is {"done": true}: a stream cut short without it is a failure,
+    # not a short list.
+    def lines():
+        try:
+            for d in manager.iter_public(include_hidden=include_hidden):
+                yield json.dumps({"model": d}, default=str) + "\n"
+            yield json.dumps({"done": True}) + "\n"
+        except Exception as e:  # noqa: BLE001
+            yield json.dumps({"error": str(e)}) + "\n"
+
+    return Response(stream_with_context(lines()), mimetype="application/x-ndjson",
+                    headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
 @bp.get("/samplers")
