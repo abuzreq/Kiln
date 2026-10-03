@@ -255,6 +255,113 @@ def download():
     return ok({"job": job.to_dict()})
 
 
+def _sample_folders() -> list[Path]:
+    """Where a sample might already be: the workspace, then the install's own."""
+    root = Path(__file__).resolve().parents[3]
+    return [workspace.models, root / "models" / "pretrained"]
+
+
+@bp.get("/samples")
+def samples():
+    """The sample models, and which of them are already here."""
+    from app.core import sample_models as sm
+
+    folders = _sample_folders()
+    out = []
+    for s in sm.SAMPLES:
+        where = sm.installed_where(s, folders)
+        out.append({
+            "file": s["file"], "name": Path(s["file"]).stem, "mtype": s["mtype"], "step": s["step"],
+            "size_mb": round(s["size"] / (1 << 20), 1), "installed": bool(where),
+            "path": str(where) if where else None,
+        })
+    return ok({
+        "models": out,
+        "author": sm.AUTHOR,
+        "release": sm.RELEASE_PAGE,
+        "total_mb": round(sum(s["size"] for s in sm.SAMPLES) / (1 << 20)),
+    })
+
+
+@bp.post("/samples/download")
+def download_samples():
+    """Fetch sample models into the workspace, one job for the lot.
+
+    Each file is written to a ``.part`` beside its destination and only renamed
+    into place once its size and SHA-256 match the pinned manifest, so a failed
+    or cancelled download never leaves a half-file that looks like a model.
+    Samples already present are skipped.
+    """
+    from app.core import sample_models as sm
+
+    body = request.get_json(force=True, silent=True) or {}
+    wanted = body.get("files")
+    if wanted is not None and not isinstance(wanted, list):
+        raise ValidationError("files must be a list")
+    entries = sm.SAMPLES if not wanted else [e for e in (sm.by_file(f) for f in wanted) if e]
+    folders = _sample_folders()
+    todo = [e for e in entries if not sm.installed_where(e, folders)]
+    if not todo:
+        return ok({"job": None, "skipped": len(entries)})
+
+    job = registry.create("download")
+    total = sum(e["size"] for e in todo)
+    job.message = f"downloading {len(todo)} sample model{'s' if len(todo) != 1 else ''}..."
+
+    def worker():
+        import requests
+
+        done_bytes = 0
+        saved = []
+        part = None
+        try:
+            workspace.models.mkdir(parents=True, exist_ok=True)
+            for i, e in enumerate(todo, 1):
+                dest = workspace.models / e["file"]
+                part = dest.with_name(dest.name + ".part")
+                got = 0
+                with requests.get(sm.url_for(e), stream=True, timeout=30) as r:
+                    if r.status_code == 404:
+                        raise ValueError(f"{e['file']} is not on the release yet ({sm.RELEASE_PAGE})")
+                    r.raise_for_status()
+                    with open(part, "wb") as f:
+                        for chunk in r.iter_content(chunk_size=1 << 20):
+                            if job.cancelled():
+                                job.status = "cancelled"
+                                job.message = f"cancelled; kept {len(saved)} of {len(todo)}"
+                                return
+                            f.write(chunk)
+                            got += len(chunk)
+                            job.progress = min(0.999, (done_bytes + got) / total)
+                            job.message = (f"{e['file']} ({i} of {len(todo)}) · "
+                                           f"{(done_bytes + got) >> 20} / {total >> 20} MB")
+                if got != e["size"] or sm.sha256_of(part) != e["sha256"]:
+                    raise ValueError(f"{e['file']} did not match its checksum; nothing was kept for it")
+                part.replace(dest)
+                part = None
+                name = dest.stem
+                library.ensure_card(dest, name=name, original_name=name, trained_as=[name])
+                saved.append(e["file"])
+                done_bytes += e["size"]
+            job.status = "done"
+            job.progress = 1.0
+            job.message = f"saved {len(saved)} sample model{'s' if len(saved) != 1 else ''}"
+        except Exception as ex:  # noqa: BLE001
+            job.status = "error"
+            job.message = f"{ex}" + (f" (kept {len(saved)} that finished)" if saved else "")
+        finally:
+            if part is not None:
+                part.unlink(missing_ok=True)
+            job.detail["saved"] = saved
+            if saved:
+                manager.clear_cache()
+
+    t = threading.Thread(target=worker, daemon=True)
+    job.thread = t
+    t.start()
+    return ok({"job": job.to_dict()})
+
+
 @bp.post("/model/import")
 def import_model():
     """Take a .pt the user already has and put it where Kiln keeps models.

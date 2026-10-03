@@ -234,16 +234,20 @@ To pick one by hand, find your driver with `nvidia-smi` and use the matching ind
 
 ## Getting models
 
-The repository ships no weights. Four ways to get some:
+The repository ships no weights. Five ways to get some:
 
-1. **A model you already have** — drop the `.pt` onto **Prepare ▸ Models ▸ Import a model**,
+1. **The sample models** — seven xurdif checkpoints trained by Hannu Töyrylä, who wrote
+   xurdif, shared with his permission. **Prepare ▸ Models ▸ Sample models ▸ Get all**
+   fetches them (319 MB) from the [`sample-models-v1` release](https://github.com/abuzreq/kiln/releases/tag/sample-models-v1)
+   into your library, checking each against its pinned SHA-256.
+2. **A model you already have** — drop the `.pt` onto **Prepare ▸ Models ▸ Import a model**,
    or give it the path. Kiln copies it into `~/kiln/models` (or `$KILN_WORKSPACE/models`),
    which is where it keeps models and the only folder you need to know about. Putting files
    there yourself works too; **Workspace** in the header opens it.
-2. **Pretrained xurdif checkpoints** from the [author's Dropbox folder](https://www.dropbox.com/scl/fo/flh4pczukrrlb3ar1rfuc/AAT22M2b21Tf1yKe3Ji0HS0?rlkey=f1zdhexy36p3hffcun686m77c&dl=0),
+3. **More xurdif checkpoints** from the [author's Dropbox folder](https://www.dropbox.com/scl/fo/flh4pczukrrlb3ar1rfuc/AAT22M2b21Tf1yKe3Ji0HS0?rlkey=f1zdhexy36p3hffcun686m77c&dl=0),
    loaded under **Prepare ▸ Models ▸ Get a model**.
-3. **Hugging Face**, under **Prepare ▸ Models ▸ From Hugging Face**.
-4. **Train your own**, which is what the rest of Prepare is for.
+4. **Hugging Face**, under **Prepare ▸ Models ▸ From Hugging Face**.
+5. **Train your own**, which is what the rest of Prepare is for.
 
 Kiln also scans the install's own `models/pretrained` and `models/fine_tuned`, so a file
 dropped there shows up as well — but those are the install's folders, not yours, so Kiln
