@@ -65,7 +65,11 @@ export default function CreatePanel() {
   const [srFactor, setSrFactor] = useState(2);
   const [srSharpen, setSrSharpen] = useState(0.5);
   const [srBusy, setSrBusy] = useState(false);
-  const [genChange, setGenChange] = useState(0.7);
+  // Full Change: Generate makes a new image, at the whole schedule's steps.
+  // Reworking what is on the canvas is the deliberate move, so it is the one
+  // you pull the slider down for -- starting at 0.7 meant the second Generate
+  // quietly restyled the first picture instead of making another.
+  const [genChange, setGenChange] = useState(1);
   // Generate or Finish. Remembered, so someone who is finishing a picture
   // comes back to Finish.
   const [panelTab, setPanelTabState] = useState(() => (loadStored(PANEL_KEY) === "finish" ? "finish" : "generate"));
