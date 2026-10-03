@@ -302,12 +302,9 @@ def _on_default_stream(device: str):
 
 
 def _free_cuda():
-    try:
-        torch = _torch()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    except Exception:  # noqa: BLE001
-        pass
+    from app.core import devices
+
+    devices.empty_cache()
 
 
 manager = ModelManager()

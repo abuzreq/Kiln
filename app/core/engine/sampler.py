@@ -74,10 +74,11 @@ def _noise_timestep(t, device):
 
 
 def pick_device(requested: str | None = None) -> str:
-    torch = _torch()
     if requested and requested != "auto":
         return requested
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    from app.core import devices
+
+    return devices.best_device()
 
 
 # Solvers the UI offers. "multistep" ones carry solver history between steps,
@@ -240,6 +241,10 @@ class _Clip:
             import clip
 
             model, _ = clip.load("ViT-B/32", device=device, jit=False)
+            if want == "mps":
+                # clip.load keeps fp16 weights on anything but the CPU. Apple's
+                # GPU runs fp32 in Kiln until half precision there is measured.
+                model = model.float()
             cls._inst = (model.eval(), clip)
             return cls._inst
 
@@ -835,6 +840,8 @@ class Sampler:
                 t_batch = torch.full((bs,), int(i), device=device, dtype=torch.long)
                 t_step = int(i)
                 with torch.no_grad():
+                    # CUDA only. MPS runs fp32 on purpose until fp16 there has
+                    # been checked against the CPU on real hardware.
                     autocast = (
                         torch.autocast(device_type="cuda", dtype=torch.float16)
                         if device == "cuda"

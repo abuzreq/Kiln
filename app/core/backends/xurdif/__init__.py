@@ -81,7 +81,7 @@ class XurdifBackend(Backend):
         latent=False,
         # xurdiftrainer.py hardcodes .cuda(); there is no CPU training path.
         train_devices=("cuda",),
-        infer_devices=("cuda", "cpu"),
+        infer_devices=("cuda", "mps", "cpu"),
     )
 
     # --- identity -----------------------------------------------------
