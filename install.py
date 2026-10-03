@@ -395,13 +395,14 @@ def install_requirements(force: bool = False):
         report = cuda_pick.diagnose(version, build, cuda_pick.driver_version(), str(py))
         print(
             "WARNING: an NVIDIA GPU is present but PyTorch in the venv cannot use it.\n"
-            "Training and sampling will not work.\n"
+            "Kiln will run on the CPU: sampling is slow and xurdif models cannot train.\n"
             f"  {report['hint']}"
         )
     else:
         print(
-            "No NVIDIA GPU detected: dataset prep, model inspection, bending and "
-            "merging work on CPU; training and sampling need CUDA."
+            "No NVIDIA GPU detected: Kiln runs on the CPU. Sampling, bending and "
+            "merging work, slowly; Diffusers models can train, very slowly; "
+            "training xurdif models needs an NVIDIA GPU."
         )
 
 

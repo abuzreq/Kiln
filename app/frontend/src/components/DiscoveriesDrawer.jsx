@@ -9,7 +9,6 @@ import DiscoveriesModal from "./DiscoveriesModal.jsx";
 // A drawer along the bottom of the app for what the novelty explorer found.
 // The strip keeps scrolling while the explorer runs, and new entries join it
 // at the trailing end, so it reads as a growing place rather than a gallery.
-// See docs/exploration-design.md, "The drawer".
 
 const SPEED = 30;          // px per second
 const HOLD_END = 2500;     // ms to rest at the end before starting over

@@ -13,8 +13,6 @@ import {
 // steps, seed, size, sampler, and anything overriding them), and the row itself
 // becomes a drawer that hangs from the bar: floating over the page, or pinned
 // into it, which is the old layout.
-//
-// docs/play-setup-drawer-design.md has the reasoning and the states.
 
 const KEY = "kiln.playSetup";        // "closed" | "pinned"
 const PIN_KEY = "kiln.playSetupPin"; // "1" when the last open drawer was pinned

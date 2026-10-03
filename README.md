@@ -59,8 +59,11 @@ checkpoints, not library models, until you **Save** one into the library under a
 
 ### Prepare ▸ Models
 
-Your library, plus three ways to add to it:
+Your library, plus five ways to add to it:
 
+* **Sample models** — seven xurdif models to start from, fetched in one click (see
+  [Getting models](#getting-models)).
+* **Import a model** — a `.pt` you already have: drop it in, or give its path.
 * **Get a model** — download a checkpoint from a URL.
 * **Re-home a model** — convert a xurdif `.pt` into the Diffusers format, leaving the original
   alone.
@@ -70,7 +73,7 @@ Your library, plus three ways to add to it:
 Model cards show a sample, the architecture, attention layout and training step, and offer **Use
 in Create**, **Train**, rename and pin. Models inside Kiln's workspace can be deleted; models Kiln
 merely found elsewhere are hidden instead, leaving the file where it is. A checkbox lists hidden
-models again.
+models again, and **Open models folder** shows the files themselves.
 
 ### Create ▸ Canvas
 
@@ -148,11 +151,27 @@ VRAM. **Prepare ▸ Models ▸ Re-home a model** converts a `.pt` into it withou
 
 * **Python 3.10+**
 * **Git** on your `PATH` (some dependencies, such as OpenAI CLIP, are fetched from source)
-* **An NVIDIA GPU with CUDA.** xurdif requires it; Diffusers will run on CPU, but training will
-  be slow.
+* **An NVIDIA GPU with CUDA is strongly recommended.** Without one Kiln runs on the CPU — see
+  [Platforms](#platforms).
 * **~6 GB of disk** for the CUDA PyTorch wheels and the rest of the dependencies.
+* **Internet on first use of some features.** Text steering downloads OpenAI's CLIP weights
+  (about 350 MB) and the DINOv2 novelty metric downloads Meta's model (about 350 MB), each once.
+  Models from Hugging Face and the sample models download when you ask for them. Third-party
+  models carry their own licences.
 * **Node.js 18+** only if you want to change the interface. The built UI ships in
   `app/frontend/build`.
+
+### Platforms
+
+Kiln uses an NVIDIA GPU through CUDA when it has one, and the CPU otherwise:
+
+| | NVIDIA GPU (Windows, Linux) | CPU only (any machine, including Macs) |
+| --- | --- | --- |
+| **Sampling, painting, bending, merging** | Yes | Yes, slowly |
+| **Training xurdif models** | Yes | No — the xurdif trainer needs CUDA |
+| **Training and fine-tuning Diffusers models** | Yes | Yes, very slowly |
+
+On a Mac, Kiln runs on the CPU: it does not use Apple-silicon GPUs (Metal) yet.
 
 ## Install and run
 
@@ -243,7 +262,7 @@ The repository ships no weights. Five ways to get some:
 2. **A model you already have** — drop the `.pt` onto **Prepare ▸ Models ▸ Import a model**,
    or give it the path. Kiln copies it into `~/kiln/models` (or `$KILN_WORKSPACE/models`),
    which is where it keeps models and the only folder you need to know about. Putting files
-   there yourself works too; **Workspace** in the header opens it.
+   there yourself works too; **Open models folder** on the Models page opens it.
 3. **More xurdif checkpoints** from the [author's Dropbox folder](https://www.dropbox.com/scl/fo/flh4pczukrrlb3ar1rfuc/AAT22M2b21Tf1yKe3Ji0HS0?rlkey=f1zdhexy36p3hffcun686m77c&dl=0),
    loaded under **Prepare ▸ Models ▸ Get a model**.
 4. **Hugging Face**, under **Prepare ▸ Models ▸ From Hugging Face**.
@@ -274,8 +293,10 @@ npm run dev
 
 ### Smoke tests
 
-`scripts/` holds runnable checks rather than a unit-test suite. Each one builds a throwaway
-workspace and prints what it verified:
+`scripts/` holds runnable checks rather than a unit-test suite. None of them touches your own
+workspace: each builds a throwaway one (or uses `$KILN_WORKSPACE` if you set it) and prints
+what it verified. Run them with the virtual environment's Python (`.venv\Scripts\python` on
+Windows):
 
 ```bash
 python scripts/smoke_engine.py            # the engine layer, on CPU
@@ -301,9 +322,9 @@ app/
 utils/             # shared helpers
 scripts/           # smoke tests
 vendor/xurdif/     # vendored xurdif engine
-models/            # checkpoints that ship with the install (scanned, but ~/kiln/models
-                   #   is where your own models belong)
 ```
+
+Models, datasets, runs and images are not in the repository; they live in the workspace.
 
 ---
 
@@ -311,5 +332,7 @@ models/            # checkpoints that ship with the install (scanned, but ~/kiln
 
 MIT — see [LICENSE](LICENSE).
 
-Kiln vendors the `xurdif` library by Hannu Töyrylä (MIT). What was changed and why is recorded in
-[vendor/xurdif/UPSTREAM.md](vendor/xurdif/UPSTREAM.md).
+Kiln vendors [xurdif](https://github.com/htoyryla/xurdif) by Hannu Töyrylä, also MIT
+([vendor/xurdif/LICENSE](vendor/xurdif/LICENSE)), at upstream commit `a566214`. Kiln's changes to
+it are marked `# KILN:` in the source. The other third-party code that ships with Kiln, and its
+licences, is listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

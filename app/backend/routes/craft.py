@@ -295,8 +295,8 @@ def merge():
 
 
 # --- novelty explorer -------------------------------------------------
-# A background worker over random bend stacks; see app/core/craft/explore.py
-# and docs/exploration-design.md. Run state is in memory, the archive on disk.
+# A background worker over random bend stacks; see app/core/craft/explore.py.
+# Run state is in memory, the archive on disk.
 @bp.post("/explore")
 def explore_toggle():
     from app.core.craft import explore

@@ -11,6 +11,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import _scratch_workspace  # noqa: E402,F401  -- before app: never write to ~/kiln
+
 import torch
 from PIL import Image, ImageChops
 from app.core.engine.arch import build_unet

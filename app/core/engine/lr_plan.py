@@ -16,8 +16,6 @@ run and compiled at launch: a fractional plan stored on disk would silently
 rescale the whole schedule the moment someone bumped ``train_steps`` on a
 continue. ``preset`` and ``params`` are provenance -- read by the UI, ignored by
 the evaluator -- so retuning a preset later never changes what an old run did.
-
-See ``docs/lr-schedule-design.md``.
 """
 import json
 import math

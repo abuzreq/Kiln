@@ -2,6 +2,10 @@
 # platform. kiln.sh / kiln.command break with `bad interpreter: ^M` if a
 # Windows editor CRLF-ifies them.
 * text=auto eol=lf
+# ...except Windows batch files: cmd.exe misreads LF-only .bat files (labels and
+# GOTO can jump to the wrong line), so they check out with CRLF everywhere.
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
 
 # Binary assets: never touch.
 *.pt      binary

@@ -14,6 +14,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import _scratch_workspace  # noqa: E402,F401  -- before app: never write to ~/kiln
+
 import torch  # noqa: E402
 
 from app.backend.app import create_app  # noqa: E402
