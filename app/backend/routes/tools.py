@@ -14,7 +14,7 @@ from utils.api_responses import ok, err
 from utils.imaging import build_card, bytes_with_params, data_url, from_data_url, save_with_params
 from utils.process_control import registry
 from utils.exceptions import ValidationError
-from utils.validators import require, as_int, safe_name
+from utils.validators import require, as_float, as_int, safe_name
 
 bp = Blueprint("tools", __name__, url_prefix="/api/tools")
 
@@ -24,7 +24,9 @@ def superres():
     body = request.get_json(force=True, silent=True) or {}
     (image,) = require(body, "image")
     img = from_data_url(image)
-    out = upscale(img, factor=as_int(body.get("factor", 2), "factor", 2, 4), sharpen=float(body.get("sharpen", 0.0)))
+    # Below 1 shrinks: the Finish tab offers 1/4 and 1/2 next to 2-4x.
+    factor = as_float(body.get("factor", 2), "factor", 0.25, 4)
+    out = upscale(img, factor=factor, sharpen=float(body.get("sharpen", 0.0)))
     return ok({"image": data_url(out), "size": out.size})
 
 
