@@ -6,6 +6,7 @@ The chosen folder is remembered in a small prefs file under the user config dir.
 """
 import json
 import os
+import sys
 from pathlib import Path
 
 from utils.logger import get_logger
@@ -180,15 +181,60 @@ def _nvidia_gpu_present() -> bool:
         return False
 
 
+def _mac_device_info(info: dict, torch) -> dict:
+    """The Mac half of ``get_device_info``: Apple's GPU, or why there is none.
+
+    MPS memory is the machine's unified memory, shared with the CPU and every
+    other app, so "total" is the share Metal recommends for one process and
+    "used" is what this process holds -- not a card's VRAM.
+    """
+    from app.core import devices  # noqa: PLC0415
+    from utils import platform_mac  # noqa: PLC0415
+
+    if devices.mps_available():
+        info["mps"] = True
+        info["device"] = devices.best_device()  # "cpu" under KILN_DEVICE=cpu
+        gpu = {"index": 0, "name": platform_mac.chip_name() or "Apple GPU", "shared": True}
+        try:
+            total = round(torch.mps.recommended_max_memory() / (1024 * 1024))
+            used = round(torch.mps.driver_allocated_memory() / (1024 * 1024))
+            gpu.update({
+                "total_mem_mb": total,
+                "used_mem_mb": used,
+                "free_mem_mb": max(total - used, 0),
+                "used_pct": round(100 * used / max(total, 1), 1),
+            })
+        except Exception:  # noqa: BLE001 -- older torch: no numbers, still a GPU
+            pass
+        info["gpus"] = [gpu]
+    elif platform_mac.under_rosetta():
+        info["reason"] = "rosetta"
+        info["hint"] = ("Python is running under Rosetta, so PyTorch cannot use this Mac's GPU. "
+                        "Reinstall Kiln with an arm64 Python from python.org.")
+    elif platform_mac.is_apple_silicon():
+        info["reason"] = "torch_no_mps"
+        info["hint"] = ("This PyTorch cannot use the Apple GPU. Repair it with: "
+                        "python install.py --fix-torch")
+    else:
+        info["reason"] = "no_gpu"
+        info["hint"] = ("This Mac has no Apple Silicon GPU. Kiln runs on the CPU, "
+                        "and training is unavailable.")
+    return info
+
+
 def get_device_info() -> dict:
     """Report GPU availability without importing torch until needed."""
-    info = {"torch": False, "cuda": False, "device": "cpu", "gpus": []}
+    info = {"torch": False, "cuda": False, "mps": False, "device": "cpu", "gpus": []}
     try:
         import torch  # noqa: PLC0415
 
         info["torch"] = True
         info["torch_version"] = torch.__version__
         info["torch_cuda_build"] = torch.version.cuda  # None for a CPU-only wheel
+        from utils import platform_mac  # noqa: PLC0415
+
+        if platform_mac.is_mac():
+            return _mac_device_info(info, torch)
         if not torch.cuda.is_available():
             if not _nvidia_gpu_present():
                 info["reason"] = "no_gpu"
@@ -198,8 +244,6 @@ def get_device_info() -> dict:
                 # "some CUDA problem" into which wheel to install, which matters
                 # most when the wheel is *newer* than the driver: that case used
                 # to read as though Kiln itself wanted that CUDA version.
-                import sys  # noqa: PLC0415
-
                 from utils import cuda as cuda_pick  # noqa: PLC0415
 
                 driver = cuda_pick.driver_version()

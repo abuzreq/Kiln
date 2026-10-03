@@ -96,19 +96,30 @@ def architectures():
 
 @bp.get("/train/backends")
 def train_backends():
-    """What each engine can train, so the UI offers only real options."""
+    """What each engine can train, so the UI offers only real options.
+
+    ``trainable_here`` is the machine's answer, not the engine's: on a Mac the
+    xurdif trainer has no GPU it can run on, so the default moves to the first
+    engine that does.
+    """
     from app.core import backends
+    from app.core.devices import train_block_reason
 
     out = []
     for name in backends.available():
         b = backends.get(name)
+        reason = train_block_reason(b)
         out.append({
             "name": name,
             "modes": list(b.training_modes),
             "capabilities": b.capabilities.to_dict(),
             "presets": b.training_presets(),
+            "trainable_here": reason is None,
+            "unavailable_reason": reason,
         })
-    return ok({"backends": out, "default": "xurdif"})
+    trainable = [e["name"] for e in out if e["trainable_here"]]
+    default = "xurdif" if "xurdif" in trainable else (trainable[0] if trainable else "xurdif")
+    return ok({"backends": out, "default": default})
 
 
 def presets_view() -> dict:
@@ -308,6 +319,12 @@ def start():
               "lora": backend.capabilities.lora}.get(mode, False)
     if not needed:
         return err(f"the {backend.name} backend does not support '{mode}'", 400)
+    # What the engine can do, then whether this machine can run it.
+    from app.core.devices import train_block_reason
+
+    blocked = train_block_reason(backend)
+    if blocked:
+        return err(blocked, 400)
 
     from utils.process_control import registry
     if any(j.get("status") == "running" for j in registry.list("train")):
@@ -362,6 +379,13 @@ def _vram_warning(job, cfg, backend_name: str) -> str | None:
 @bp.post("/runs/<run>/continue")
 def continue_run(run):
     run = safe_name(run, "run name")
+    # Continuing a run is the xurdif trainer's; on a Mac it has no GPU to use.
+    from app.core import backends
+    from app.core.devices import train_block_reason
+
+    blocked = train_block_reason(backends.get("xurdif"))
+    if blocked:
+        return err(blocked, 400)
     try:
         run_dir = projects.find_run(run)
     except Exception:
