@@ -249,18 +249,7 @@ def owned_by_kiln(path: str | Path) -> bool:
     not leave the workspace's own real location. The install's ``models/`` and
     ``vendor/`` folders are outside the workspace and never owned.
     """
-    try:
-        root = Path(os.path.abspath(workspace.root))
-        p = Path(os.path.abspath(path))
-        rel = p.relative_to(root)
-    except (ValueError, OSError):
-        return False
-    try:
-        real = os.path.normcase(os.path.realpath(p))
-        expected = os.path.normcase(os.path.join(os.path.realpath(root), rel))
-    except OSError:
-        return False
-    return real == expected
+    return model_rights(path)["owned"]
 
 
 def is_run_checkpoint(path: str | Path) -> bool:
@@ -270,16 +259,49 @@ def is_run_checkpoint(path: str | Path) -> bool:
         rel = p.relative_to(workspace.root.resolve())
     except (ValueError, OSError):
         return False
-    parts = rel.parts
+    return _run_parts(rel.parts)
+
+
+def can_rename(path: str | Path) -> bool:
+    return model_rights(path)["renamable"]
+
+
+def _run_parts(parts: tuple) -> bool:
+    """Do these workspace-relative parts name a trainer snapshot?"""
     if len(parts) >= 3 and parts[0] == "runs":
         return True
     # legacy: projects/<name>/runs/<run>/file.pt
     return len(parts) >= 4 and parts[0] == "projects" and parts[2] == "runs"
 
 
-def can_rename(path: str | Path) -> bool:
-    p = Path(path)
-    return p.exists() and p.suffix == ".pt" and inside_workspace(p) and not is_run_checkpoint(p)
+def model_rights(path: str | Path, root_real: str | None = None) -> dict:
+    """``owned`` (``owned_by_kiln``) and ``renamable`` (``can_rename``) at once.
+
+    The model list asks both of every model. Asked separately they resolved
+    the same paths five or six times a model, and resolving a path is slow on
+    Windows: it was half the list's time. Here the model's path is resolved
+    once, and a caller listing many models can resolve the root once too.
+    """
+    rights = {"owned": False, "renamable": False}
+    try:
+        root_abs = Path(os.path.abspath(workspace.root))
+        p = Path(os.path.abspath(path))
+        root_real = root_real or os.path.realpath(root_abs)
+        real = os.path.realpath(p)
+    except OSError:
+        return rights
+    try:
+        rel = p.relative_to(root_abs)
+        expected = os.path.normcase(os.path.join(root_real, rel))
+        rights["owned"] = os.path.normcase(real) == expected
+    except ValueError:
+        pass
+    try:
+        real_parts = Path(real).relative_to(root_real).parts
+    except ValueError:
+        return rights  # resolves outside the workspace: not Kiln's to rename
+    rights["renamable"] = p.suffix == ".pt" and p.exists() and not _run_parts(real_parts)
+    return rights
 
 
 # A model's card and thumbnail live in a ".kiln" folder beside it, so a models

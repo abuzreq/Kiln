@@ -221,15 +221,21 @@ class ModelManager:
         """``scan_public``, one model at a time, for the streamed listing."""
         from app.core import library
 
+        import os
+
+        from app.core.config import workspace
+
         stars = {library._norm_star_path(p) for p in library.list_stars()}
         hidden = set(library.list_hidden())
+        root_real = os.path.realpath(os.path.abspath(workspace.root))  # once, not per model
         for m in self.iter_scan():
             is_hidden = library._norm_star_path(m.path) in hidden
             if is_hidden and not include_hidden:
                 continue
             d = m.to_dict()
             d["hidden"] = is_hidden
-            d["owned"] = Path(m.path).is_file() and library.owned_by_kiln(m.path)
+            rights = library.model_rights(m.path, root_real)
+            d["owned"] = Path(m.path).is_file() and rights["owned"]
             is_ckpt = (m.source or "").startswith("run:")
             d["role"] = "checkpoint" if is_ckpt else "main"
             d["group"] = (m.source or "")[4:] if is_ckpt else None
@@ -244,7 +250,7 @@ class ModelManager:
             else:
                 d["original_name"] = d["name"]
                 d["trained_as"] = []
-            d["renamable"] = library.can_rename(m.path)
+            d["renamable"] = rights["renamable"]
             try:
                 mtime = Path(m.path).stat().st_mtime
             except OSError:

@@ -38,7 +38,7 @@ function GalleryThumb({ m, selected, onPick, onStar }) {
           aria-label={m.name}
         >
           {m.thumbnail
-            ? <img src={thumbUrl(m.thumbnail)} alt="" />
+            ? <img src={thumbUrl(m.thumbnail)} alt="" loading="lazy" decoding="async" />
             : <span>{m.name.slice(0, 2)}</span>}
         </button>
         <button
