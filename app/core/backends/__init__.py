@@ -11,6 +11,7 @@ more explicit:
 Backends register lazily so a missing optional dependency degrades to "that
 backend is unavailable" rather than breaking app startup.
 """
+import threading
 from pathlib import Path
 
 from utils.exceptions import NotFoundError
@@ -23,6 +24,8 @@ log = get_logger("backends")
 _REGISTRY: "dict[str, Backend]" = {}
 _ORDER: list[str] = []
 _loaded = False
+_loading = False
+_load_lock = threading.RLock()
 
 
 def register(backend: Backend) -> Backend:
@@ -33,20 +36,35 @@ def register(backend: Backend) -> Backend:
 
 
 def _ensure_loaded():
-    """Import the built-in backends once, tolerating optional-dependency failures."""
-    global _loaded
+    """Import the built-in backends once, tolerating optional-dependency failures.
+
+    Other threads asking meanwhile wait for the imports to finish. They used to
+    find the job marked done and the registry still empty, so a request that
+    arrived while another was loading listed no models at all -- which is what
+    the desktop window, opening as the server starts, got every time.
+    """
+    global _loaded, _loading
     if _loaded:
         return
-    _loaded = True
-    for module, attr in (
-        ("app.core.backends.xurdif", "XurdifBackend"),
-        ("app.core.backends.hfdiffusers", "DiffusersBackend"),
-    ):
+    with _load_lock:
+        # _loading is only ever seen here by the loading thread itself, when a
+        # backend's import asks for the registry; it gets what is there so far.
+        if _loaded or _loading:
+            return
+        _loading = True
         try:
-            mod = __import__(module, fromlist=[attr])
-            register(getattr(mod, attr)())
-        except Exception as e:  # noqa: BLE001
-            log.warning("backend from %s unavailable: %s", module, e)
+            for module, attr in (
+                ("app.core.backends.xurdif", "XurdifBackend"),
+                ("app.core.backends.hfdiffusers", "DiffusersBackend"),
+            ):
+                try:
+                    mod = __import__(module, fromlist=[attr])
+                    register(getattr(mod, attr)())
+                except Exception as e:  # noqa: BLE001
+                    log.warning("backend from %s unavailable: %s", module, e)
+        finally:
+            _loading = False
+            _loaded = True
 
 
 def available() -> list[str]:

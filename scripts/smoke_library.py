@@ -291,8 +291,32 @@ def check_sidecars_tucked_away():
     print("sidecars: cards and thumbnails kept in models/.kiln; old ones read and tidied")
 
 
+def check_cold_start_listing():
+    """Requests that arrive together on a fresh server all see every engine.
+
+    The desktop window opens as the server starts and asks for several things
+    at once. The engines used to be marked loaded before they were, so the
+    model list that lost the race came back empty: "No models yet".
+    Needs a process where nothing has loaded them, hence the subprocess.
+    """
+    code = (
+        "import threading\n"
+        "from app.core import backends\n"
+        "out = []\n"
+        "ts = [threading.Thread(target=lambda: out.append(len(backends.available()))) for _ in range(8)]\n"
+        "[t.start() for t in ts]; [t.join() for t in ts]\n"
+        "print(sorted(out))\n"
+    )
+    res = subprocess.run([sys.executable, "-c", code], cwd=str(ROOT), capture_output=True,
+                         text=True, env=os.environ.copy(), check=True)
+    counts = eval(res.stdout.strip().splitlines()[-1])  # noqa: S307 -- our own print
+    assert min(counts) == max(counts) > 0, f"some first callers saw no engines: {counts}"
+    print(f"cold start: {len(counts)} callers at once all saw {counts[0]} engines")
+
+
 def main():
     try:
+        check_cold_start_listing()
         check_preview_failures()
         check_delete_vs_hide()
         check_scan_public_hidden()
