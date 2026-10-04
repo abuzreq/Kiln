@@ -245,6 +245,9 @@ class ImageFolder:
 
 def _build_model(cfg: DiffusersTrainConfig):
     """Return ``(net, scheduler_config, trainable_params, note)``."""
+    from app.core.engine import warmup
+
+    warmup.wait_ready()  # diffusers' lazy imports are not safe beside the launch warm-up
     from diffusers import UNet2DModel
 
     from app.core.backends.xurdif import cosine_betas

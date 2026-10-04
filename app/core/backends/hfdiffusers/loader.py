@@ -331,6 +331,9 @@ def load_net(locator: str, revision: str | None = None, device: str = "cpu",
     (google/ddpm-ema-* vs google/ddpm-*). Accepting the flag keeps the model
     cache key and every call site identical across backends.
     """
+    from app.core.engine import warmup
+
+    warmup.wait_ready()  # diffusers' lazy imports are not safe beside the launch warm-up
     from diffusers import UNet2DModel
 
     from .tinyunet import TinyUNet2DModel

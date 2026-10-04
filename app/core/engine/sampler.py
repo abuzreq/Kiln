@@ -582,6 +582,9 @@ class Sampler:
         """
         import time
 
+        from app.core.engine import warmup
+
+        warmup.wait_ready()  # never import diffusers alongside the launch warm-up
         torch = _torch()
         device = pick_device(params.device)
         bundle = manager.load(params.model_path, device=device, ema=params.ema)

@@ -177,6 +177,12 @@ def main():
         )
     log.info("Kiln is running at %s", url)
 
+    # The first Generate otherwise spends most of its time importing libraries.
+    # Not any earlier: importing alongside create_app made both several times
+    # slower (31-82 s for the warm-up, against 16-19 s once the server is up).
+    from app.core.engine import warmup
+    warmup.start()
+
     if host != LOCAL_HOST:
         for ip in (lan_addresses() if host == ALL_INTERFACES else [host]):
             log.info("On this network: http://%s:%s", ip, port)
