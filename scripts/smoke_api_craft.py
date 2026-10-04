@@ -42,6 +42,19 @@ print("saved bend ok:", sv["ok"])
 lib = c.get("/api/library/bends").get_json()["data"]
 print("library bends:", [b["name"] for b in lib])
 
+# a preset keeps the picture it was saved with; anything else offered as one is dropped
+thumb = "data:image/jpeg;base64," + "A" * 64
+c.post("/api/craft/bends", json={"name": "with-thumb", "bends": bends, "thumbnail": thumb})
+c.post("/api/craft/bends", json={"name": "bad-thumb", "bends": bends,
+                                  "thumbnail": "javascript:alert(1)"})
+c.post("/api/craft/bends", json={"name": "huge-thumb", "bends": bends,
+                                  "thumbnail": "data:image/png;base64," + "A" * 200_000})
+by_name = {b["name"]: b for b in c.get("/api/craft/bends").get_json()["data"]}
+assert by_name["with-thumb"].get("thumbnail") == thumb, "a preset lost its picture"
+assert "thumbnail" not in by_name["bad-thumb"], "a non-image thumbnail was stored"
+assert "thumbnail" not in by_name["huge-thumb"], "an oversized thumbnail was stored"
+print("preset thumbnails: kept when an image, dropped otherwise")
+
 # --- bend sweep: full samples varying one bend parameter -----------------
 import time as _t
 

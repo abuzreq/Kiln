@@ -4,6 +4,7 @@ import { useApp } from "../state.jsx";
 import { ConfirmModal, Seg, Tooltip } from "./ui.jsx";
 import { bendPresetSummary } from "../bendSynopsis.js";
 import { bendCount, newBendId, normalizeStack } from "../bendStack.js";
+import { presetThumb } from "../presetThumb.js";
 import DiscoveriesModal from "./DiscoveriesModal.jsx";
 
 // A drawer along the bottom of the app for what the novelty explorer found.
@@ -24,10 +25,16 @@ const loadMetric = () => {
 // What "looks new" is measured with. The two disagree in an interesting way:
 // CLIP groups by what a caption would say, DINOv2 by structure and texture.
 const METRIC_TABS = [
-  { id: "clip", label: "CLIP", tip: "Novelty by CLIP image features: what the picture reads as" },
-  { id: "dinov2", label: "DINOv2", tip: "Novelty by DINOv2 features: structure and texture, no language. Loads a 350 MB model the first time" },
+  { id: "clip", label: "CLIP", tip: "Judge newness by CLIP image features: a find is new when the picture reads as something different" },
+  { id: "dinov2", label: "DINOv2", tip: "Judge newness by DINOv2 features: a find is new when its structure and texture differ, whatever it shows. Loads a 350 MB model the first time" },
 ];
 const METRIC_LABEL = Object.fromEntries(METRIC_TABS.map((t) => [t.id, t.label]));
+
+// What the drawer is, in one breath: the explorer is a novelty search
+// (app/core/craft/explore.py), and people took it for a gallery of good results.
+const ABOUT = "Kiln tries random bends on a model and keeps one only when its pictures look "
+  + "unlike every bend it has kept so far. It is a search for the new and strange, not for "
+  + "good pictures: most finds are odd, and a few are worth a closer look.";
 
 const SCOPE_TABS = [
   { id: "all", label: "All models", tip: "Every model's discoveries" },
@@ -258,6 +265,7 @@ export default function DiscoveriesDrawer() {
         name, bends: entry.bends,
         notes: `Found by the explorer on ${entry.model_name} (novelty ${entry.novelty}).`,
         model_hint: entry.model_path,
+        thumbnail: await presetThumb(thumbUrl(entry.image)),
       });
       await api.post(`/craft/discoveries/${entry.id}/star`, { model_path: entry.model_path });
       setEntries((prev) => prev.map((e) => (e.id === entry.id ? { ...e, starred: true } : e)));
@@ -272,24 +280,29 @@ export default function DiscoveriesDrawer() {
     } catch (err) { toast(err.message, "error"); }
   };
 
+  // The bar is all most people ever see of this, so it says what the explorer
+  // is doing and why, not only how far it has got.
   const statusLine = () => {
     if (!status) return "";
     if (status.error && !running) return status.error;
-    if (!running) return entries.length ? "not exploring" : "";
-    const parts = [`exploring ${status.model_name || "…"} by ${METRIC_LABEL[status.metric] || status.metric}`, `tried ${status.tried}`, `threshold ${status.threshold}`];
-    if (status.yielding_to) parts.push("yielding to your run");
+    if (!running) return "novel bends, found by trying random ones · paused";
+    const parts = [
+      `searching ${status.model_name || "…"} for bends that look new`,
+      `${status.tried} tried, ${status.accepted} kept`,
+    ];
+    if (status.yielding_to) parts.push("waiting for your run");
     else if (status.error) parts.push(status.error);
     return parts.join(" · ");
   };
 
-  const exploreLabel = here ? "Stop" : sameModel ? `Switch to ${METRIC_LABEL[metric]}` : running ? "Explore here" : "Start exploring";
+  const exploreLabel = here ? "Stop" : sameModel ? `Switch to ${METRIC_LABEL[metric]}` : running ? "Search here" : "Find novel bends";
   const exploreTip = here
-    ? "Stop looking for new bends on this model"
+    ? "Stop searching for new bends on this model"
     : sameModel
-      ? `Restart the explorer on this model measuring novelty by ${METRIC_LABEL[metric]}; each metric keeps its own archive`
+      ? `Restart the search on this model, judging novelty by ${METRIC_LABEL[metric]}; each measure keeps its own finds`
       : running
-        ? `Exploring ${status?.model_name}; start here to move it to ${currentName || "this model"}`
-        : `Try random bends on ${currentName || "the picked model"} in the background and keep the ones that look new by ${METRIC_LABEL[metric]}`;
+        ? `Searching ${status?.model_name}; move the search to ${currentName || "this model"}`
+        : `${ABOUT} Runs on ${currentName || "the picked model"} in the background, and steps aside while you generate.`;
 
   return (
     <div className={`disc-drawer ${open ? "open" : ""}`.trim()}>
@@ -302,7 +315,7 @@ export default function DiscoveriesDrawer() {
         onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen((o) => !o); } }}
       >
         <span className="disc-chev" aria-hidden="true">{open ? "▾" : "▴"}</span>
-        <strong>Discoveries</strong>
+        <strong title={ABOUT}>Discoveries</strong>
         <span className="disc-count">{entries.length}</span>
         <span className="disc-status">{statusLine()}</span>
         <span className="spacer" />
@@ -323,8 +336,9 @@ export default function DiscoveriesDrawer() {
             </Tooltip>
           </span>
         )}
-        <span onClick={(e) => e.stopPropagation()}>
-          <Seg ariaLabel="Novelty metric" tabs={METRIC_TABS} value={metric} onChange={setMetric} size="sm" />
+        <span className="row center gap-1" onClick={(e) => e.stopPropagation()}>
+          <span className="disc-metric-label" title="Which vision model decides whether a picture looks new">judged by</span>
+          <Seg ariaLabel="What judges a bend new" tabs={METRIC_TABS} value={metric} onChange={setMetric} size="sm" />
         </span>
         <Tooltip text={exploreTip}>
           <button
@@ -346,11 +360,14 @@ export default function DiscoveriesDrawer() {
         >
           {entries.length === 0 ? (
             <div className="disc-empty">
-              {running
-                ? "Looking… the first discoveries take a minute."
-                : modelPath
-                  ? "Nothing found yet. Start exploring and the strip fills in while you work."
-                  : "Pick a model in Create, then start exploring."}
+              <p className="mb-1">{ABOUT}</p>
+              <p className="mb-0">
+                {running
+                  ? "Searching… the first finds take a minute."
+                  : modelPath
+                    ? "Nothing found yet. Press Find novel bends and this strip fills in while you work; click a find to open its bends in Bend."
+                    : "Pick a model in Create, then press Find novel bends."}
+              </p>
             </div>
           ) : (
             <div className="disc-track" ref={trackRef}>

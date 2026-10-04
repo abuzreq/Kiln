@@ -19,6 +19,7 @@ import {
 } from "../bendTargets.js";
 import { bendCount, newBendId, normalizeStack } from "../bendStack.js";
 import { randomBend, rerollBend } from "../bendRandom.js";
+import { presetThumb } from "../presetThumb.js";
 
 // How the model is shown while you pick what to bend. Simple is the signal
 // path in words; Structure is the map, at two grains. The geometry under the
@@ -335,7 +336,11 @@ export function BendWorkspace({ stack, setStack }) {
     const name = saveName.trim();
     if (!name) { toast("Name this bend setup first", "error"); return; }
     try {
-      await api.post("/craft/bends", { name, bends: stack, model_hint: modelPath });
+      // The picture in view becomes the preset's, if it was made with exactly
+      // these bends; a picture of some other stack would misdescribe it.
+      const shown = pair.bent && pair.stack && stackKey(pair.stack) === stackKey(stack);
+      const thumbnail = shown ? await presetThumb(pair.bent) : null;
+      await api.post("/craft/bends", { name, bends: stack, model_hint: modelPath, thumbnail });
       toast(`Saved “${name}” — it will show up in Create`, "success");
       setSaveName("");
       setPresetsOpen(false);

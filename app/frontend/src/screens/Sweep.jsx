@@ -1,9 +1,16 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useState } from "react";
 import { api, downloadPost, pollJob } from "../api.js";
 import { useApp } from "../state.jsx";
 import { usePlay, usePlayState } from "./playContext.jsx";
-import { Select, Num, Progress } from "../components/ui.jsx";
+import { Select, Num, Progress, Modal } from "../components/ui.jsx";
+import { ExpandIcon } from "../components/icons.jsx";
 import { buildSweepBase, PARAM_RANGES, paramRange, inertReason, samplerLabel, paramLabel } from "../sampleSettings.jsx";
+// Starting points, for anyone who has not run a sweep before: what one is for,
+// shown rather than described. Clicking one fills in the axes below; nothing
+// runs until Run sweep, so it can be changed first. A JSON file because
+// scripts/make_example_media.py renders the picture each one shows from it.
+import EXAMPLES from "../sweepExamples.json";
+import MEDIA from "../exampleMedia.json";
 
 // Sweepable axes.
 //
@@ -26,34 +33,6 @@ const AXIS_KINDS = {
 
 
 const SAMPLER_CHOICES = ["dpmpp", "unipc", "deis", "ddim"];
-
-// Starting points, for anyone who has not run a sweep before: what one is for,
-// shown rather than described. Clicking one fills in the axes below; nothing
-// runs until Run sweep, so it can be changed first.
-const EXAMPLES = [
-  {
-    id: "settle",
-    label: "When does it settle?",
-    desc: "Steps 10 → 100",
-    tip: "The same picture at four step counts. Find the fewest steps that still look finished, and generate faster from then on.",
-    x: { param: "steps", from: 10, to: 100, count: 4 },
-  },
-  {
-    id: "solvers",
-    label: "Seeds × samplers",
-    desc: "4 samplers across, 4 seeds down",
-    tip: "Each column is a sampler, each row a seed. Shows whether a sampler's look holds across pictures or was luck with one seed.",
-    x: { param: "sampler", picks: SAMPLER_CHOICES },
-    y: { param: "seed", from: 0, to: 3, count: 4 },
-  },
-  {
-    id: "size",
-    label: "Bigger than trained",
-    desc: "Size 256 → 1024",
-    tip: "The same seed at 256, 512 and 1024px. Models trained small often turn into texture or repeat themselves when asked for more.",
-    x: { param: "image_size", from: 256, mult: 2, count: 3 },
-  },
-];
 
 export function axisKind(param) {
   return AXIS_KINDS[param] || "linear";
@@ -249,6 +228,7 @@ export default function SweepPanel() {
     if (r) { setLo(r.min); setHi(r.max); }
   };
 
+  const [viewing, setViewing] = useState(null);
   const loadExample = (ex) => {
     const fill = (a, set) => {
       set.param(a.param);
@@ -398,20 +378,61 @@ export default function SweepPanel() {
         <div className="section-title mt-3">Start from an example</div>
         <div className="sweep-examples">
           {EXAMPLES.map((ex) => (
-            <button
-              key={ex.id}
-              type="button"
-              className={`sweep-example ${loadedExample === ex.id ? "on" : ""}`.trim()}
-              aria-pressed={loadedExample === ex.id}
-              title={ex.tip}
-              onClick={() => loadExample(ex)}
-            >
-              <span className="sweep-example-label">{ex.label}</span>
-              <span className="sub">{ex.desc}</span>
-            </button>
+            <div key={ex.id} className={`sweep-example ${loadedExample === ex.id ? "on" : ""}`.trim()}>
+              <button
+                type="button"
+                className="sweep-example-pick"
+                aria-pressed={loadedExample === ex.id}
+                title={`${ex.tip}\n\nClick to fill in the axes below.`}
+                onClick={() => loadExample(ex)}
+              >
+                {MEDIA.sweeps?.[ex.id] && (
+                  <img src={MEDIA.sweeps[ex.id]} alt="" loading="lazy" />
+                )}
+                <span className="sweep-example-label">{ex.label}</span>
+                <span className="sub">{ex.desc}</span>
+              </button>
+              {MEDIA.sweeps?.[ex.id] && (
+                <button type="button" className="sweep-example-view"
+                  aria-label={`See the ${ex.label} example larger`} title="See this run larger"
+                  onClick={() => setViewing(ex)}>
+                  <ExpandIcon size={14} />
+                </button>
+              )}
+            </div>
           ))}
         </div>
+        <p className="hint mb-0 mt-2">
+          Each picture is a real run on the sample model {MEDIA.model}, seed {MEDIA.seed}. Yours will
+          use your model and Sample settings.
+        </p>
       </div>
+
+      {viewing && (
+        <Modal
+          title={viewing.label}
+          wide
+          onClose={() => setViewing(null)}
+          footer={(
+            <>
+              <button type="button" className="btn" onClick={() => setViewing(null)}>Close</button>
+              <button type="button" className="btn primary"
+                onClick={() => { loadExample(viewing); setViewing(null); }}>
+                Use these axes
+              </button>
+            </>
+          )}
+        >
+          <p className="hint mt-0">{viewing.tip}</p>
+          <img className="sweep-example-full" src={MEDIA.sweeps[viewing.id]}
+            alt={`${viewing.label}: ${viewing.desc}`} />
+          <p className="sub mb-0">
+            {viewing.desc}, on the sample model {MEDIA.model}: seed {MEDIA.seed},{" "}
+            {MEDIA.steps} steps, {samplerLabel(MEDIA.sampler)}, {MEDIA.image_size}px, except
+            where the grid varies one of them.
+          </p>
+        </Modal>
+      )}
 
       {inertAxes.length > 0 && (
         <div className="card">

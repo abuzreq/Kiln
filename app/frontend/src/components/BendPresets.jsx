@@ -5,6 +5,8 @@ import { resolveTargets } from "../bendTargets.js";
 import {
   bendHeadline, bendPresetSummary, bendPresetSynopsis, formatTargets, opIndex,
 } from "../bendSynopsis.js";
+// Pictures of the starters, rendered by scripts/make_example_media.py.
+import MEDIA from "../exampleMedia.json";
 
 // The presets popover: save the current stack, start from one of Kiln's
 // starters, or load one of your own. A starter is chosen by what it does, so
@@ -47,11 +49,28 @@ function StageStrip({ bends, nodes }) {
   );
 }
 
+/** What the preset does, seen: a render with it, the same seed without it inset. */
+function PresetShot({ src, plain, name }) {
+  if (!src) return null;
+  return (
+    <div className="preset-shot">
+      <img src={src} alt={`${name}, on a sample model`} loading="lazy" />
+      {plain && (
+        <span className="preset-shot-plain" title="The same seed without the bend">
+          <img src={plain} alt="" loading="lazy" />
+          <span>without</span>
+        </span>
+      )}
+    </div>
+  );
+}
+
 function StarterCard({ p, ops, nodes, onLoad, onAdd }) {
   const opMap = opIndex(ops);
   const name = p.name.replace(/^starter-/, "");
   return (
     <li className="preset-card" title={bendPresetSynopsis(p, ops)}>
+      <PresetShot src={MEDIA.bends?.[p.name]} plain={MEDIA.bends?.plain} name={name} />
       <div className="row between center gap-2">
         <span className="preset-name">{name}</span>
         <StageStrip bends={p.bends} nodes={nodes} />
@@ -135,7 +154,9 @@ export default function BendPresets({
             { id: "starters", label: `Starters (${starters.length})`, tip: "Kiln's recipes: each changes one thing" },
           ]}
         />
-        {tab === "starters" && <span className="sub">load one, compare, then edit</span>}
+        {tab === "starters" && (
+          <span className="sub">shown on the sample model {MEDIA.model} · load one, generate, then edit</span>
+        )}
         {tab === "saved" && saved.length >= FILTER_FROM && (
           <input
             className="preset-filter"
@@ -166,6 +187,9 @@ export default function BendPresets({
         <ul className="preset-rows">
           {shown.map((p) => (
             <li key={p.name} title={`${p.name}\n\n${bendPresetSynopsis(p, ops)}`}>
+              {p.thumbnail
+                ? <img className="preset-row-thumb" src={p.thumbnail} alt="" loading="lazy" />
+                : <span className="preset-row-thumb" aria-hidden="true" />}
               <span className="preset-row-name">{p.name}</span>
               <span className="sub preset-row-sum">{bendPresetSummary(p, ops)}</span>
               <button type="button" className="btn xs ghost" onClick={() => onAdd(p.name)}

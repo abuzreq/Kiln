@@ -1,0 +1,22 @@
+{
+  "model": "txkrs0b-114",
+  "seed": 21,
+  "image_size": 512,
+  "steps": 50,
+  "eta": 0.5,
+  "sampler": "dpmpp",
+  "sweeps": {
+    "settle": "/examples/sweep-settle.webp",
+    "solvers": "/examples/sweep-solvers.webp",
+    "size": "/examples/sweep-size.webp"
+  },
+  "bends": {
+    "plain": "/examples/bend-plain.webp",
+    "starter-soft-focus": "/examples/bend-starter-soft-focus.webp",
+    "starter-etched": "/examples/bend-starter-etched.webp",
+    "starter-bottleneck-flare": "/examples/bend-starter-bottleneck-flare.webp",
+    "starter-grain-storm": "/examples/bend-starter-grain-storm.webp",
+    "starter-poster": "/examples/bend-starter-poster.webp",
+    "starter-drift": "/examples/bend-starter-drift.webp"
+  }
+}

@@ -50,11 +50,18 @@ def list_bends():
 def save_bend():
     body = request.get_json(force=True, silent=True) or {}
     (name, bends) = require(body, "name", "bends")
-    entry = library.save_entry("bends", name, {
+    payload = {
         "bends": bends,
         "notes": body.get("notes", ""),
         "model_hint": body.get("model_hint", ""),
-    })
+    }
+    # A small picture of what the stack does, made by the page from the render
+    # it was saved from. Kept in the entry itself; anything that is not a modest
+    # image data URL is left out rather than stored.
+    thumb = body.get("thumbnail")
+    if isinstance(thumb, str) and thumb.startswith("data:image/") and len(thumb) <= 100_000:
+        payload["thumbnail"] = thumb
+    entry = library.save_entry("bends", name, payload)
     return ok(entry)
 
 

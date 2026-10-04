@@ -21,7 +21,10 @@ log = get_logger("app")
 # On Windows, mimetypes reads the registry and often maps .js to "text/plain",
 # which makes browsers refuse to execute the ES-module frontend bundle (blank
 # screen). Force correct JS/CSS MIME types so <script type="module"> loads.
-for _ext, _type in ((".js", "text/javascript"), (".mjs", "text/javascript"), (".css", "text/css")):
+# WebP is missing from the table on some Windows installs, and the example
+# pictures the frontend ships are WebP.
+for _ext, _type in ((".js", "text/javascript"), (".mjs", "text/javascript"), (".css", "text/css"),
+                    (".webp", "image/webp")):
     mimetypes.add_type(_type, _ext)
 
 ROOT = Path(__file__).resolve().parents[2]
