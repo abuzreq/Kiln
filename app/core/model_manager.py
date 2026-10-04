@@ -72,6 +72,26 @@ def _relocated(path: Path) -> Path | None:
 backends.set_relocator(_relocated)
 
 
+def _thumbnail(path: Path) -> str | None:
+    """A listed model's picture, by the rule its backend uses when it reads one.
+
+    For a model listed from the index, which no backend read this time: a
+    Diffusers folder's own ``thumbnail.png``; for a checkpoint, a run's
+    ``sample-N.png`` beside ``model-N.pt``, else its own picture.
+    """
+    if path.is_dir():
+        t = path / "thumbnail.png"
+        return str(t) if t.is_file() else None
+    if path.stem.startswith("model-"):
+        sample = path.with_name("sample-" + path.stem.split("-", 1)[1] + ".png")
+        if sample.is_file():
+            return str(sample)
+    from app.core import library
+
+    own = library.own_thumb(path)
+    return str(own) if own else None
+
+
 def _sidecar_thumbnail(path: Path) -> str | None:
     """Back-compat shim; the rule is xurdif's and lives with it now."""
     from app.core.backends.xurdif import loader
@@ -130,20 +150,63 @@ class ModelManager:
         return list(self.iter_scan(extra_dirs))
 
     def iter_scan(self, extra_dirs: list[Path] | None = None):
-        """``scan``, yielding each model as soon as its backend has read it."""
+        """``scan``, yielding each model as soon as it is known.
+
+        Files the on-disk index (``model_index``) already knows, unchanged, come
+        first and need no backend. Only the rest go to the backends, which read
+        them -- and load torch to do it.
+        """
+        from app.core import model_index
+
         sources = self._sources(extra_dirs)
+        known = model_index.load()
+        fresh: dict = {}
+        unread: list[tuple[str, list | None]] = []
         seen: set[str] = set()
-        for name in backends.available():
-            try:
-                for meta in backends.get(name).iter_scan(sources):
-                    if meta.path in seen:
-                        continue
-                    seen.add(meta.path)
+        for path, label in model_index.candidates(sources):
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            sig = model_index.signature(path)
+            hit = known.get(key)
+            if sig is not None and isinstance(hit, dict) and hit.get("sig") == sig:
+                fresh[key] = hit
+                if hit.get("meta"):
+                    meta = model_index.descriptor(hit["meta"])
+                    meta.source = label
+                    meta.thumbnail = _thumbnail(path)
                     yield meta
-            except Exception as e:  # noqa: BLE001
-                # Models already yielded stay listed; the rest of this backend's
-                # are lost, as they were when scan() raised before yielding.
-                log.warning("backend %s failed to scan: %s", name, e)
+            else:
+                unread.append((key, sig))
+
+        if unread:
+            found: dict[str, ModelDescriptor] = {}
+            failed = False
+            for name in backends.available():
+                try:
+                    for meta in backends.get(name).iter_scan(sources, skip=set(fresh) | set(found)):
+                        if meta.path in found:
+                            continue
+                        found[meta.path] = meta
+                        yield meta
+                except Exception as e:  # noqa: BLE001
+                    # Models already yielded stay listed; the rest of this backend's
+                    # are lost, as they were when scan() raised before yielding.
+                    log.warning("backend %s failed to scan: %s", name, e)
+                    failed = True
+            for key, sig in unread:
+                if sig is None:
+                    continue
+                if key in found:
+                    fresh[key] = model_index.entry(sig, found[key])
+                elif not failed:
+                    # Not a model, as far as every backend could tell. After a
+                    # failure it may be one the failed backend never reached, so
+                    # it is left out and read again next time.
+                    fresh[key] = model_index.entry(sig, None)
+        if fresh != known:
+            model_index.save(fresh)
 
     def scan_public(self, include_hidden: bool = False) -> list[dict]:
         """Scan plus role (main vs training checkpoint), starred and ownership flags.

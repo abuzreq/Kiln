@@ -314,9 +314,52 @@ def check_cold_start_listing():
     print(f"cold start: {len(counts)} callers at once all saw {counts[0]} engines")
 
 
+def check_model_index():
+    """A launch lists unchanged models from the on-disk index, not by reading them.
+
+    The index is what lets the model list skip torch and every checkpoint read;
+    a model edited since must be read again, and a folder that is not a model
+    is remembered as one so it does not send every scan back to the backends.
+    """
+    import json
+
+    from app.core import model_index
+    from app.core.model_manager import manager
+
+    models = WORKSPACE / "models"
+    pt = _tiny_checkpoint(models / "indexed.pt")
+    (models / "not-a-model").mkdir()
+    manager.clear_cache()
+    assert "indexed" in {m.name for m in manager.scan()}
+    index = model_index.load()
+    assert index[str(pt)]["meta"]["name"] == "indexed", index.get(str(pt))
+    assert index[str(models / "not-a-model")]["meta"] is None, "a plain folder was not remembered"
+    assert not any(".kiln" in k for k in index), "Kiln's own sidecar folder was indexed"
+
+    # tamper with the stored name: an unchanged file must come from the index
+    data = json.loads(model_index._file().read_text(encoding="utf-8"))
+    data["entries"][str(pt)]["meta"]["name"] = "from-the-index"
+    model_index._file().write_text(json.dumps(data), encoding="utf-8")
+    assert "from-the-index" in {m.name for m in manager.scan()}, "an unchanged file was read again"
+
+    # a changed file is read again, and the index follows it
+    st = pt.stat()
+    os.utime(pt, (st.st_atime, st.st_mtime + 5))
+    names = {m.name for m in manager.scan()}
+    assert "indexed" in names and "from-the-index" not in names, names
+    assert model_index.load()[str(pt)]["meta"]["name"] == "indexed"
+
+    pt.unlink()
+    (models / "not-a-model").rmdir()
+    assert str(pt) not in model_index.load() or "indexed" not in {m.name for m in manager.scan()}
+    manager.clear_cache()
+    print("model index: unchanged models listed without a read; changed ones read again")
+
+
 def main():
     try:
         check_cold_start_listing()
+        check_model_index()
         check_preview_failures()
         check_delete_vs_hide()
         check_scan_public_hidden()

@@ -79,14 +79,16 @@ const fileStem = (name) => (name || "").replace(/\.[^.]+$/, "");
 export default function Play() {
   const {
     toast, playTab, bendStack, setBendStack, modelPath, setModelPath, setTabBusy, models,
+    modelsPartial,
   } = useApp();
   const tab = playTab;
   // The settings panel needs the selected model, not just its path: whether the
   // EMA toggle does anything, and what image sizes this model can actually
-  // produce, are properties of the model rather than of the sampler.
+  // produce, are properties of the model rather than of the sampler. While the
+  // list is still streaming in, the picked model counts as soon as it arrives.
   const activeModel = useMemo(
-    () => (models || []).find((m) => m.path === modelPath) || null,
-    [models, modelPath],
+    () => (models || modelsPartial || []).find((m) => m.path === modelPath) || null,
+    [models, modelsPartial, modelPath],
   );
   // `frame` is the flattened stack — a cache, never written to directly.
   const [frame, setFrameState] = useState(null);

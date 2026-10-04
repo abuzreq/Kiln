@@ -197,13 +197,14 @@ class Backend:
     def scan(self, sources: list[tuple[Path, str]]) -> list[ModelDescriptor]:
         raise NotImplementedError
 
-    def iter_scan(self, sources: list[tuple[Path, str]]):
+    def iter_scan(self, sources: list[tuple[Path, str]], skip: "set[str] | None" = None):
         """``scan``, one model at a time, for callers that show them as they come.
 
         Reading a checkpoint is the slow part of a scan, so a backend that can
         yield between reads should override this; the default waits for all.
+        ``skip`` holds paths the caller already knows, which need not be read.
         """
-        yield from self.scan(sources)
+        yield from (m for m in self.scan(sources) if not skip or m.path not in skip)
 
     def describe(self, ref: ModelRef) -> ModelDescriptor:
         raise NotImplementedError

@@ -96,8 +96,8 @@ class XurdifBackend(Backend):
     def scan(self, sources):
         return loader.scan(sources)
 
-    def iter_scan(self, sources):
-        return loader.iter_scan(sources)
+    def iter_scan(self, sources, skip=None):
+        return loader.iter_scan(sources, skip)
 
     def describe(self, ref: ModelRef):
         return loader.describe(ref.locator)

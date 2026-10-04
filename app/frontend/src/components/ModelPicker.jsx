@@ -77,8 +77,13 @@ function ListRow({ m, selected, onPick, onStar }) {
 
 export default function ModelPicker() {
   const {
-    modelPath, setModelPath, stars, toggleStar, models: allModels, modelsBusy, refreshModels,
+    modelPath, setModelPath, stars, toggleStar, models: finished, modelsPartial, modelsBusy,
+    refreshModels,
   } = useApp();
+  // While the first scan streams in, show what has arrived. Only the finished
+  // list may decide the picked model is gone (the effect below): a model not
+  // read yet is not missing.
+  const allModels = finished ?? (modelsPartial?.length ? modelsPartial : null);
   const [view, setView] = useState(() => localStorage.getItem("kiln.modelPickerView") || "list");
   const [sort, setSort] = useState(() => localStorage.getItem("kiln.modelPickerSort") || "name");
   const [thumbLevel, setThumbLevel] = useState(() => localStorage.getItem("kiln.modelPickerSize") || "md");
@@ -90,11 +95,11 @@ export default function ModelPicker() {
   const load = () => refreshModels({ force: true });
 
   useEffect(() => {
-    if (!models?.length) return;
+    if (finished === null || !models?.length) return;
     if (!models.some((x) => x.path === modelPath)) {
       setModelPath(pickDefaultModel(models, modelPath));
     }
-  }, [models, modelPath, setModelPath]);
+  }, [finished, models, modelPath, setModelPath]);
 
   useEffect(() => {
     localStorage.setItem("kiln.modelPickerView", view);

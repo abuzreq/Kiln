@@ -382,9 +382,12 @@ def scan(sources) -> list[ModelDescriptor]:
     return list(iter_scan(sources))
 
 
-def iter_scan(sources):
-    """``scan``, yielding each model directory as soon as it has been read."""
-    seen: set[str] = set()
+def iter_scan(sources, skip=None):
+    """``scan``, yielding each model directory as soon as it has been read.
+
+    Paths in ``skip`` are left unread: the caller already knows them.
+    """
+    seen: set[str] = set(skip or ())
     for d, label in sources:
         if not d.exists():
             continue
