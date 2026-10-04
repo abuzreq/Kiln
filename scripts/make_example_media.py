@@ -103,7 +103,8 @@ def main():
         manifest["bends"][entry["name"]] = save_webp(
             img, OUT / f"bend-{entry['name']}.webp", PRESET_SIZE)
 
-    MANIFEST.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    MANIFEST.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+                        encoding="utf-8", newline="\n")
     print(f"wrote {len(manifest['sweeps']) + len(manifest['bends'])} pictures to {OUT}")
 
 

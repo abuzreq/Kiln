@@ -1,5 +1,4 @@
 import React, { useMemo, useState } from "react";
-import { Seg } from "./ui.jsx";
 import { RunWindowMini } from "./RunWindow.jsx";
 import { resolveTargets } from "../bendTargets.js";
 import {
@@ -8,8 +7,8 @@ import {
 // Pictures of the starters, rendered by scripts/make_example_media.py.
 import MEDIA from "../exampleMedia.json";
 
-// The presets popover: save the current stack, start from one of Kiln's
-// starters, or load one of your own. A starter is chosen by what it does, so
+// The presets popovers: start from one of Kiln's starters, or save the current
+// stack and load one of your own. A starter is chosen by what it does, so
 // each card leads with its own sentence (the `notes` that used to be a
 // tooltip), then the bends it is made of, each with where and when it acts.
 
@@ -95,30 +94,35 @@ function StarterCard({ p, ops, nodes, onLoad, onAdd }) {
   );
 }
 
-// Saved and Starters are tabs. Shown together, six starter cards filled the
-// first screen and a long saved list became a scroll box inside a scrolling
-// popover. Someone with saved stacks of their own is mostly after those.
-const TAB_KEY = "kiln.bendPresetsTab";
+// Kiln's presets and your saved stacks open from separate buttons. As tabs of
+// one popover, the starters' pictures had to share a size with a list of
+// names, and someone after their own stacks had to pass the starters first.
+
 // A filter box appears once the saved list is longer than a glance.
 const FILTER_FROM = 7;
 
-function loadTab(hasSaved) {
-  try {
-    const v = localStorage.getItem(TAB_KEY);
-    if (v === "saved" || v === "starters") return v;
-  } catch { /* private window */ }
-  return hasSaved ? "saved" : "starters";
+/** Kiln's starters, each with a picture of what it does. */
+export function StarterPresets({ starters, ops, nodes, onLoad, onAdd }) {
+  return (
+    <div className="bend-presets">
+      <p className="sub mt-0 mb-0">
+        Each changes one thing. Pictured on the sample model {MEDIA.model}, the small one without
+        the bend; load one, generate, then edit.
+      </p>
+      <ul className="preset-grid">
+        {starters.map((p) => (
+          <StarterCard key={p.name} p={p} ops={ops} nodes={nodes} onLoad={onLoad} onAdd={onAdd} />
+        ))}
+      </ul>
+    </div>
+  );
 }
 
-export default function BendPresets({
-  starters, saved, ops, nodes, saveName, setSaveName, canSave, onSave, onLoad, onAdd,
+/** Save the current stack, and load or add one saved before. */
+export function SavedPresets({
+  saved, ops, saveName, setSaveName, canSave, onSave, onLoad, onAdd,
 }) {
-  const [tab, setTabState] = useState(() => loadTab(saved.length > 0));
   const [filter, setFilter] = useState("");
-  const setTab = (t) => {
-    setTabState(t);
-    try { localStorage.setItem(TAB_KEY, t); } catch { /* the session keeps it */ }
-  };
   const q = filter.trim().toLowerCase();
   const shown = q
     ? saved.filter((p) => `${p.name} ${bendPresetSummary(p, ops)}`.toLowerCase().includes(q))
@@ -141,23 +145,13 @@ export default function BendPresets({
         </label>
         <button type="submit" className="btn sm primary" disabled={!canSave}>Save</button>
       </form>
-      <p className="sub preset-note">Saved stacks show up in Create too.</p>
+      <p className="sub preset-note">
+        Saved stacks show up in Create too. Generate first and the picture on screen is kept with it.
+      </p>
 
       <div className="row between center preset-tabs">
-        <Seg
-          ariaLabel="Which presets"
-          size="sm"
-          value={tab}
-          onChange={setTab}
-          tabs={[
-            { id: "saved", label: `Saved (${saved.length})`, tip: "Stacks you saved" },
-            { id: "starters", label: `Starters (${starters.length})`, tip: "Kiln's recipes: each changes one thing" },
-          ]}
-        />
-        {tab === "starters" && (
-          <span className="sub">shown on the sample model {MEDIA.model} · load one, generate, then edit</span>
-        )}
-        {tab === "saved" && saved.length >= FILTER_FROM && (
+        <span className="section-title mb-0">Saved ({saved.length})</span>
+        {saved.length >= FILTER_FROM && (
           <input
             className="preset-filter"
             type="search"
@@ -169,24 +163,18 @@ export default function BendPresets({
         )}
       </div>
 
-      {tab === "starters" && (
-        <ul className="preset-grid">
-          {starters.map((p) => (
-            <StarterCard key={p.name} p={p} ops={ops} nodes={nodes} onLoad={onLoad} onAdd={onAdd} />
-          ))}
-        </ul>
-      )}
-
-      {tab === "saved" && (saved.length === 0 ? (
+      {saved.length === 0 ? (
         <p className="sub mb-0">
-          Nothing saved yet. Name the stack above to keep it, or start from a starter.
+          Nothing saved yet. Name the stack above to keep it, or start from one of Kiln&apos;s presets.
         </p>
       ) : shown.length === 0 ? (
         <p className="sub mb-0">No saved preset matches “{filter.trim()}”.</p>
       ) : (
         <ul className="preset-rows">
           {shown.map((p) => (
-            <li key={p.name} title={`${p.name}\n\n${bendPresetSynopsis(p, ops)}`}>
+            <li key={p.name} title={`${p.name}
+
+${bendPresetSynopsis(p, ops)}`}>
               {p.thumbnail
                 ? <img className="preset-row-thumb" src={p.thumbnail} alt="" loading="lazy" />
                 : <span className="preset-row-thumb" aria-hidden="true" />}
@@ -198,7 +186,7 @@ export default function BendPresets({
             </li>
           ))}
         </ul>
-      ))}
+      )}
     </div>
   );
 }

@@ -299,6 +299,15 @@ export function TilesIcon(props) {
   );
 }
 
+/** Lucide's "bookmark" (ISC): stacks you kept. */
+export function BookmarkIcon(props) {
+  return (
+    <Icon {...props}>
+      <path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z" />
+    </Icon>
+  );
+}
+
 /** A push pin: keep this panel in place. */
 export function PinIcon(props) {
   return (

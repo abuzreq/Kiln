@@ -4,12 +4,12 @@ import { useApp } from "../state.jsx";
 import { usePlay, usePlayState } from "./playContext.jsx";
 import { Select, Num, Disclose, Progress, Modal, Seg, Popover } from "../components/ui.jsx";
 import {
-  DiceIcon, DownloadIcon, ExpandIcon, FileJsonIcon, TilesIcon, UndoIcon,
+  BookmarkIcon, DiceIcon, DownloadIcon, ExpandIcon, FileJsonIcon, TilesIcon, UndoIcon,
 } from "../components/icons.jsx";
 import UnetVisualizer from "../components/UnetVisualizer.jsx";
 import BendPipeline from "../components/BendPipeline.jsx";
 import BendEditor, { BendInspector } from "../components/BendEditor.jsx";
-import BendPresets from "../components/BendPresets.jsx";
+import { SavedPresets, StarterPresets } from "../components/BendPresets.jsx";
 import {
   CompareHistory, CompareMeta, CompareViewer, MODES, MODES_LARGE, StackChips,
 } from "../components/BendCompare.jsx";
@@ -117,7 +117,8 @@ export function BendWorkspace({ stack, setStack }) {
   const [compareMode, setCompareModeState] = useState(() => loadPref(COMPARE_MODE_KEY, MODES, "wipe"));
   const [bigMode, setBigMode] = useState("split");
   const [compareOpen, setCompareOpen] = useState(false);
-  const [presetsOpen, setPresetsOpen] = useState(false);
+  // Which presets popover is open: "starters", "saved", or null.
+  const [presetsOpen, setPresetsOpen] = useState(null);
   const [view, setViewState] = useState(() => loadPref(VIEW_KEY, VIEWS, "simple"));
   const [grain, setGrainState] = useState(() => loadPref(GRAIN_KEY, GRAINS, "overview"));
   const [gifBusy, setGifBusy] = useState(false);
@@ -343,7 +344,7 @@ export function BendWorkspace({ stack, setStack }) {
       await api.post("/craft/bends", { name, bends: stack, model_hint: modelPath, thumbnail });
       toast(`Saved “${name}” — it will show up in Create`, "success");
       setSaveName("");
-      setPresetsOpen(false);
+      setPresetsOpen(null);
       api.get("/craft/bends").then(setPresets);
     } catch (e) { toast(e.message, "error"); }
   };
@@ -362,7 +363,7 @@ export function BendWorkspace({ stack, setStack }) {
     setStack([...stack, ...added]);
     setFocusedBendId(added[0].id);
     setNote(null);
-    setPresetsOpen(false);
+    setPresetsOpen(null);
     const left = dropped ? `, leaving out ${bendCount(dropped, "entry", "entries")} this build cannot read` : "";
     toast(`Added “${name.replace(/^starter-/, "")}” — ${bendCount(added.length)} after yours${left}`, dropped ? "warn" : "success");
   };
@@ -376,7 +377,7 @@ export function BendWorkspace({ stack, setStack }) {
       setStack(loaded);
       setFocusedBendId(loaded[0]?.id || null);
       setNote(null);
-      setPresetsOpen(false);
+      setPresetsOpen(null);
       if (dropped) toast(`Loaded “${name}”, leaving out ${bendCount(dropped, "entry", "entries")} this build cannot read as a bend`, "warn");
       else toast(`Loaded “${name}”`, "success");
     }
@@ -689,19 +690,21 @@ export function BendWorkspace({ stack, setStack }) {
               <UndoIcon size={15} />
             </button>
           )}
+          <button type="button" className={`btn sm ${presetsOpen === "starters" ? "on" : ""}`.trim()}
+            aria-haspopup="dialog" onClick={() => setPresetsOpen("starters")}>
+            <TilesIcon /> Presets
+          </button>
           <Popover
-            label="Bend presets"
+            label="Saved bend stacks"
             triggerClass="btn sm"
-            trigger={<><TilesIcon /> Presets</>}
-            open={presetsOpen}
-            onOpenChange={setPresetsOpen}
+            trigger={<><BookmarkIcon /> Saved{savedPresets.length ? ` (${savedPresets.length})` : ""}</>}
+            open={presetsOpen === "saved"}
+            onOpenChange={(o) => setPresetsOpen(o ? "saved" : null)}
             panelClass="bend-presets-pop"
           >
-            <BendPresets
-              starters={starterPresets}
+            <SavedPresets
               saved={savedPresets}
               ops={ops}
-              nodes={nodes}
               saveName={saveName}
               setSaveName={setSaveName}
               canSave={stack.length > 0 && !!saveName.trim()}
@@ -809,7 +812,7 @@ export function BendWorkspace({ stack, setStack }) {
                 addRandomBend={addRandomBend}
                 headExtra={(
                   <button type="button" className="btn ghost sm" disabled={!stack.length}
-                    onClick={() => setPresetsOpen(true)}>
+                    onClick={() => setPresetsOpen("saved")}>
                     Save as preset…
                   </button>
                 )}
@@ -884,6 +887,20 @@ export function BendWorkspace({ stack, setStack }) {
           />
         </div>
       </div>
+
+      {/* A modal, not a popover: the presets are chosen by their pictures, which
+          want more room than a panel hanging off the toolbar has. */}
+      {presetsOpen === "starters" && (
+        <Modal title="Kiln's presets" wide onClose={() => setPresetsOpen(null)}>
+          <StarterPresets
+            starters={starterPresets}
+            ops={ops}
+            nodes={nodes}
+            onLoad={loadPreset}
+            onAdd={addPreset}
+          />
+        </Modal>
+      )}
 
       {compareOpen && (
         <Modal
