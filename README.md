@@ -288,7 +288,9 @@ The repository ships no weights. Five ways to get some:
 2. **A model you already have** — drop the `.pt` onto **Prepare ▸ Models ▸ Import a model**,
    or give it the path. Kiln copies it into `~/kiln/models` (or `$KILN_WORKSPACE/models`),
    which is where it keeps models and the only folder you need to know about. Putting files
-   there yourself works too; **Open models folder** on the Models page opens it.
+   there yourself works too; **Open models folder** on the Models page opens it. Each
+   model's name card and thumbnail are kept in a hidden `.kiln` folder inside it, so the
+   folder itself shows only the models.
 3. **More xurdif checkpoints** from the [author's Dropbox folder](https://www.dropbox.com/scl/fo/flh4pczukrrlb3ar1rfuc/AAT22M2b21Tf1yKe3Ji0HS0?rlkey=f1zdhexy36p3hffcun686m77c&dl=0),
    loaded under **Prepare ▸ Models ▸ Get a model**.
 4. **Hugging Face**, under **Prepare ▸ Models ▸ From Hugging Face**.

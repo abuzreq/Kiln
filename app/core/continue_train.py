@@ -200,7 +200,7 @@ def continue_from_model(
     shutil.copy2(path, dest)
     thumb = library.sibling_thumb(path)
     if thumb is not None:
-        shutil.copy2(thumb, dest.with_suffix(".png"))
+        shutil.copy2(thumb, library.thumb_path(dest, ensure_dir=True))
 
     cfg = dict(info.get("config") or {})
     if train_steps:

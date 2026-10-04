@@ -66,6 +66,15 @@ def create_app() -> Flask:
     from app.core.engine import lanes
     lanes.configure(lanes.default_lanes())
 
+    # Model cards and thumbnails used to sit beside each model; move them into
+    # the models folder's .kiln so the folder shows only the models.
+    try:
+        from app.core import library
+        if moved := library.tidy_model_folders():
+            log.info("moved %d model cards and thumbnails into .kiln", moved)
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not tidy the models folder: %s", e)
+
     # --- static frontend --------------------------------------------------
     def _api_endpoint_exists(path: str) -> bool:
         """Does any real route serve this path, under any method?

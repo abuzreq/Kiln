@@ -282,26 +282,126 @@ def can_rename(path: str | Path) -> bool:
     return p.exists() and p.suffix == ".pt" and inside_workspace(p) and not is_run_checkpoint(p)
 
 
+# A model's card and thumbnail live in a ".kiln" folder beside it, so a models
+# folder shows the models and nothing else. They used to sit right next to the
+# model; those are still read, and tidy_model_folders moves them in.
+SIDECAR_DIR = ".kiln"
+
+
+def _hide(d: Path):
+    """A leading dot hides a folder on macOS and Linux; Windows needs the attribute."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        k32 = ctypes.windll.kernel32
+        attrs = k32.GetFileAttributesW(str(d))
+        if attrs != -1:
+            k32.SetFileAttributesW(str(d), attrs | 0x2)  # FILE_ATTRIBUTE_HIDDEN
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _sidecar_dir(folder: Path) -> Path:
+    d = folder / SIDECAR_DIR
+    if not d.is_dir():
+        d.mkdir(parents=True, exist_ok=True)
+        _hide(d)
+    return d
+
+
 def card_path(pt: str | Path) -> Path:
+    pt = Path(pt)
+    return pt.parent / SIDECAR_DIR / pt.with_suffix(".card.json").name
+
+
+def _legacy_card_path(pt: str | Path) -> Path:
     return Path(pt).with_suffix(".card.json")
 
 
+def thumb_path(pt: str | Path, ensure_dir: bool = False) -> Path:
+    """Where a model's own thumbnail is written."""
+    pt = Path(pt)
+    if ensure_dir:
+        _sidecar_dir(pt.parent)
+    return pt.parent / SIDECAR_DIR / pt.with_suffix(".png").name
+
+
+def _thumb_candidates(pt: Path) -> list[Path]:
+    side = pt.parent / SIDECAR_DIR
+    return [side / f"{pt.stem}.png", side / f"{pt.stem}.jpg",
+            pt.with_suffix(".png"), pt.with_suffix(".jpg")]
+
+
+def own_thumb(pt: str | Path) -> Path | None:
+    """The model's own thumbnail, wherever it was saved; not a run's sample."""
+    return next((f for f in _thumb_candidates(Path(pt)) if f.is_file()), None)
+
+
+def drop_sidecars(pt: str | Path, thumbs: bool = True):
+    """Remove a model's card and, unless told not to, its thumbnail."""
+    files = [card_path(pt), _legacy_card_path(pt)]
+    if thumbs:
+        files += _thumb_candidates(Path(pt))
+    for f in files:
+        f.unlink(missing_ok=True)
+
+
 def read_card(pt: str | Path) -> dict:
-    f = card_path(pt)
-    if not f.exists():
-        return {}
-    try:
-        data = json.loads(f.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
-        return {}
-    return data if isinstance(data, dict) else {}
+    for f in (card_path(pt), _legacy_card_path(pt)):
+        if not f.exists():
+            continue
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return {}
+        return data if isinstance(data, dict) else {}
+    return {}
 
 
 def write_card(pt: str | Path, card: dict) -> dict:
     card = dict(card)
     card["updated_at"] = time.time()
+    _sidecar_dir(Path(pt).parent)
     card_path(pt).write_text(json.dumps(card, indent=2), encoding="utf-8")
+    _legacy_card_path(pt).unlink(missing_ok=True)
     return card
+
+
+def tidy_model_folders() -> int:
+    """Move cards and thumbnails that sit beside the models into ``.kiln``.
+
+    Only Kiln's own models folders. A picture moves only when a model of the
+    same name is there, so anything else someone keeps in the folder stays.
+    """
+    folders = [workspace.models]
+    if workspace.projects.is_dir():
+        folders += [p / "models" for p in workspace.projects.iterdir() if p.is_dir()]
+    moved = 0
+    for folder in folders:
+        if not folder.is_dir():
+            continue
+        for f in list(folder.iterdir()):
+            if not f.is_file():
+                continue
+            if f.name.endswith(".card.json"):
+                pass
+            elif f.suffix.lower() in (".png", ".jpg"):
+                if not ((folder / f"{f.stem}.pt").is_file() or (folder / f.stem).is_dir()):
+                    continue
+            else:
+                continue
+            dest = _sidecar_dir(folder) / f.name
+            try:
+                if dest.exists():
+                    f.unlink()  # a newer copy was already written there
+                else:
+                    f.rename(dest)
+                moved += 1
+            except OSError:
+                pass
+    return moved
 
 
 def _uniq(items) -> list:
@@ -341,9 +441,9 @@ def ensure_card(pt: str | Path, **fields) -> dict:
 
 def sibling_thumb(src: str | Path) -> Path | None:
     src = Path(src)
-    png = src.with_suffix(".png")
-    if png.exists():
-        return png
+    own = own_thumb(src)
+    if own is not None:
+        return own
     if src.stem.startswith("model-"):
         try:
             sample = src.with_name(f"sample-{src.stem.split('-', 1)[1]}.png")
@@ -363,16 +463,9 @@ def delete_model_files(path: str | Path):
             "so Kiln will not delete it; hide it instead")
     if not p.exists():
         raise NotFoundError("model not found")
-    thumb = sibling_thumb(p)
-    card = card_path(p)
     p.unlink()
-    if thumb is not None and thumb.exists() and thumb != p:
-        # only delete a true sidecar sitting next to the .pt (not a run sample
-        # we might still want if this were a checkpoint — but we refuse those)
-        if thumb.suffix.lower() == ".png" and thumb.parent == p.parent:
-            if not is_run_checkpoint(p):
-                thumb.unlink(missing_ok=True)
-    card.unlink(missing_ok=True)
+    # The model's own thumbnail goes with it; a run's sample-N.png stays.
+    drop_sidecars(p, thumbs=not is_run_checkpoint(p))
     remove_star(str(p))
 
 
@@ -397,15 +490,13 @@ def rename_model(path: str, new_name: str) -> dict:
         raise ValidationError(f"a model named '{new_name}' already exists")
 
     old_stem = src.stem
+    card = read_card(src)
     src.rename(dest)
-    png = src.with_suffix(".png")
-    if png.exists():
-        png.rename(dest.with_suffix(".png"))
-    old_card = card_path(src)
-    if old_card.exists():
-        old_card.rename(card_path(dest))
+    thumb = own_thumb(src)
+    if thumb is not None:
+        thumb.replace(thumb_path(dest, ensure_dir=True).with_suffix(thumb.suffix))
+    drop_sidecars(src)
 
-    card = read_card(dest)
     if not card.get("original_name"):
         card["original_name"] = old_stem
     card["name"] = new_name

@@ -53,16 +53,22 @@ def size_multiple(mults) -> int:
 
 
 def sidecar_thumbnail(path: Path) -> str | None:
-    """A training run writes ``sample-N.png`` next to ``model-N.pt``; use it as a thumb."""
+    """A training run writes ``sample-N.png`` next to ``model-N.pt``; use it as a thumb.
+
+    Otherwise a picture of the same name: in the ``.kiln`` folder beside it,
+    where Kiln keeps a model's thumbnail (see ``library.SIDECAR_DIR``), or right
+    next to it.
+    """
     stem = path.stem
     if stem.startswith("model-"):
         cand = path.with_name("sample-" + stem.split("-", 1)[1] + ".png")
         if cand.exists():
             return str(cand)
-    for ext in (".png", ".jpg"):
-        cand = path.with_suffix(ext)
-        if cand.exists():
-            return str(cand)
+    for folder in (path.parent / ".kiln", path.parent):
+        for ext in (".png", ".jpg"):
+            cand = folder / (stem + ext)
+            if cand.exists():
+                return str(cand)
     return None
 
 

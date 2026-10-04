@@ -487,7 +487,7 @@ def save_checkpoint(run):
     thumb = library.sibling_thumb(src)
     if thumb is not None:
         try:
-            shutil.copy2(thumb, dest.with_suffix(".png"))
+            shutil.copy2(thumb, library.thumb_path(dest, ensure_dir=True))
         except Exception:  # noqa: BLE001
             pass
 
@@ -523,7 +523,8 @@ def save_checkpoint(run):
 
     meta = read_meta(dest)
     meta.source = "workspace"
-    meta.thumbnail = str(dest.with_suffix(".png")) if dest.with_suffix(".png").exists() else None
+    thumb = library.own_thumb(dest)
+    meta.thumbnail = str(thumb) if thumb else None
     d = meta.to_dict()
     d["name"] = save_as
     d["original_name"] = trained_as

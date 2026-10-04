@@ -273,12 +273,10 @@ def merge():
             kind="merge",
         )
         # The compare step already rendered this exact recipe; saving that image
-        # beside the .pt gives the model a real thumbnail for free.
+        # as the model's thumbnail gives it a real one for free.
         if body.get("thumbnail"):
             try:
-                from pathlib import Path
-
-                png = Path(res["path"]).with_suffix(".png")
+                png = library.thumb_path(res["path"], ensure_dir=True)
                 save_with_params(from_data_url(body["thumbnail"]), png, body.get("card"))
                 res["thumbnail"] = str(png)
             except Exception as e:  # noqa: BLE001

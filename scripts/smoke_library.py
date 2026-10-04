@@ -79,6 +79,7 @@ def check_delete_vs_hide():
     owned = WORKSPACE / "models" / "mine.pt"
     owned.write_bytes(b"x")
     card = library.card_path(owned)
+    card.parent.mkdir(exist_ok=True)
     card.write_text("{}", encoding="utf-8")
     assert library.owned_by_kiln(owned)
     library.delete_model_files(owned)
@@ -244,6 +245,52 @@ def check_hidden_follows_rename():
     print("hide: follows a rename, and is cleared when its folder goes")
 
 
+def check_sidecars_tucked_away():
+    """Cards and thumbnails live in models/.kiln, so the folder lists only models.
+
+    Old ones beside the model are still read, and tidying moves them in; a
+    picture with no model of its name is someone's own and stays put.
+    """
+    from app.core.model_manager import manager
+
+    models = WORKSPACE / "models"
+    old = _tiny_checkpoint(models / "old-style.pt")
+    (models / "old-style.card.json").write_text('{"name": "Old style"}', encoding="utf-8")
+    (models / "old-style.png").write_bytes(b"png")
+    (models / "holiday.png").write_bytes(b"png")
+    assert library.read_card(old)["name"] == "Old style", "an old card beside the model was not read"
+    assert library.own_thumb(old) == models / "old-style.png"
+
+    assert library.tidy_model_folders() == 2
+    side = models / ".kiln"
+    assert (side / "old-style.card.json").exists() and (side / "old-style.png").exists()
+    assert not (models / "old-style.card.json").exists() and not (models / "old-style.png").exists()
+    assert (models / "holiday.png").exists(), "tidying moved a picture that is not a thumbnail"
+    assert library.read_card(old)["name"] == "Old style"
+
+    manager.clear_cache()
+    listed = {m["path"]: m for m in manager.scan_public()}
+    assert listed[str(old)]["name"] == "Old style", listed[str(old)]
+    assert Path(listed[str(old)]["thumbnail"]) == side / "old-style.png", listed[str(old)]
+
+    # a new card is written into .kiln, and a rename takes the sidecars along
+    new = _tiny_checkpoint(models / "fresh.pt")
+    library.ensure_card(new, name="fresh")
+    assert (side / "fresh.card.json").exists() and not (models / "fresh.card.json").exists()
+    moved = Path(library.rename_model(str(old), "renamed-old")["path"])
+    assert (side / "renamed-old.png").exists() and (side / "renamed-old.card.json").exists()
+    assert not (side / "old-style.png").exists() and not (side / "old-style.card.json").exists()
+    assert library.read_card(moved)["original_name"] == "old-style"
+
+    for pt in (moved, new):
+        library.delete_model_files(pt)
+    left = [f.name for f in side.iterdir() if f.stem.split(".")[0] in ("renamed-old", "fresh")]
+    assert not left, f"delete left sidecars behind: {left}"
+    (models / "holiday.png").unlink()
+    manager.clear_cache()
+    print("sidecars: cards and thumbnails kept in models/.kiln; old ones read and tidied")
+
+
 def main():
     try:
         check_preview_failures()
@@ -251,6 +298,7 @@ def main():
         check_scan_public_hidden()
         check_import()
         check_hidden_follows_rename()
+        check_sidecars_tucked_away()
     finally:
         shutil.rmtree(WORKSPACE, ignore_errors=True)
         shutil.rmtree(OUTSIDE, ignore_errors=True)

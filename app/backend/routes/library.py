@@ -237,10 +237,7 @@ def download():
                 read_meta(dest)
             except Exception as e:
                 dest.unlink(missing_ok=True)
-                dest.with_suffix(".png").unlink(missing_ok=True)
-                card_file = library.card_path(dest)
-                if card_file.exists():
-                    card_file.unlink()
+                library.drop_sidecars(dest)
                 raise ValueError(f"downloaded file is not a valid model checkpoint: {e}") from e
             library.ensure_card(dest, name=name, original_name=name, trained_as=[name])
             manager.clear_cache()
@@ -408,9 +405,7 @@ def import_model():
         read_meta(dest)
     except Exception as e:
         dest.unlink(missing_ok=True)
-        card_file = library.card_path(dest)
-        if card_file.exists():
-            card_file.unlink()
+        library.drop_sidecars(dest, thumbs=False)
         if isinstance(e, (ValidationError, NotFoundError)):
             raise
         raise ValidationError(f"that file is not a model Kiln can read: {e}") from e
