@@ -3,7 +3,9 @@ import { api, downloadPost, mediaUrl, pollJob } from "../api.js";
 import { useApp } from "../state.jsx";
 import { usePlay, usePlayState } from "./playContext.jsx";
 import { Select, Num, Disclose, Progress, Modal, Seg, Popover } from "../components/ui.jsx";
-import { DownloadIcon, ExpandIcon, TilesIcon, TransferIcon } from "../components/icons.jsx";
+import {
+  DiceIcon, DownloadIcon, ExpandIcon, TilesIcon, TransferIcon, UndoIcon,
+} from "../components/icons.jsx";
 import UnetVisualizer from "../components/UnetVisualizer.jsx";
 import BendPipeline from "../components/BendPipeline.jsx";
 import BendEditor, { BendInspector } from "../components/BendEditor.jsx";
@@ -242,6 +244,32 @@ export function BendWorkspace({ stack, setStack }) {
     setStack(stack.map((b) => (b.id === lastRoll.id ? { ...lastRoll.prev, active: b.active } : b)));
     setLastRoll(null);
   };
+  // Randomize: the way in for someone facing an empty map. A fresh stack of
+  // one to three rolled bends, compared at once so there is a picture to react
+  // to. It replaces the stack, so the one it replaced stays a click away for
+  // as long as the rolled stack is left as it came out.
+  const [beforeRandom, setBeforeRandom] = useState(null);
+  const randomize = () => {
+    const n = 1 + Math.floor(Math.random() * 3);
+    const rolled = normalizeStack(
+      Array.from({ length: n }, () => randomBend(ops, nodes)).filter(Boolean),
+    ).bends;
+    if (!rolled.length) return;
+    setBeforeRandom(stack.length ? { prev: stack, key: stackKey(rolled) } : null);
+    setStack(rolled);
+    setFocusedBendId(rolled[0].id);
+    setLastRoll(null);
+    setNote(null);
+    if (modelPath) generateCompare(rolled);
+  };
+  const canUndoRandom = !!(beforeRandom && stackKey(stack) === beforeRandom.key);
+  const undoRandom = () => {
+    if (!canUndoRandom) return;
+    setStack(beforeRandom.prev);
+    setFocusedBendId(beforeRandom.prev[0]?.id || null);
+    setBeforeRandom(null);
+  };
+
   const addRandomBend = () => {
     const bend = randomBend(ops, nodes);
     if (!bend) return;
@@ -405,9 +433,11 @@ export function BendWorkspace({ stack, setStack }) {
     }
   };
 
-  const generateCompare = async () => {
+  // `bends` is for a caller that has just set the stack, which this render's
+  // `stack` does not show yet.
+  const generateCompare = async (bends = stack) => {
     if (!modelPath) { toast("Pick a model", "error"); return; }
-    if (!stack.some((b) => b.active)) { toast("Add and enable at least one bend", "error"); return; }
+    if (!bends.some((b) => b.active)) { toast("Add and enable at least one bend", "error"); return; }
     setGenBusy(true);
     setGenBent(null);
     try {
@@ -433,7 +463,7 @@ export function BendWorkspace({ stack, setStack }) {
 
       const bentBody = buildSamplePayload(sampleParams, {
         model_path: modelPath,
-        bends: stack.filter((b) => b.active),
+        bends: bends.filter((b) => b.active),
         postproc: {},
       });
       const { job: j1 } = await api.post("/perform/sample", bentBody);
@@ -447,7 +477,7 @@ export function BendWorkspace({ stack, setStack }) {
         plain: plainFrame,
         bent: bentFrame,
         card: bent.detail?.card || null,
-        stack: stack.map((b) => ({ ...b })),
+        stack: bends.map((b) => ({ ...b })),
         meta: {
           seed: bentBody.seed, steps: bentBody.steps, size: bentBody.image_size, reused: reusedPlain,
         },
@@ -639,6 +669,21 @@ export function BendWorkspace({ stack, setStack }) {
             </button>
           )}
           <span className="bend-toolbar-sep" aria-hidden="true" />
+          <button type="button"
+            className={`btn sm randomize ${stack.length ? "" : "invite"}`.trim()}
+            onClick={randomize}
+            disabled={!ops.length || genBusy}
+            title={modelPath
+              ? "Replace the bends with one to three random ones and compare them"
+              : "Replace the bends with one to three random ones"}>
+            <DiceIcon size={15} /> Randomize
+          </button>
+          {canUndoRandom && (
+            <button type="button" className="btn icon" onClick={undoRandom}
+              title="Bring back the bends Randomize replaced" aria-label="Undo randomize">
+              <UndoIcon size={15} />
+            </button>
+          )}
           <Popover
             label="Bend presets"
             triggerClass="btn sm"
@@ -816,7 +861,7 @@ export function BendWorkspace({ stack, setStack }) {
               )}
             </div>
           ) : (
-            <button type="button" className="btn primary w-full" onClick={generateCompare}
+            <button type="button" className="btn primary w-full" onClick={() => generateCompare()}
               disabled={!modelPath || !stack.length}>
               Compare samples
             </button>

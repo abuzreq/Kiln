@@ -54,11 +54,11 @@ function StepsField({ value, min, max, disabled, onChange }) {
 export default function PlaySetup({
   model, params, setParam, sweptBy, overriddenBy, editable, stepsMin, children,
 }) {
-  const [mode, setMode] = useState(() => {
-    const v = load(KEY);
-    if (v === "pinned" || v === "closed") return v;
-    return model ? "closed" : "floating";
-  });
+  // Closed unless it was pinned. It used to open by itself when no model was
+  // picked yet, but the model list is still loading when Play first draws, so
+  // it opened over the canvas almost every visit; the bar's "Choose a model"
+  // is the way in instead.
+  const [mode, setMode] = useState(() => (load(KEY) === "pinned" ? "pinned" : "closed"));
   const wrap = useRef(null);
   const toggleBtn = useRef(null);
 
