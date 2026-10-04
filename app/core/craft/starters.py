@@ -31,12 +31,13 @@ STARTERS: list[dict] = [
     },
     {
         "name": "starter-etched",
-        "notes": "Swaps late decoder activations for their own edges. Outlined, drawn, "
-                 "engraved-looking output. Held to the second half of the run because "
-                 "edges applied to early noise are just more noise.",
+        "notes": "Mixes a little of the decoder's own edges back into it. Shapes break into "
+                 "outlined, cell-like patches, like leaded glass or an etching. A little goes "
+                 "a long way: edge strength has no sign, so past about 0.2 the picture "
+                 "washes out to grey (measured on three sample models; 0.6 left only grey).",
         "bends": [{
-            "op": "gradient", "params": {"mix": 0.6},
-            "targets": ["decoder"], "step_start": 0.4, "step_end": 1.0, "active": True,
+            "op": "gradient", "params": {"mix": 0.08},
+            "targets": ["decoder"], "step_start": 0.0, "step_end": 1.0, "active": True,
         }],
     },
     {
@@ -53,12 +54,13 @@ STARTERS: list[dict] = [
     },
     {
         "name": "starter-grain-storm",
-        "notes": "Injects noise at the bottleneck, mid-run only. Flat areas break up "
-                 "into texture while edges mostly survive. Ends before the last steps "
-                 "so the model still gets to resolve what the noise suggested.",
+        "notes": "Injects noise into the decoder for most of the run. Flat areas break up "
+                 "into grain while the composition holds. Ends before the last steps so "
+                 "the model still resolves some of what the noise suggested. In the "
+                 "bottleneck the same noise barely showed: the decoder rebuilt over it.",
         "bends": [{
-            "op": "noise", "params": {"std": 0.25, "seed": 0},
-            "targets": ["mid"], "step_start": 0.15, "step_end": 0.7, "active": True,
+            "op": "noise", "params": {"std": 0.3, "seed": 0},
+            "targets": ["decoder"], "step_start": 0.2, "step_end": 0.9, "active": True,
         }],
     },
     {
