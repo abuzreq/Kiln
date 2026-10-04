@@ -27,6 +27,34 @@ const AXIS_KINDS = {
 
 const SAMPLER_CHOICES = ["dpmpp", "unipc", "deis", "ddim"];
 
+// Starting points, for anyone who has not run a sweep before: what one is for,
+// shown rather than described. Clicking one fills in the axes below; nothing
+// runs until Run sweep, so it can be changed first.
+const EXAMPLES = [
+  {
+    id: "settle",
+    label: "When does it settle?",
+    desc: "Steps 10 → 100",
+    tip: "The same picture at four step counts. Find the fewest steps that still look finished, and generate faster from then on.",
+    x: { param: "steps", from: 10, to: 100, count: 4 },
+  },
+  {
+    id: "solvers",
+    label: "Seeds × samplers",
+    desc: "4 samplers across, 4 seeds down",
+    tip: "Each column is a sampler, each row a seed. Shows whether a sampler's look holds across pictures or was luck with one seed.",
+    x: { param: "sampler", picks: SAMPLER_CHOICES },
+    y: { param: "seed", from: 0, to: 3, count: 4 },
+  },
+  {
+    id: "size",
+    label: "Bigger than trained",
+    desc: "Size 256 → 1024",
+    tip: "The same seed at 256, 512 and 1024px. Models trained small often turn into texture or repeat themselves when asked for more.",
+    x: { param: "image_size", from: 256, mult: 2, count: 3 },
+  },
+];
+
 export function axisKind(param) {
   return AXIS_KINDS[param] || "linear";
 }
@@ -221,6 +249,33 @@ export default function SweepPanel() {
     if (r) { setLo(r.min); setHi(r.max); }
   };
 
+  const loadExample = (ex) => {
+    const fill = (a, set) => {
+      set.param(a.param);
+      if (a.from != null) set.from(a.from);
+      if (a.to != null) set.to(a.to);
+      if (a.count != null) set.count(a.count);
+      if (a.mult != null) set.mult(a.mult);
+      if (a.picks) set.picks(a.picks);
+    };
+    fill(ex.x, { param: setParam, from: setFrom, to: setTo, count: setCount, mult: setMult, picks: setPicks });
+    setTwoD(!!ex.y);
+    if (ex.y) {
+      fill(ex.y, { param: setParam2, from: setFrom2, to: setTo2, count: setCount2, mult: setMult2, picks: setPicks2 });
+    }
+  };
+  // The example the axes still match, if any, so its button shows as loaded.
+  const matches = (a, cur) => a.param === cur.param
+    && ["from", "to", "count", "mult"].every((k) => a[k] == null || a[k] === cur[k])
+    && (!a.picks || a.picks.join() === cur.picks.join());
+  const loadedExample = EXAMPLES.find((ex) => (
+    matches(ex.x, { param, from, to, count, mult, picks })
+    && !!ex.y === twoD
+    && (!ex.y || matches(ex.y, {
+      param: param2, from: from2, to: to2, count: count2, mult: mult2, picks: picks2,
+    }))
+  ))?.id;
+
   // survives leaving the Sweep tab mid-run
   const [job, setJob] = usePlayState("sweep.job", null);
 
@@ -340,6 +395,22 @@ export default function SweepPanel() {
           {sweptLabels.length > 1 ? "come" : "comes"} from the grid.
           {" "}Everything else — {inheritedLabels.join(", ")} — follows Sample settings.
         </p>
+        <div className="section-title mt-3">Start from an example</div>
+        <div className="sweep-examples">
+          {EXAMPLES.map((ex) => (
+            <button
+              key={ex.id}
+              type="button"
+              className={`sweep-example ${loadedExample === ex.id ? "on" : ""}`.trim()}
+              aria-pressed={loadedExample === ex.id}
+              title={ex.tip}
+              onClick={() => loadExample(ex)}
+            >
+              <span className="sweep-example-label">{ex.label}</span>
+              <span className="sub">{ex.desc}</span>
+            </button>
+          ))}
+        </div>
       </div>
 
       {inertAxes.length > 0 && (

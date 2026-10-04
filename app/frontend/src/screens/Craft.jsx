@@ -4,7 +4,7 @@ import { useApp } from "../state.jsx";
 import { usePlay, usePlayState } from "./playContext.jsx";
 import { Select, Num, Disclose, Progress, Modal, Seg, Popover } from "../components/ui.jsx";
 import {
-  DiceIcon, DownloadIcon, ExpandIcon, TilesIcon, TransferIcon, UndoIcon,
+  DiceIcon, DownloadIcon, ExpandIcon, FileJsonIcon, TilesIcon, UndoIcon,
 } from "../components/icons.jsx";
 import UnetVisualizer from "../components/UnetVisualizer.jsx";
 import BendPipeline from "../components/BendPipeline.jsx";
@@ -708,8 +708,8 @@ export function BendWorkspace({ stack, setStack }) {
           <Popover
             label="Share with other tools"
             triggerLabel="Import or export bends as JSON"
-            triggerClass="btn icon"
-            trigger={<TransferIcon size={15} />}
+            triggerClass="btn sm"
+            trigger={<><FileJsonIcon size={15} /> JSON</>}
           >
             {(close) => (
               <div className="bend-share">
@@ -863,7 +863,7 @@ export function BendWorkspace({ stack, setStack }) {
           ) : (
             <button type="button" className="btn primary w-full" onClick={() => generateCompare()}
               disabled={!modelPath || !stack.length}>
-              Compare samples
+              Generate with bends
             </button>
           )}
           <p className="hint mb-0">
@@ -909,12 +909,13 @@ export function BendWorkspace({ stack, setStack }) {
       )}
 
       <Disclose
-        title="Sweep a bend parameter"
+        title="Animate a bend: GIF or video loop"
         tip="Runs a full sample for each value, changing only this one number — everything else, including the seed and the layers you targeted, stays fixed."
       >
         <p className="hint mb-2">
-          One generation per value, same seed, same targets. Only the number moves, so the strip
-          can be saved as a GIF or a video.
+          Pick one number on a bend and a range to move it through. Each step is one generation
+          with the same seed and targets, so the frames play as an animation of the bend taking
+          hold. Save them as a GIF or a video; Ping-pong plays it back and forth as a seamless loop.
         </p>
         <div className="row wrap gap-3">
           <div className="w-130">
@@ -946,7 +947,7 @@ export function BendWorkspace({ stack, setStack }) {
           ) : (
             <button type="button" className="btn primary self-end mb-2" onClick={runSweep}
               disabled={!stack.length || !sweep.param || !modelPath}>
-              Run sweep
+              Render frames
             </button>
           )}
         </div>

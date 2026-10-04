@@ -265,12 +265,15 @@ export function DownloadIcon(props) {
   );
 }
 
-/** Out and in: one arrow up, one down. For import/export together. */
-export function TransferIcon(props) {
+/** Lucide's "file-json" (ISC): a page with braces, for importing and
+ *  exporting a JSON file. Two arrows read as sorting. */
+export function FileJsonIcon(props) {
   return (
     <Icon {...props}>
-      <path d="M7 20V4M3 8l4-4 4 4" />
-      <path d="M17 4v16M13 16l4 4 4-4" />
+      <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+      <path d="M14 2v4a2 2 0 0 0 2 2h4" />
+      <path d="M10 12a1 1 0 0 0-1 1v1a1 1 0 0 1-1 1 1 1 0 0 1 1 1v1a1 1 0 0 0 1 1" />
+      <path d="M14 18a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1 1 1 0 0 1-1-1v-1a1 1 0 0 0-1-1" />
     </Icon>
   );
 }

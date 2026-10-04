@@ -21,7 +21,7 @@ Copyright 2010-2023 Mike Bostock.
 
 ## Icon shapes (`app/frontend/src/components/icons.jsx`)
 
-**Lucide** (brush, wand-sparkles, folder-open, chevron-down) — ISC License.
+**Lucide** (brush, wand-sparkles, folder-open, chevron-down, file-json) — ISC License.
 Copyright (c) for portions of Lucide are held by Cole Bemis 2013-2022 as part of Feather
 (MIT). All other copyright (c) for Lucide are held by Lucide Contributors 2022.
 https://lucide.dev
