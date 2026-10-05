@@ -178,7 +178,8 @@ def merge(
         {"merged_from": merged_from, "merge": merge_info},
     )
     log.info("merged %s + %s -> %s", merged_from[0], merged_from[1], Path(dest).name)
-    return {"path": dest, "name": out_name, **merge_info, "merged_from": merged_from}
+    return {"path": dest, "name": out_name, **merge_info, "merged_from": merged_from,
+            "slots": sorted(slots), "blended": sorted(blend & set(slots_b))}
 
 
 def _display_name(locator: str) -> str:

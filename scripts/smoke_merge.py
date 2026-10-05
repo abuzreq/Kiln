@@ -266,6 +266,7 @@ def check_ladder_route():
     assert len(sampled) == 6 and all(x["same_as"] is None for x in sampled)
     assert {x["same_as"] for x in d["cells"] if not x["image"]} == {"a", "b"}
     card = sampled[0]["card"]
+    picked = sampled[0]
     assert card["kind"] == "merge-ladder" and "model_path" not in card
     assert card["merge"]["model_a"] == ta and card["merge"]["method"] in ("slerp", "linear")
     print(f"ladder job: 2 refs + 6 merges on seed {d['seed']}, ends shared, cards carry the recipe")
@@ -300,14 +301,57 @@ def check_ladder_route():
     kept = sum(bool(x["image"]) for x in j["detail"]["cells"])
     assert j["status"] == "cancelled" and 1 <= kept < 9, (j["status"], kept)
     print(f"ladder cancel: stopped with {kept} of 9 merges kept")
+    return picked
+
+
+def check_save_from_ladder(cell):
+    """A saved pick keeps its sample as the thumbnail, and that recipe replays."""
+    import base64
+    import io
+
+    import numpy as np
+    from PIL import Image
+
+    from app.core import library
+    from app.core.engine.sampler import SampleParams, sampler
+    from utils.imaging import read_params
+
+    def pixels(im):
+        if isinstance(im, str):
+            im = Image.open(io.BytesIO(base64.b64decode(im.split(",", 1)[1])))
+        return np.asarray(im.convert("RGB"))
+
+    r = cell["recipe"]
+    save = {"model_a": ta, "model_b": tb, "method": r["method"], "alpha": r["alpha"],
+            "thumbnail": cell["image"], "card": cell["card"]}
+    res = c.post("/api/craft/merge", json={**save, "out_name": "picked"}).get_json()["data"]
+    assert res.get("thumbnail") and "thumbnail_skipped" not in res, res
+    back = read_params(library.thumb_path(res["path"]))
+    assert back["model_path"] == res["path"] and back["model"] == "picked", back
+    assert back["merge"]["method"] == r["method"], back
+    p = back["params"]
+    last = None
+    for last in sampler.run(SampleParams(model_path=back["model_path"], image_size=p["image_size"],
+                                         steps=p["steps"], seed=p["seed"], eta=p["eta"],
+                                         sampler=p["sampler"], ema=p["ema"])):
+        pass
+    assert (pixels(last["image_pp"]) == pixels(cell["image"])).all(), "thumbnail does not replay"
+    print("save: the thumbnail's recipe names the saved model and replays to the same pixels")
+
+    res = c.post("/api/craft/merge", json={**save, "out_name": "rawonly",
+                                           "which": "model"}).get_json()["data"]
+    assert "thumbnail" not in res and "ema" in res["thumbnail_skipped"], res
+    assert not library.thumb_path(res["path"]).exists()
+    print("save: raw-only weights skip an EMA sample as thumbnail:", res["thumbnail_skipped"])
 
 
 d_bad = d
 check_ladder_plan()
-check_ladder_route()
+check_save_from_ladder(check_ladder_route())
 
 for n in ("mergeA", "mergeB", "mergeC", "merged_linear", "merged_slerp", "merged_blockwise",
-          "confA", "confB", "confC", "merged_conf", "twoA", "twoB", "ends", "which"):
+          "confA", "confB", "confC", "merged_conf", "twoA", "twoB", "ends", "which",
+          "picked", "rawonly"):
     (workspace.models / f"{n}.pt").unlink(missing_ok=True)
 (workspace.recipes / "merged_blockwise.json").unlink(missing_ok=True)
 print("OK")

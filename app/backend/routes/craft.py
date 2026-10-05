@@ -372,6 +372,23 @@ def merge_preview():
     return ok(res)
 
 
+def _thumbnail_mismatch(res: dict, card: dict) -> str | None:
+    """Why a sample can't stand for the saved merge, or None if it can.
+
+    The sample shows a blend of the slot the sampler reads. Saving with
+    "Weights to merge" set to the other slot leaves that one as model A's, so
+    the file would sample as plain A, not as the picture.
+    """
+    from app.core import backends
+
+    backend, _ = backends.resolve(res["path"])
+    ema = (card.get("params") or {}).get("ema", True) is not False
+    slot = backend.sampled_slot(dict.fromkeys(res.get("slots") or ()), ema)
+    if slot in (res.get("blended") or ()):
+        return None
+    return f"the sample shows blended {slot} weights, which this merge keeps from model A"
+
+
 @bp.post("/merge")
 def merge():
     from app.core.craft.merging import merge as do_merge
@@ -394,17 +411,23 @@ def merge():
             trained_as=res.get("merged_from") or [out_name],
             kind="merge",
         )
-        # The compare step already rendered this exact recipe; saving that image
-        # as the model's thumbnail gives it a real one for free.
+        # The ladder already rendered this exact recipe; saving that image as
+        # the model's thumbnail gives it a real one for free.
         if body.get("thumbnail"):
-            try:
-                png = library.thumb_path(res["path"], ensure_dir=True)
-                save_with_params(from_data_url(body["thumbnail"]), png, body.get("card"))
-                res["thumbnail"] = str(png)
-            except Exception as e:  # noqa: BLE001
-                from utils.logger import get_logger
-
-                get_logger("craft").warning("merge thumbnail not saved: %s", e)
+            card = dict(body.get("card") or {})
+            why_not = _thumbnail_mismatch(res, card)
+            if why_not:
+                res["thumbnail_skipped"] = why_not
+            else:
+                # The sample was of a blend in memory; from now on it is this
+                # file, so the recipe must replay from it.
+                card.update(model_path=res["path"], model=out_name)
+                try:
+                    png = library.thumb_path(res["path"], ensure_dir=True)
+                    save_with_params(from_data_url(body["thumbnail"]), png, card)
+                    res["thumbnail"] = str(png)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("merge thumbnail not saved: %s", e)
     # optionally record a reusable recipe
     if body.get("save_recipe"):
         library.save_entry("recipes", out_name, {
