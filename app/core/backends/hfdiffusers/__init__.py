@@ -167,6 +167,11 @@ class DiffusersBackend(Backend):
 
         return training.presets()
 
+    def training_defaults(self) -> dict:
+        from . import training
+
+        return training.run_defaults()
+
     def training_config(self, body: dict, dataset, out_dir):
         from . import training
 

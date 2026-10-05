@@ -191,21 +191,35 @@ export function LrScheduleField({ presets, value, plan, baseLr, onChange, onAppl
  * because 5e-4 -> 1e-4 -> 5e-5 is exactly divide by five then by two. The full
  * editor opens underneath for anything more considered than that.
  */
-export function LiveRateCard({ lr, summary, plan, presets, onDrop, onApply, busy,
+export function LiveRateCard({ lr, step, summary, plan, presets, onDrop, onApply, busy,
                                canDrop = true, bare = false }) {
   const [open, setOpen] = useState(false);
   const rate = Number(lr);
   const known = Number.isFinite(rate) && rate > 0;
+  // Inside a warm-up the rate is a point on the ramp, so dividing it would set
+  // a rate far below the one the run is climbing to. Say where it is going
+  // instead, and offer the drops once it gets there.
+  const warmEnd = plan?.warmup > 0 ? (plan.warmup_from || 0) + plan.warmup : 0;
+  const at = Number(step);
+  const warming = canDrop && Number.isFinite(at) && at < warmEnd;
+  const target = warming
+    ? [...(plan.segments || [])].reverse().find((s) => (s.from || 0) <= at)?.lr
+    : null;
+  // The xurdif trainer reports a warm-up only where it starts and ends, so the
+  // job's rate sits at the first step's until then; the ramp itself is known.
+  const shown = warming && target
+    ? target * Math.min(at - (plan.warmup_from || 0) + 1, plan.warmup) / plan.warmup
+    : rate;
   return (
     // `bare` when the caller already provides the panel -- the continue box does,
     // and a box inside a box draws two borders.
     <div className={bare ? "" : "continue-run-box mt-2"}>
       <div className="row between center gap-2 wrap">
-        <span className="sub">Learning rate {known && <b>{fmtRate(rate)}</b>}</span>
+        <span className="sub">Learning rate {known && <b>{fmtRate(shown)}</b>}</span>
         {summary && <span className="sub">{summary}</span>}
       </div>
       <div className="row gap-2 mt-2 wrap">
-        {canDrop && [2, 5, 10].map((f) => (
+        {canDrop && !warming && [2, 5, 10].map((f) => (
           <button type="button" key={f} className="btn ghost sm" disabled={!known || busy}
                   onClick={() => onDrop(rate / f)}>
             Drop to {known ? fmtRate(rate / f) : "—"}
@@ -216,11 +230,17 @@ export function LiveRateCard({ lr, summary, plan, presets, onDrop, onApply, busy
           {open ? "Done" : "Change schedule…"}
         </button>
       </div>
+      {warming && (
+        <p className="hint mb-0 mt-2">
+          Warming up{target ? <> to <b>{fmtRate(target)}</b></> : null} until
+          step {warmEnd.toLocaleString()}. The drops are offered from there.
+        </p>
+      )}
       {open && (
         <LrScheduleEditor
           presets={presets}
           plan={plan}
-          baseLr={known ? rate : undefined}
+          baseLr={warming && target ? target : known ? rate : undefined}
           applyLabel={canDrop ? "Apply to this run" : "Use on the next run"}
           onCancel={() => setOpen(false)}
           onApply={(spec) => { onApply(spec); setOpen(false); }}

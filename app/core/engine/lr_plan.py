@@ -41,6 +41,16 @@ KINDS = ("const", "linear", "cosine", "exp", "cyclic")
 LR_MIN = 1e-8
 LR_MAX = 1.0
 
+# Warm-up: the rate climbs linearly from almost nothing to the plan's own over
+# the first steps a run takes, so Adam's first updates -- its moments start
+# empty -- land at a fraction of the rate. A new run gets 2% of its length,
+# capped at 1000 steps: on a 280k-step xurdif run that is over by step 1000,
+# before the vendored trainer's EMA starts averaging at step 2000. Under 10 steps
+# it is not worth having, which also leaves short test runs exactly as they were.
+WARMUP_FRACTION = 0.02
+WARMUP_MAX = 1000
+WARMUP_MIN = 10
+
 
 # --- formatting -------------------------------------------------------------
 
@@ -162,13 +172,42 @@ DEFAULT_PRESET = "constant"
 
 # --- compiling and validating ----------------------------------------------
 
-def compile_plan(spec, *, lr: float, train_steps: int, save_every: int) -> dict:
+def default_warmup(span) -> int:
+    """The warm-up a new run gets when its request does not say. ``span`` is the
+    number of steps the run will take, not its target step."""
+    n = min(WARMUP_MAX, int(round(WARMUP_FRACTION * max(int(span or 0), 0))))
+    return n if n >= WARMUP_MIN else 0
+
+
+def warmup_end(plan: dict) -> int:
+    """The first step the warm-up no longer scales, or 0 when there is none."""
+    warmup = int((plan or {}).get("warmup") or 0)
+    return int((plan or {}).get("warmup_from") or 0) + warmup if warmup > 0 else 0
+
+
+def carried_warmup(plan: dict | None) -> dict:
+    """An existing plan's warm-up, as ``compile_plan`` keyword arguments.
+
+    Changing a run's schedule or continuing it leaves its warm-up where it was --
+    in the past, for any run that got through it -- so the chart still reads it
+    as a warm-up, and a continue behaves exactly as it did before warm-ups.
+    """
+    plan = plan or {}
+    return {"warmup": int(plan.get("warmup") or 0),
+            "warmup_from": int(plan.get("warmup_from") or 0)}
+
+
+def compile_plan(spec, *, lr: float, train_steps: int, save_every: int,
+                 warmup: int = 0, warmup_from: int = 0) -> dict:
     """Turn a spec into an absolute-step plan.
 
     ``spec`` is ``{"preset": id}``, or ``{"segments": [...]}`` for a hand-built
     one, or an already-compiled plan (which is re-validated and passed through).
     A falsy spec compiles the constant plan, so every run gets a plan file and
     there is one code path in the loops.
+
+    ``warmup`` and ``warmup_from`` apply when the spec does not set its own; a
+    spec's ``"warmup": 0`` is a real choice and turns it off.
     """
     spec = spec or {}
     if not isinstance(spec, dict):
@@ -193,14 +232,48 @@ def compile_plan(spec, *, lr: float, train_steps: int, save_every: int) -> dict:
             raise ValidationError(f"unknown learning-rate schedule '{preset}' (known: {known})")
         segs = PRESETS[preset]["build"](lr, train_steps, save_every)
 
+    own = spec.get("warmup") is not None
     plan = {
         "version": VERSION,
         "preset": preset,
         "params": {"base_lr": lr, "train_steps": train_steps, "save_every": save_every},
-        "warmup": int(spec.get("warmup") or 0),
+        "warmup": _whole(spec["warmup"] if own else warmup),
         "segments": segs,
     }
+    start = _whole(spec.get("warmup_from") if own else warmup_from)
+    if plan["warmup"] and start:
+        # Written only when it is not 0, so a plan without it reads exactly like
+        # every plan written before a warm-up could start anywhere else.
+        plan["warmup_from"] = start
     return validate(plan)
+
+
+def new_run_plan(body: dict, *, lr: float, train_steps: int, save_every: int,
+                 start_step: int = 0) -> dict:
+    """The plan a new run starts on: the schedule the request names, plus the
+    default warm-up unless the request sets one (``lr_warmup``; 0 for none).
+
+    ``start_step`` is where the run's step counter starts -- 0, or the
+    checkpoint's own step when the xurdif trainer picks a library model up --
+    so the warm-up covers the steps the run actually takes.
+    """
+    spec = dict(body.get("lr_plan") or {"preset": body.get("lr_schedule") or "constant"})
+    start_step = max(_whole(start_step), 0)
+    if body.get("lr_warmup") not in (None, ""):
+        spec["warmup"] = _whole(body["lr_warmup"])
+        spec["warmup_from"] = start_step
+    elif spec.get("warmup") is not None and spec.get("warmup_from") is None:
+        spec["warmup_from"] = start_step
+    return compile_plan(spec, lr=lr, train_steps=train_steps, save_every=save_every,
+                        warmup=default_warmup(int(train_steps) - start_step),
+                        warmup_from=start_step)
+
+
+def _whole(v) -> int:
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        raise ValidationError("warm-up must be a whole number of steps")
 
 
 def override_from(plan: dict, step: int, lr: float) -> dict:
@@ -218,8 +291,16 @@ def override_from(plan: dict, step: int, lr: float) -> dict:
     if segs[0]["from"] != 0:
         segs[0] = dict(segs[0], **{"from": 0})
     out = dict(plan or {})
+    warmup = int((plan or {}).get("warmup") or 0)
+    start = int((plan or {}).get("warmup_from") or 0)
+    if warmup and start <= step < start + warmup:
+        # A drop inside the warm-up means "this rate, now": the ramp ends here
+        # instead of going on scaling the rate that was just asked for.
+        warmup = step - start
     out.update({"version": VERSION, "segments": segs, "preset": "custom",
-                "warmup": int((plan or {}).get("warmup") or 0)})
+                "warmup": warmup})
+    if not warmup:
+        out.pop("warmup_from", None)
     out.setdefault("params", {})
     return validate(out)
 
@@ -233,10 +314,12 @@ def validate(plan: dict) -> dict:
     if not isinstance(segs, list) or not segs:
         raise ValidationError("a learning-rate plan needs at least one segment")
 
-    warmup = int(plan.get("warmup") or 0)
-    if warmup < 0:
-        raise ValidationError("warmup cannot be negative")
+    warmup = _whole(plan.get("warmup"))
+    if warmup < 0 or _whole(plan.get("warmup_from")) < 0:
+        raise ValidationError("warm-up cannot be negative")
     plan["warmup"] = warmup
+    if "warmup_from" in plan:
+        plan["warmup_from"] = _whole(plan["warmup_from"])
 
     prev_from = None
     for i, s in enumerate(segs):
@@ -315,8 +398,9 @@ def segment_index(plan: dict, step: int) -> int:
     return idx
 
 
-def lr_at(plan: dict, step: int) -> float:
-    """The learning rate this plan asks for at ``step``."""
+def lr_at(plan: dict, step: int, warmup: bool = True) -> float:
+    """The learning rate this plan asks for at ``step``. ``warmup=False`` gives
+    the rate a warm-up is climbing towards."""
     segs = (plan or {}).get("segments") or []
     i = segment_index(plan, step)
     if i < 0:
@@ -348,9 +432,13 @@ def lr_at(plan: dict, step: int) -> float:
         else:  # exp
             lr = lo_hi * (to_lr / lo_hi) ** p if lo_hi > 0 else to_lr
 
-    warmup = int((plan or {}).get("warmup") or 0)
-    if warmup > 0:
-        lr *= min(step + 1, warmup) / warmup
+    length = int((plan or {}).get("warmup") or 0)
+    if warmup and length > 0:
+        # Counted from the step the run started at: 0, except when the xurdif
+        # trainer picks up a library checkpoint's own step count.
+        k = step - int((plan or {}).get("warmup_from") or 0)
+        if 0 <= k < length:
+            lr *= (k + 1) / length
     return lr
 
 
@@ -382,6 +470,9 @@ def summarize(plan: dict) -> str:
     warmup = int((plan or {}).get("warmup") or 0)
     if warmup:
         out += f", after a {fmt_step(warmup)}-step warm-up"
+        start = int((plan or {}).get("warmup_from") or 0)
+        if start:
+            out += f" from step {fmt_step(start)}"
     return out
 
 
@@ -397,6 +488,9 @@ def marks_for_chart(events: list, plan: dict) -> list[dict]:
     marks: list[dict] = []
     seen_seg = None
     last_event_step = -1
+    warm_from = int((plan or {}).get("warmup_from") or 0)
+    warm_end = warmup_end(plan)
+    warm_marked = False
     for e in events or []:
         try:
             step = int(e.get("step"))
@@ -406,6 +500,16 @@ def marks_for_chart(events: list, plan: dict) -> list[dict]:
         why = e.get("why") or "plan"
         seg = e.get("seg")
         last_event_step = max(last_event_step, step)
+        if why == "plan" and warm_from <= step < warm_end:
+            # The warm-up is one mark, labelled with where it is going: its first
+            # event's own rate is a near-zero number that says nothing useful.
+            if not warm_marked:
+                target = lr_at(plan, step, warmup=False)
+                marks.append({"step": step, "lr": target, "why": "plan",
+                              "label": f"warm-up to {fmt_lr(target)}"})
+                warm_marked = True
+            seen_seg = seg
+            continue
         # Collapse the run of events a ramp produces inside one segment; a live
         # edit is always its own mark.
         if why == "plan" and seg is not None and seg == seen_seg:
@@ -416,7 +520,8 @@ def marks_for_chart(events: list, plan: dict) -> list[dict]:
         marks.append({"step": step, "lr": lr, "why": why,
                       "label": (f"edited -> {fmt_lr(lr)}" if why != "plan" else fmt_lr(lr))})
 
-    for s in (plan or {}).get("segments") or []:
+    warm_seg = segment_index(plan, warm_from) if warm_end and not warm_marked else -1
+    for i, s in enumerate((plan or {}).get("segments") or []):
         start = int(s.get("from", 0))
         if start <= last_event_step:
             continue
@@ -427,6 +532,8 @@ def marks_for_chart(events: list, plan: dict) -> list[dict]:
             label = f"{fmt_lr(s['lr'])} <-> {fmt_lr(s['to_lr'])}"
         else:
             label = f"{fmt_lr(s['lr'])} -> {fmt_lr(s['to_lr'])}"
+        if i == warm_seg:
+            label = f"warm-up to {label}"
         marks.append({"step": start, "lr": float(s["lr"]), "why": "planned", "label": label})
 
     marks.sort(key=lambda m: m["step"])
@@ -526,6 +633,7 @@ class Watcher:
         self._plan: dict | None = None
         self._last_lr: float | None = None
         self._last_seg: int | None = None
+        self._last_warming = False
         self._warned = False
         self._reload()
 
@@ -576,16 +684,24 @@ class Watcher:
         else:
             lr, seg = lr_at(self._plan, step), segment_index(self._plan, step)
 
+        # A warm-up is reported where it starts and where it ends, and not on
+        # the way: by the ratio rule a 1000x ramp would log some forty lines.
+        warming = self._plan is not None and step < warmup_end(self._plan)
+
         if self._last_lr is None:
             changed = True
         elif seg != self._last_seg:
             changed = True
+        elif warming != self._last_warming:
+            changed = True
         elif reloaded and lr != self._last_lr:
             changed = True
+        elif warming:
+            changed = False
         else:
             ratio = lr / self._last_lr if self._last_lr else float("inf")
             changed = not (1.0 / self.REPORT_RATIO <= ratio <= self.REPORT_RATIO)
 
         if changed:
-            self._last_lr, self._last_seg = lr, seg
+            self._last_lr, self._last_seg, self._last_warming = lr, seg, warming
         return lr, changed

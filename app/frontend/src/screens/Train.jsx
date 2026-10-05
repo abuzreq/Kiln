@@ -67,7 +67,19 @@ const EMPTY_FORM = {
   // A named schedule, or "custom" with lr_plan holding the segments. Either way
   // the server compiles it to absolute steps before the run starts.
   lr_schedule: SCRATCH_LR_SCHEDULE, lr_plan: null,
+  // Warm the rate up over the run's first steps; the server sizes it (2% of the
+  // run, at most 1000 steps). Off sends lr_warmup: 0.
+  warmup: true,
 };
+
+/** The run-size fields an xurdif preset sets. */
+function presetFields(p) {
+  return {
+    image_size: p.image_size, batch_size: p.batch_size, lr: p.lr,
+    train_steps: p.train_steps, save_every: p.save_every,
+    mults: (p.mults || [1, 2, 2, 2]).join(","),
+  };
+}
 
 // How far a fine-tune should travel from the model it starts on. Learning rate
 // is the whole mechanism, so this is the only dial that decides it. It
@@ -131,7 +143,13 @@ function DiffusersOptions({ form, set, engine, seeded, onMps }) {
           <p className="hint mb-0">This install cannot fine-tune Diffusers models. Install accelerate (and peft for LoRA).</p>
         )
       ) : (
-        <Select label="Model size" value={form.preset} onChange={(v) => set("preset", v)}
+        <Select label="Model size" value={form.preset}
+          onChange={(v) => {
+            // Each network is built for one size; train it at that size unless
+            // the image size is changed afterwards.
+            set("preset", v);
+            if (presets[v]?.sample_size) set("image_size", presets[v].sample_size);
+          }}
           options={Object.keys(presets).length ? Object.keys(presets) : [form.preset]}
           tip={presets[form.preset]?.label || "Architecture preset for a new model."} />
       )}
@@ -201,6 +219,9 @@ export default function Train() {
   // but it goes stale the moment the rate is changed live.
   const [liveSummary, setLiveSummary] = useState(null);
   const [continuePlan, setContinuePlan] = useState(null);
+  // The step a library checkpoint's xurdif run counts on from, so the schedule
+  // preview sizes the warm-up over the steps the run will actually take.
+  const [resumeStep, setResumeStep] = useState(0);
   const logRef = useRef(null);
 
   const [form, setForm] = useState({ ...EMPTY_FORM });
@@ -224,6 +245,20 @@ export default function Train() {
     ? (engineInfo.unavailable_reason || `${form.backend} cannot train on this machine.`)
     : null;
   const onMps = device?.device === "mps";
+
+  // A form moved to another engine for a new model: that engine's loss and its
+  // own starting numbers. xurdif's come from the run-size preset that suits this
+  // GPU; a Diffusers model's from the engine, at the size its network is built for.
+  const withEngine = (f, name, presetMap = presets) => {
+    const engine = engines.find((e) => e.name === name);
+    const next = { ...f, backend: name, edge_loss: edgeLossDefault(name), ...(engine?.defaults || {}) };
+    if (name === "xurdif") {
+      const rec = Object.keys(presetMap || {}).find((k) => presetMap[k].recommended);
+      return rec ? { ...next, ...presetFields(presetMap[rec]) } : next;
+    }
+    const size = engine?.presets?.[f.preset]?.sample_size;
+    return size ? { ...next, image_size: size } : next;
+  };
   const runs = info?.runs || [];
   const orderedRuns = useMemo(() => runs.slice().reverse(), [runs]);
   const hasRuns = orderedRuns.length > 0;
@@ -252,24 +287,28 @@ export default function Train() {
     setRunView(null);
     setShowLogs(false);
     setFromMode("scratch");
-    setForm((f) => ({
+    setResumeStep(0);
+    // A new run lands on its engine's own starting numbers -- for xurdif, the
+    // preset that suits this GPU -- rather than on the size and batch the
+    // previous run happened to leave behind.
+    setForm((f) => withEngine({
       ...EMPTY_FORM,
-      backend: trainEngines.default,
-      edge_loss: edgeLossDefault(trainEngines.default),
       dataset: f.dataset || info?.datasets?.[0]?.name || "",
       run_name: nextRunName(runsList || info?.runs || runs),
       mtype: f.mtype,
-    }));
-    // A new run lands on the preset that suits this GPU rather than on the size
-    // and batch the previous run happened to leave behind.
-    const rec = Object.keys(presets).find((k) => presets[k].recommended);
-    if (rec) applyPresetFrom(presets, rec, { announce: false });
+    }, trainEngines.default));
   };
 
   const applyLibraryStart = async (path) => {
     if (!path) {
+      // Back to a new model: its engine's scratch numbers and schedule, not the
+      // fine-tune rate the base model left behind.
       setFromMode("scratch");
-      setForm((f) => ({ ...f, resume: "", nostrict: false }));
+      setResumeStep(0);
+      setForm((f) => ({
+        ...withEngine(f, f.backend),
+        resume: "", nostrict: false, lr_schedule: SCRATCH_LR_SCHEDULE, lr_plan: null,
+      }));
       return;
     }
     setFromMode("library");
@@ -281,23 +320,24 @@ export default function Train() {
     const picked = (models || []).find((m) => m.path === path);
     if (picked?.backend === "diffusers") {
       const caps = engines.find((e) => e.name === "diffusers")?.capabilities || {};
+      setResumeStep(0);
       setForm((f) => ({
-        ...f,
-        backend: "diffusers",
+        ...withEngine(f, "diffusers"),
         mode: caps.finetune ? "finetune" : caps.lora ? "lora" : "finetune",
         resume: path,
         image_size: picked.sample_size ?? f.image_size,
         lr: FT_DEFAULT_LR,
         lr_schedule: "constant", lr_plan: null,   // see SCRATCH_LR_SCHEDULE
-        edge_loss: edgeLossDefault("diffusers"),
       }));
       return;
     }
     if (picked && form.backend !== "xurdif") {
-      setForm((f) => ({ ...f, backend: "xurdif", edge_loss: edgeLossDefault("xurdif") }));
+      const defaults = engines.find((e) => e.name === "xurdif")?.defaults || {};
+      setForm((f) => ({ ...f, ...defaults, backend: "xurdif", edge_loss: edgeLossDefault("xurdif") }));
     }
     try {
       const d = await api.get(`/train/continue/info?path=${encodeURIComponent(path)}`);
+      setResumeStep(Number(d.step) || 0);
       setForm((f) => ({
         ...f,
         resume: path,
@@ -409,7 +449,7 @@ export default function Train() {
   // engine the server offers instead, once the list has arrived.
   useEffect(() => {
     if (trainableHere(form.backend)) return;
-    setForm((f) => ({ ...f, backend: trainEngines.default, edge_loss: edgeLossDefault(trainEngines.default) }));
+    setForm((f) => withEngine(f, trainEngines.default));
   }, [trainEngines]);
 
   useEffect(() => {
@@ -457,11 +497,15 @@ export default function Train() {
         lr: form.lr || 0.0004,
         train_steps: form.train_steps || 280000,
         save_every: form.save_every || 1000,
+        // The warm-up is sized over the steps the run will take, which for an
+        // xurdif library start begin at the checkpoint's own step.
+        start_step: fromMode === "library" && form.backend === "xurdif" ? resumeStep : 0,
       });
+      if (!form.warmup) q.set("warmup", "0");
       api.get(`/train/lr_presets?${q}`).then(setLrPresets).catch(() => {});
     }, 250);
     return () => clearTimeout(t);
-  }, [form.lr, form.train_steps, form.save_every]);
+  }, [form.lr, form.train_steps, form.save_every, form.warmup, form.backend, fromMode, resumeStep]);
 
   const datasetInfo = useMemo(
     () => (info?.datasets || []).find((d) => d.name === form.dataset) || null,
@@ -485,12 +529,9 @@ export default function Train() {
   const applyPresetFrom = (map, id, { announce = true } = {}) => {
     const p = map?.[id];
     if (!p) return;
-    setForm((f) => ({
-      ...f,
-      image_size: p.image_size, batch_size: p.batch_size, lr: p.lr,
-      train_steps: p.train_steps, save_every: p.save_every,
-      mults: (p.mults || [1, 2, 2, 2]).join(","),
-    }));
+    // These are xurdif's run sizes. The mount-time seeding can land after the
+    // form has moved to Diffusers (a Mac), and must not overwrite its numbers.
+    setForm((f) => (f.backend === "xurdif" ? { ...f, ...presetFields(p) } : f));
     if (announce) toast(`Applied ${p.label}`, "success");
   };
 
@@ -531,6 +572,8 @@ export default function Train() {
         // xurdif trainer takes a flag. Sending both is harmless -- each backend
         // reads only the keys it knows.
         objective: form.edge_loss ? "xurdif" : "mse",
+        // Left out, the server sizes the warm-up; 0 turns it off.
+        lr_warmup: form.warmup ? undefined : 0,
       };
       const { job: j, warning } = await api.post("/train", payload);
       setJob(j);
@@ -911,12 +954,23 @@ export default function Train() {
                     : { ...f, lr_schedule: "custom", lr_plan: spec }))}
                   disabled={running}
                 />
+                <Tooltip text={"Starts at a tiny rate and climbs to the full one over the run's first steps. The optimizer's first updates are its least informed, and at full rate they can knock a trained model off course — so this matters most when starting from a library model.\n\n2% of the run, at most 1,000 steps. On a 280k-step xurdif run it is over by step 1,000, before the trainer starts averaging its weights at step 2,000. Continuing a run never adds one."}>
+                  <label className="row center gap-2 has-tip">
+                    <input type="checkbox" checked={!!form.warmup} disabled={running}
+                      onChange={(e) => set("warmup", e.target.checked)} />
+                    <span className="sub">Warm up the rate first <span className="hint">(2% of the run, at most 1,000 steps)</span></span>
+                  </label>
+                </Tooltip>
                 </div>
                 <div>
                 <div className="section-title">Architecture & loss</div>
                 {engines.length > 1 && (
                   <Select label="Engine" value={form.backend} onChange={(v) => {
-                    setForm((f) => ({ ...f, backend: v, edge_loss: edgeLossDefault(v) }));
+                    // A new model takes the engine's own starting numbers; from a
+                    // library model, the model already decided them.
+                    setForm((f) => (fromMode === "library"
+                      ? { ...f, backend: v, edge_loss: edgeLossDefault(v) }
+                      : withEngine(f, v)));
                   }}
                     options={engines.map((e) => ({
                       value: e.name,
@@ -1086,6 +1140,7 @@ export default function Train() {
                   {running && (
                     <LiveRateCard
                       lr={liveRate}
+                      step={job?.detail?.step}
                       summary={runSchedule}
                       plan={continuePlan || job?.detail?.lr_plan || runView?.lr_plan}
                       presets={lrPresets}

@@ -114,6 +114,7 @@ def train_backends():
             "modes": list(b.training_modes),
             "capabilities": b.capabilities.to_dict(),
             "presets": b.training_presets(),
+            "defaults": b.training_defaults(),
             "trainable_here": reason is None,
             "unavailable_reason": reason,
         })
@@ -184,10 +185,15 @@ def lr_presets():
     lr = as_float(request.args.get("lr", 4e-4), "lr", 1e-6, 1.0)
     train_steps = as_int(request.args.get("train_steps", 280000), "train_steps", 100, 5_000_000)
     save_every = as_int(request.args.get("save_every", 1000), "save_every", 10, 1_000_000)
+    # The warm-up the run will get: `warmup` when the form sets one, otherwise
+    # the default over the steps the run will take from `start_step`.
+    start_step = as_int(request.args.get("start_step", 0), "start_step", 0, 5_000_000)
+    warmup = request.args.get("warmup")
     out = {}
     for rank, (pid, meta) in enumerate(lrplan.PRESETS.items()):
-        plan = lrplan.compile_plan({"preset": pid}, lr=lr, train_steps=train_steps,
-                                   save_every=save_every)
+        plan = lrplan.new_run_plan({"lr_schedule": pid, "lr_warmup": warmup}, lr=lr,
+                                   train_steps=train_steps, save_every=save_every,
+                                   start_step=start_step)
         # ``order`` for the same reason as the config presets: Flask sorts JSON
         # keys, and declaration order here runs from no decay to most.
         out[pid] = {"label": meta["label"], "blurb": meta["blurb"], "order": rank,
@@ -244,7 +250,9 @@ def set_lr_plan(run):
                 body.get("lr_plan") or body,
                 lr=base,
                 train_steps=int(meta.get("train_steps") or 280000),
-                save_every=int(meta.get("save_every") or 1000))
+                save_every=int(meta.get("save_every") or 1000),
+                # A new schedule keeps the run's warm-up where it was.
+                **lrplan.carried_warmup(lrplan.read(run_dir)))
     except Exception as e:
         return err(str(e), 400)
 
@@ -407,9 +415,12 @@ def continue_run(run):
         if body.get("lr") is not None:
             cfg.lr = as_float(body["lr"], "lr", 1e-6, 1.0)
         if body.get("lr_plan") or body.get("preset") or body.get("lr") is not None:
+            # No new warm-up: a continue runs on as it always has. The run's own
+            # one, long past by now, is kept so the chart still reads it as one.
             cfg.lr_plan = lrplan.compile_plan(
                 body.get("lr_plan") or {"preset": body.get("preset") or "constant"},
-                lr=cfg.lr, train_steps=cfg.train_steps, save_every=cfg.save_every)
+                lr=cfg.lr, train_steps=cfg.train_steps, save_every=cfg.save_every,
+                **lrplan.carried_warmup(cfg.lr_plan))
     except Exception as e:
         return err(str(e), 400)
 
