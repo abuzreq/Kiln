@@ -2,7 +2,8 @@ import React, { useEffect, useMemo, useState } from "react";
 import { api, pollJob } from "../api.js";
 import { useApp } from "../state.jsx";
 import { usePlay, usePlayState } from "./playContext.jsx";
-import { Seg } from "../components/ui.jsx";
+import { Modal, Seg, TipLabel } from "../components/ui.jsx";
+import { ExpandIcon } from "../components/icons.jsx";
 import { selectOptions, tagStars } from "./ModelList.jsx";
 import { buildSamplePayload, parseSeed } from "../sampleSettings.jsx";
 
@@ -14,7 +15,7 @@ const METHODS = [
 const METHOD_TIPS = {
   linear: "Each step is a straight weighted average. The ends are A and B themselves, so only the steps between are new merges.",
   slerp: "Each step blends along a sphere, so layers keep their size. Slerp and linear share their ends, so comparing them only adds the steps between.",
-  blockwise: "Rows set how much of the structure (encoder) comes from B; columns do the same for texture (decoder). The diagonal mixes both evenly.",
+  blockwise: "Rows set how much of the structure (encoder) comes from B; columns do the same for texture (decoder). The diagonal mixes both evenly. The mid stage, the bottleneck between them, is on neither axis: every cell uses the one share set in “Mid stage, every cell”.",
 };
 const STAGES = [
   { id: "encoder", label: "Encoder", role: "structure" },
@@ -147,6 +148,14 @@ function autoName(a, b, r) {
   return `${a?.name || "a"}-x-${b?.name || "b"}-${tag}`.replace(/[^A-Za-z0-9_-]+/g, "-");
 }
 
+// The mid stage is the one stage the grid does not vary, so the control says
+// what it holds still and why.
+const MID_TIP = "The UNet has three stages: the encoder (structure), the mid stage "
+  + "(the bottleneck between them) and the decoder (texture). The grid varies the "
+  + "encoder down the rows and the decoder across the columns, so the mid stage "
+  + "needs one value for the whole grid: this is how much of it comes from B in "
+  + "every cell. To vary it, pick a cell and choose “Sweep the mid stage”.";
+
 const SwapIcon = () => (
   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
     strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -180,6 +189,8 @@ export default function Merge() {
   const [saving, setSaving] = usePlayState("merge.writing", false);
   const [result, setResult] = usePlayState("merge.result", null);
   const [compat, setCompat] = useState(null);
+  // The recipe shown enlarged next to A and B, or null.
+  const [big, setBig] = useState(null);
 
   const models = useMemo(
     () => tagStars(allModels || [], stars).filter((x) => x.role !== "checkpoint"),
@@ -362,8 +373,26 @@ export default function Merge() {
       tag,
       label: `${rowLabel}, ${r.method === "blockwise" ? describe(r) : `${pct(r.alpha)} B`}`,
       onPick: () => { setPick(r); setFine(null); },
+      onEnlarge: shot ? () => setBig(r) : null,
     };
   };
+
+  // What the enlarged view steps through: every rendered picture in this
+  // view, in reading order, once each. A previewed mix that is not on the
+  // ladder (a fine-tuned pick) stands alone.
+  const bigList = useMemo(() => {
+    const seen = new Set();
+    const out = [];
+    ladder.rows.forEach((row) => row.cells.forEach((r) => {
+      const k = recipeKey(r);
+      if (seen.has(k) || !shotOf(r)) return;
+      seen.add(k);
+      out.push(r);
+    }));
+    if (big && !seen.has(recipeKey(big)) && shotOf(big)) return [big];
+    return out;
+  }, [ladder, cache, big]); // eslint-disable-line react-hooks/exhaustive-deps
+  const bigAt = big ? bigList.findIndex((r) => recipeKey(r) === recipeKey(big)) : -1;
 
   // Zoom and refine offers, around the picked cell when it is in this view.
   const zooms = (() => {
@@ -395,6 +424,14 @@ export default function Merge() {
     if (view.kind !== "mid") out.push({ label: "Sweep the mid stage for the picked cell", view: { kind: "mid", enc: e, dec: d } });
     return out;
   })();
+  // How many merges a zoom would add, so the offer says what it costs.
+  const newIn = (v) => {
+    const keys = new Set();
+    ladderFor(method, v, { steps, compare, grid, mid }).rows.forEach((row) => row.cells.forEach((r) => {
+      if (!endOf(r) && !cache.cells[recipeKey(r)]) keys.add(recipeKey(r));
+    }));
+    return keys.size;
+  };
 
   const renderLabel = running
     ? `Rendering ${Math.round((job?.progress || 0) * (job?.detail?.planned || 0))} of ${job?.detail?.planned || 0}…`
@@ -463,8 +500,10 @@ export default function Merge() {
                 </select>
               </label>
               <label className="merge-inline">
-                <span className="merge-dot stage-mid" aria-hidden="true" />Mid held at
-                <select value={mid} disabled={view.kind === "mid"} onChange={(e) => setMid(Number(e.target.value))}>
+                <span className="merge-dot stage-mid" aria-hidden="true" />
+                <TipLabel tip={MID_TIP}>Mid stage, every cell</TipLabel>
+                <select value={mid} disabled={view.kind === "mid"} aria-label="Share of model B in the mid stage, for every cell"
+                  onChange={(e) => setMid(Number(e.target.value))}>
                   {[0, 0.25, 0.5, 0.75, 1].map((v) => <option key={v} value={v}>{pct(v)} B</option>)}
                 </select>
               </label>
@@ -487,6 +526,11 @@ export default function Merge() {
           </button>
         </div>
         <p className="hint mb-0">{METHOD_TIPS[method]}</p>
+        <p className="hint mb-0">
+          No bends here: merging blends the two models&rsquo; weights, while bends rewrite activations as an
+          image forms. The ladder renders A, B and the mixes without bends, and a saved merge carries none.
+          Add bends to the new model afterwards, in Create or Bend.
+        </p>
 
         {viewStack.length > 1 && (
           <nav className="merge-crumbs" aria-label="Ladder zoom">
@@ -551,23 +595,37 @@ export default function Merge() {
                 {view.kind === "mid"
                   ? "Encoder and decoder stay at the picked cell; only the mid stage moves."
                   : mid === 0 || mid === 1
-                    ? `With mid at ${pct(mid)} B, the matching corner is ${mid === 0 ? "A" : "B"} itself.`
-                    : `With the mid stage held at ${pct(mid)} B, even the corners are mixes, not A or B themselves.`}
+                    ? `The mid stage is ${pct(mid)} B in every cell, so the matching corner is ${mid === 0 ? "A" : "B"} itself.`
+                    : `The mid stage is ${pct(mid)} B in every cell, so even the corners are mixes, not A or B themselves.`}
               </p>
             </aside>
           )}
         </div>
 
-        <div className="merge-zoom">
-          {zooms.length > 0
-            ? <>
-              <span className="sub">{isGrid ? "Refine" : "Zoom the ladder"}</span>
-              {zooms.map((z) => (
-                <button key={z.label} type="button" className="pill chip" onClick={() => pushView(z.view)}>{z.label}</button>
-              ))}
-            </>
-            : <span className="sub">Click a {isGrid ? "cell" : "step"} to pick it{view.kind === "mid" ? "." : `, then ${isGrid ? "refine around it" : "zoom in around it"}.`}</span>}
-        </div>
+        {zooms.length > 0 ? (
+          <div className="merge-next" role="group" aria-label={isGrid ? "Refine around the pick" : "Zoom in around the pick"}>
+            <div className="merge-next-head">
+              <b>{isGrid ? "Refine around your pick" : "Zoom in around your pick"}</b>
+              <span className="sub">A closer look at the mixes next to the one you picked.</span>
+            </div>
+            <div className="merge-next-opts">
+              {zooms.map((z) => {
+                const n = newIn(z.view);
+                return (
+                  <button key={z.label} type="button" className="btn merge-next-btn" onClick={() => pushView(z.view)}>
+                    <span className="merge-next-label">{z.label}</span>
+                    <span className="sub">{n ? `${n} new merge${n === 1 ? "" : "s"}` : "already rendered"}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : (
+          <p className="merge-next-empty mb-0">
+            Click a {isGrid ? "cell" : "step"} to pick it{view.kind === "mid" ? "." : `, then ${isGrid ? "refine around it" : "zoom in around it"}.`}
+            {" "}Double-click a picture, or use its <ExpandIcon size={12} aria-hidden="true" /> button, to see it large between A and B.
+          </p>
+        )}
       </section>
 
       <div className="merge-bottom">
@@ -578,9 +636,15 @@ export default function Merge() {
           </div>
           {chosen && (
             <div className="merge-picked-body">
-              <div className="merge-shot-sq small">
-                {chosenShot ? <img src={chosenShot.image} alt="The picked sample" /> : <span className="sub">not previewed</span>}
-              </div>
+              {chosenShot ? (
+                <button type="button" className="merge-shot-sq small merge-enlarge-thumb"
+                  aria-label="Enlarge the picked sample between A and B" title="Enlarge between A and B"
+                  onClick={() => setBig(chosen)}>
+                  <img src={chosenShot.image} alt="The picked sample" />
+                </button>
+              ) : (
+                <div className="merge-shot-sq small"><span className="sub">not previewed</span></div>
+              )}
               <div className="merge-fine">
                 {chosen.method === "blockwise"
                   ? STAGES.map((s) => (
@@ -669,26 +733,112 @@ export default function Merge() {
           )}
         </section>
       </div>
+
+      {big && bigAt >= 0 && (
+        <MergeLightbox
+          list={bigList}
+          at={bigAt}
+          onAt={(i) => setBig(bigList[i])}
+          shotOf={shotOf}
+          refs={cache.refs}
+          nameA={modelA?.name || "Model A"}
+          nameB={modelB?.name || "Model B"}
+          pickedKey={chosen ? recipeKey(chosen) : null}
+          onPick={(r) => { setPick(r); setFine(null); }}
+          onClose={() => setBig(null)}
+        />
+      )}
     </div>
   );
 }
 
-function LadderCell({ shot, live, queued, picked, src, tag, label, onPick }) {
+/** One merge, large, with A on its left and B on its right. */
+function MergeLightbox({ list, at, onAt, shotOf, refs, nameA, nameB, pickedKey, onPick, onClose }) {
+  const r = list[at];
+  const shot = shotOf(r);
+  const end = endOf(r);
+  const picked = pickedKey === recipeKey(r);
+  const step = (d) => { const i = at + d; if (i >= 0 && i < list.length) onAt(i); };
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "ArrowLeft") { e.preventDefault(); step(-1); }
+      if (e.key === "ArrowRight") { e.preventDefault(); step(1); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
+  const side = (k, name) => (
+    <figure className="merge-big-side">
+      <div className="merge-big-shot">
+        {refs[k] ? <img src={refs[k].image} alt={`Sample from model ${k.toUpperCase()}`} /> : <span className="sub">not rendered</span>}
+      </div>
+      <figcaption><span className="merge-badge" aria-hidden="true">{k.toUpperCase()}</span>{name}</figcaption>
+    </figure>
+  );
+
+  return (
+    <Modal
+      title={end ? `Model ${end.toUpperCase()} itself` : describe(r)}
+      wide
+      onClose={onClose}
+      footer={(
+        <>
+          {list.length > 1 && (
+            <>
+              <button type="button" className="btn" disabled={at === 0} onClick={() => step(-1)} aria-label="Previous merge">‹ Previous</button>
+              <span className="sub merge-big-count">{at + 1} of {list.length}</span>
+              <button type="button" className="btn" disabled={at === list.length - 1} onClick={() => step(1)} aria-label="Next merge">Next ›</button>
+              <span className="spacer" />
+            </>
+          )}
+          <button type="button" className="btn primary" disabled={picked} onClick={() => onPick(r)}>
+            {picked ? "Picked" : "Pick this mix"}
+          </button>
+          <button type="button" className="btn ghost" onClick={onClose}>Close</button>
+        </>
+      )}
+    >
+      <div className="merge-big">
+        {side("a", nameA)}
+        <figure className="merge-big-mid">
+          <div className={`merge-big-shot${picked ? " on" : ""}`}>
+            {shot && <img src={shot.image} alt={end ? `Sample from model ${end.toUpperCase()}` : `Merge: ${describe(r)}`} />}
+          </div>
+          <figcaption>{end ? `Model ${end.toUpperCase()}, as rendered for the ladder` : describe(r)}</figcaption>
+        </figure>
+        {side("b", nameB)}
+      </div>
+    </Modal>
+  );
+}
+
+function LadderCell({ shot, live, queued, picked, src, tag, label, onPick, onEnlarge }) {
   const img = shot?.image || live;
   return (
-    <button
-      type="button"
-      className={`merge-cell${picked ? " on" : ""}${src ? " src" : ""}`}
-      aria-pressed={picked}
-      aria-label={label}
-      disabled={!shot}
-      onClick={onPick}
-    >
-      <span className={`shot${!shot && live ? " live" : ""}`}>
-        {img ? <img src={img} alt="" /> : <span className="wait">{queued ? "queued" : "–"}</span>}
-      </span>
-      <span className="tag">{tag || " "}</span>
-    </button>
+    <div className="merge-cell-wrap">
+      <button
+        type="button"
+        className={`merge-cell${picked ? " on" : ""}${src ? " src" : ""}`}
+        aria-pressed={picked}
+        aria-label={label}
+        disabled={!shot}
+        onClick={onPick}
+        onDoubleClick={onEnlarge || undefined}
+      >
+        <span className={`shot${!shot && live ? " live" : ""}`}>
+          {img ? <img src={img} alt="" /> : <span className="wait">{queued ? "queued" : "–"}</span>}
+        </span>
+        <span className="tag">{tag || " "}</span>
+      </button>
+      {onEnlarge && (
+        <button type="button" className="merge-cell-enlarge" onClick={onEnlarge}
+          aria-label={`Enlarge ${label} between A and B`} title="Enlarge between A and B">
+          <ExpandIcon size={13} />
+        </button>
+      )}
+    </div>
   );
 }
 
