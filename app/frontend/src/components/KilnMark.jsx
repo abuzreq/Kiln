@@ -20,7 +20,7 @@ const SKIPS = [
   ["M9 26.6h14", "#ff6a2b"],
 ];
 
-// Below 28 px the fine dashes turn to noise: chunkier blocks, one coarser
+// Below 36 px the fine dashes turn to noise: chunkier blocks, one coarser
 // skip per level.
 const BLOCKS_SMALL = [
   [3.5, 21.5, 6, 7.5], [5.5, 15, 5.5, 5.6], [8, 9.6, 5, 4.6], [12, 5.6, 8, 3.6],
@@ -33,7 +33,7 @@ const SKIPS_SMALL = [
 ];
 
 export default function KilnMark({ state = "warm", size = 24, title }) {
-  const small = size < 28;
+  const small = size < 36;
   const blocks = small ? BLOCKS_SMALL : BLOCKS;
   const skips = small ? SKIPS_SMALL : SKIPS;
   return (

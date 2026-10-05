@@ -160,8 +160,7 @@ export default function Start() {
         <div className="start-hero-text">
           <h2>Your kiln</h2>
           <p className="hint mb-0">
-            Train diffusion models on images you choose, then make with them.
-            Everything you have made lives here.
+            Prepare small diffusion models locally on your own images, then create with them.
           </p>
           <OpenFolder folder="root" label="Open workspace folder" className="mt-2" />
         </div>
@@ -179,8 +178,7 @@ export default function Start() {
             <span className="start-path-name">Create</span>
             <span className="start-path-tabs">Canvas · Bend · Merge · Sweep</span>
             <span className="start-path-sub">
-              Generate and paint on a canvas, bend a model's layers, blend two models,
-              or sweep settings into a grid.
+              Generate and paint on a canvas, bend a model's layers, or blend two models.
             </span>
             {playBusy && <span className="tab-runbar" aria-hidden="true" />}
           </button>
@@ -236,7 +234,7 @@ export default function Start() {
       </div>
 
       <div className="start-section">
-        <h3 className="mb-0">Captures{captures?.length ? ` (${captures.length})` : ""}</h3>
+        <h3 className="mb-0">Recent creations{captures?.length ? ` (${captures.length})` : ""}</h3>
         {captures === null ? (
           <Loading>Loading captures…</Loading>
         ) : !captures.length ? (

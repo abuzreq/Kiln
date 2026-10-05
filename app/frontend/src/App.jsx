@@ -122,7 +122,7 @@ function Shell() {
             aria-label="Kiln — back to your hub"
             aria-current={onStart ? "page" : undefined}
           >
-            <KilnMark state={markState} size={24} />
+            <KilnMark state={markState} size={28} />
             <h1>Kiln</h1>
           </button>
         </Tooltip>
