@@ -274,7 +274,6 @@ export default function Merge() {
   const [pick, setPick] = usePlayState("merge.pick", null);
   const [fine, setFine] = usePlayState("merge.fine", null);
   const [name, setName] = usePlayState("merge.name", null);
-  const [keepRecipe, setKeepRecipe] = usePlayState("merge.keepRecipe", false);
   const [which, setWhich] = usePlayState("merge.which", "both");
   const [saving, setSaving] = usePlayState("merge.writing", false);
   const [result, setResult] = usePlayState("merge.result", null);
@@ -565,11 +564,9 @@ export default function Merge() {
         block_weights: chosen.block_weights || {},
         density: chosen.density ?? 1, strength: chosen.strength ?? 1,
         model_base: chosenBase || undefined, align,
-        which: showWhich ? which : "both", save_recipe: keepRecipe,
+        which: showWhich ? which : "both",
         thumbnail: chosenShot?.image || null, card: chosenShot?.card || null,
-        recipe_thumbnail: keepRecipe && chosenShot ? await presetThumb(chosenShot.image) : null,
       });
-      if (keepRecipe) loadRecipes();
       setResult(res);
       if (res.thumbnail_skipped) toast(`Saved ${res.name}. No thumbnail: ${res.thumbnail_skipped}`, "warn");
       else toast(`Saved ${res.name}${res.thumbnail ? " with the picked sample as its thumbnail" : ""}`, "success");
@@ -1016,49 +1013,55 @@ export default function Merge() {
           )}
         </section>
 
-        <section className="card merge-save" aria-label="Save">
-          <h3>Save the picked mix</h3>
-          <div className="merge-name">
-            <input type="text" aria-label="Name for the new model or recipe" value={outName}
-              onChange={(e) => setName(e.target.value)} />
-            <span className="sub">.pt</span>
+        {/* Two ways to keep a mix, side by side so the difference is the point:
+            a recipe is the mix and its models, used live; a model is a file. */}
+        <section className="card merge-save" aria-label="Keep the picked mix">
+          <h3>Keep the picked mix</h3>
+          <input type="text" className="merge-name-input" aria-label="Name for the recipe or model" value={outName}
+            onChange={(e) => setName(e.target.value)} />
+          {!chosen && <p className="sub mb-0 mt-1">Pick a step on the ladder first.</p>}
+          <div className="merge-keep">
+            <div className="merge-keep-opt">
+              <div className="merge-keep-text">
+                <b>As a recipe</b>
+                <span className="sub">
+                  The mix and both models, no file written. Load it here again, or blend it into any
+                  model in Create ▸ Canvas with &ldquo;Merge with&rdquo;.
+                </span>
+              </div>
+              <button type="button" className="btn" disabled={!chosen || !ready || saving} onClick={saveRecipe}>
+                Save recipe
+              </button>
+            </div>
+            <div className="merge-keep-opt">
+              <div className="merge-keep-text">
+                <b>As a model</b>
+                <span className="sub">
+                  Writes <span className="mono">{outName}.pt</span> to the library: a model of its own for
+                  Create, Bend, Sweep and training.{" "}
+                  {!chosen ? ""
+                    : slotKept ? `No thumbnail: the samples show ${sampledSlot === "ema" ? "EMA" : "raw"} weights, which this choice keeps from model A.`
+                      : chosenShot ? "The picked sample becomes its thumbnail."
+                        : "Preview this mix first to give it a thumbnail."}
+                </span>
+                {showWhich && (
+                  <label className="merge-inline">Weights to merge
+                    <select value={which} onChange={(e) => setWhich(e.target.value)}>
+                      <option value="both">EMA + raw</option>
+                      <option value="ema">EMA only</option>
+                      <option value="model">Raw only</option>
+                    </select>
+                  </label>
+                )}
+              </div>
+              <button type="button"
+                className={`btn ${chosenShot && newCount === 0 && !saving ? "primary" : ""}`}
+                disabled={!chosen || !(modelPath && b) || incompatible || saving}
+                onClick={save}>
+                {saving ? "Saving…" : "Save model"}
+              </button>
+            </div>
           </div>
-          {showWhich && (
-            <label className="merge-inline mt-2">Weights to merge
-              <select value={which} onChange={(e) => setWhich(e.target.value)}>
-                <option value="both">EMA + raw</option>
-                <option value="ema">EMA only</option>
-                <option value="model">Raw only</option>
-              </select>
-            </label>
-          )}
-          <div className="row center gap-2 wrap mt-2">
-            <label className="merge-inline">
-              <TipLabel tip="Also keep this mix as a merge recipe under the same name, as “Save recipe” does.">
-                <input type="checkbox" checked={keepRecipe} onChange={(e) => setKeepRecipe(e.target.checked)} />
-                Keep recipe
-              </TipLabel>
-            </label>
-            <span className="spacer" />
-            <button type="button" className="btn"
-              title="Keep the mix and both models as a recipe, without writing a model file. Create can use it with “Merge with”."
-              disabled={!chosen || !ready || saving}
-              onClick={saveRecipe}>
-              Save recipe
-            </button>
-            <button type="button"
-              className={`btn ${chosenShot && newCount === 0 && !saving ? "primary" : ""}`}
-              disabled={!chosen || !(modelPath && b) || incompatible || saving}
-              onClick={save}>
-              {saving ? "Saving…" : "Save model"}
-            </button>
-          </div>
-          <p className="sub mb-0 mt-1">
-            {!chosen ? "Pick a step on the ladder to save it."
-              : slotKept ? `No thumbnail: the samples show ${sampledSlot === "ema" ? "EMA" : "raw"} weights, which this choice keeps from model A.`
-                : chosenShot ? "The picked sample becomes the new model's thumbnail."
-                  : "Preview this mix first to give the new model a thumbnail."}
-          </p>
           {result && (
             <div className="row center gap-2 wrap mt-2">
               <span className="sub">Saved <b>{result.name}</b></span>

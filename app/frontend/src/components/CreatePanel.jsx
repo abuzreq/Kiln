@@ -707,46 +707,61 @@ export default function CreatePanel() {
               </div>
             )}
           </div>
+          {/* What the preset does, stack by stack: useful once, then in the way,
+              so it starts folded with a one-line summary. */}
           {bendValue && presetByName(bendValue) && (
-            <p className="hint mb-0 mono-hint">
-              {bendPresetSynopsis(presetByName(bendValue), ops)}
-            </p>
+            <details className="bend-synopsis">
+              <summary>
+                <span className="sub">What it does:</span> {bendPresetSummary(presetByName(bendValue), ops)}
+              </summary>
+              <p className="hint mb-0 mono-hint">
+                {bendPresetSynopsis(presetByName(bendValue), ops)}
+              </p>
+            </details>
           )}
 
-          {mergeRecipes.length > 0 && (
-            <div className="row gap-2 wrap">
+          <div className="row gap-2 wrap">
+            <div className="grow">
+              <Select
+                label={hasMask ? `Merge with · ${maskName}` : "Merge with"}
+                value={mergeValue}
+                onChange={setMergeValue}
+                disabled={!mergeRecipes.length}
+                options={[
+                  {
+                    value: "",
+                    label: mergeRecipes.length ? "— none —" : "— no recipes saved yet —",
+                    title: "Sample the selected model as it is.",
+                  },
+                  ...mergeRecipes.map((r) => ({
+                    value: r.name,
+                    label: `${r.name} — ${recipeSummary(r, models)}`,
+                  })),
+                ]}
+                tip={hasMask
+                  ? `A merge recipe saved in Create ▸ Merge: its model B is blended into the selected model, in memory, when filling ${maskName}. Remembered with it. Bend presets apply on top.`
+                  : "A merge recipe saved in Create ▸ Merge: its model B is blended into the selected model, in memory, for the whole canvas. No model file is written. Bend presets apply on top."}
+              />
+            </div>
+            {mergeRecipe && (
               <div className="grow">
                 <Select
-                  label={hasMask ? `Merge with · ${maskName}` : "Merge with"}
-                  value={mergeValue}
-                  onChange={setMergeValue}
+                  label="Model B"
+                  value={mergeB}
+                  onChange={setMergeB}
                   options={[
-                    { value: "", label: "— none —", title: "Sample the selected model as it is." },
-                    ...mergeRecipes.map((r) => ({
-                      value: r.name,
-                      label: `${r.name} — ${recipeSummary(r, models)}`,
-                    })),
+                    ...(mergeB ? [] : [{ value: "", label: "— pick model B —" }]),
+                    ...selectOptions(libraryModels).filter((o) => o.value !== modelPath),
                   ]}
-                  tip={hasMask
-                    ? `A merge recipe saved in Create ▸ Merge: its model B is blended into the selected model, in memory, when filling ${maskName}. Remembered with it. Bend presets apply on top.`
-                    : "A merge recipe saved in Create ▸ Merge: its model B is blended into the selected model, in memory, for the whole canvas. No model file is written. Bend presets apply on top."}
+                  tip="The model blended into the selected one. A recipe starts with the B it was saved with; any model that can merge with the selected one works."
                 />
               </div>
-              {mergeRecipe && (
-                <div className="grow">
-                  <Select
-                    label="Model B"
-                    value={mergeB}
-                    onChange={setMergeB}
-                    options={[
-                      ...(mergeB ? [] : [{ value: "", label: "— pick model B —" }]),
-                      ...selectOptions(libraryModels).filter((o) => o.value !== modelPath),
-                    ]}
-                    tip="The model blended into the selected one. A recipe starts with the B it was saved with; any model that can merge with the selected one works."
-                  />
-                </div>
-              )}
-            </div>
+            )}
+          </div>
+          {!mergeRecipes.length && (
+            <p className="hint mb-0">
+              Blend a second model into this one: pick a mix in Create ▸ Merge and choose Save recipe.
+            </p>
           )}
           {mergeRecipe && (
             <p className={`hint mb-0 ${mergeCompat && !mergeCompat.compatible ? "bad" : ""}`}>
