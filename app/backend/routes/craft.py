@@ -270,7 +270,8 @@ def _recipe_entry(body: dict, model_a: str, model_b: str, thumbnail=None) -> dic
     Like a bend preset's ``model_hint``, ``model_a`` says what it was made on;
     used from Create, the recipe blends into whatever model is selected.
     ``model_b`` is the partner Create offers by default. A merge from a base
-    keeps its base too: the mix means nothing without it.
+    keeps its base (none is a zero base), and an aligned merge its alignment:
+    the mix means something else without them.
     """
     from app.core.craft import ladder
     from app.core.craft.merging import BASE_METHODS
@@ -284,6 +285,7 @@ def _recipe_entry(body: dict, model_a: str, model_b: str, thumbnail=None) -> dic
         **mix,
         **({"model_base": body["model_base"]}
            if mix["method"] in BASE_METHODS and body.get("model_base") else {}),
+        **({"align": body["align"]} if body.get("align") not in (None, "", "none") else {}),
         "which": body.get("which", "both"),
         "notes": body.get("notes", ""),
     }
@@ -316,8 +318,10 @@ def merge_ladder():
     ``block_weights``), up to two ``axes`` of ``{param, values}``, ``sample``
     (Create's sampling fields), ``refs`` (default true: also sample A and B,
     which a zoom that already has them skips) and ``known`` (recipes the client
-    already holds samples of, which are not sampled again), and ``model_base``
-    for the methods that merge from a base (it is sampled as a third reference).
+    already holds samples of, which are not sampled again), ``model_base`` for
+    the methods that merge from a base (sampled as a third reference; without
+    one they work from a zero base), and ``align`` ("weights" or
+    "activations": reorder B's units to line up with A's first).
     A blank seed is resolved here, once, so every cell and the references share
     it; ``detail.seed`` says which. Cells are published as they finish -- see ``ladder.plan`` for their
     shape -- and blends are never written to disk. Each finished cell and
@@ -327,7 +331,7 @@ def merge_ladder():
     from dataclasses import replace
 
     from app.backend.routes.perform import _params_from_body, _throttled_preview
-    from app.core.craft import ladder
+    from app.core.craft import ladder, rebasin
     from app.core.craft.merging import BASE_METHODS, check_base_compat, check_compat
     from app.core.engine.lanes import enqueue, is_oom
     from app.core.engine.sampler import pick_device, sampler
@@ -337,18 +341,21 @@ def merge_ladder():
 
     body = request.get_json(force=True, silent=True) or {}
     (a, b) = require(body, "model_a", "model_b")
+    align = body.get("align") or "none"
+    if align not in rebasin.ALIGN:
+        raise ValidationError(f"unknown alignment: {align}")
     cells = ladder.plan(body.get("method", "linear"), body.get("fixed"), body.get("axes"),
-                        body.get("known"))
+                        body.get("known"), aligned=align != "none")
     compat = check_compat(a, b)
     if not compat["compatible"]:
         raise IncompatibleModelError("; ".join(compat["reasons"]))
+    if align != "none" and not rebasin.can_align(a):
+        raise ValidationError("aligning is not available for this architecture yet")
     base_model = body.get("model_base") or None
-    if any(c["recipe"]["method"] in BASE_METHODS for c in cells):
-        if not base_model:
-            raise ValidationError("merges from a base need a base model")
-        check_base_compat(a, b, base_model)
-    else:
+    if not any(c["recipe"]["method"] in BASE_METHODS for c in cells):
         base_model = None  # a blend does not use one; don't sample it
+    elif base_model:
+        check_base_compat(a, b, base_model)
     # One image per cell: variations would multiply the cost for pictures the
     # ladder has nowhere to show.
     base = _params_from_body({**(body.get("sample") or {}), "model_path": a, "batch_size": 1})
@@ -356,7 +363,8 @@ def merge_ladder():
     live = (body.get("sample") or {}).get("live_preview", True) is not False
     todo = sorted((i for i, c in enumerate(cells) if c["order"] is not None),
                   key=lambda i: cells[i]["order"])
-    merge_of = {"model_a": a, "model_b": b, **({"model_base": base_model} if base_model else {})}
+    merge_of = {"model_a": a, "model_b": b, **({"model_base": base_model} if base_model else {}),
+                **({"align": align} if align != "none" else {})}
     ref_steps = ([("a", a, "model A"), ("b", b, "model B")]
                  + ([("base", base_model, "the base")] if base_model else [])) if want_refs else []
 
@@ -414,8 +422,15 @@ def merge_ladder():
                 detail["current"] = i
                 job.message = f"merge {n} of {len(todo)}"
                 if rig is None:
-                    rig = ladder.LadderRig(a, b, pick_device(base.device), ema=base.ema,
-                                           base=base_model)
+                    if align != "none":
+                        job.message = f"aligning B to A by {align}"
+                    try:
+                        rig = ladder.LadderRig(a, b, pick_device(base.device), ema=base.ema,
+                                               base=base_model, align=align, cancel=job.cancelled)
+                    except rebasin.Cancelled:
+                        job.finish("cancelled")
+                        return
+                    job.message = f"merge {n} of {len(todo)}"
                 r = c["recipe"]
                 last = sample(a, rig.apply(r["method"], r.get("alpha", 0.5),
                                            r.get("block_weights"), r.get("density", 1.0),
@@ -482,9 +497,10 @@ def merge():
         base=base,
         density=float(body.get("density", 1.0)),
         strength=float(body.get("strength", 1.0)),
+        align=body.get("align") or "none",
     )
-    if "base" not in res:
-        base = None  # a blend ignores a base it was sent
+    if not res.get("base"):
+        base = None  # a blend ignores a base it was sent; a zero base names none
     manager.evict(res["path"])  # in case this name overwrote a cached model
     if res.get("path"):
         library.ensure_card(
@@ -520,7 +536,7 @@ def merge():
             {**body, "method": res["method"], "alpha": res["alpha"],
              "block_weights": res.get("block_weights"),
              "density": res.get("density", 1.0), "strength": res.get("strength", 1.0),
-             "model_base": base},
+             "model_base": base, "align": res.get("align", "none")},
             a, b, body.get("recipe_thumbnail")))
     return ok(res)
 

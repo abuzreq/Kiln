@@ -5,8 +5,10 @@ Blends of A and B:
 - slerp:     spherical interpolation per tensor (preserves norm/character better)
 - blockwise: linear, but with a different alpha per stage (encoder / mid / decoder)
 
-From a base both were trained from, on task vectors tau = model - base (only
-meaningful when A and B share that ancestor; see relatedness.py):
+From a base both were trained from, on task vectors tau = model - base. These
+are meant for A and B that share that ancestor (see relatedness.py), but any
+compatible base is allowed, and with no base at all tau is the weights
+themselves -- a zero base -- for experiments:
 - task_arithmetic: out = base + strength * ((1-a)*tau_A + a*tau_B)
 - ties:      TIES-Merging (Yadav et al. 2023): trim each tau to its top
              ``density`` share by magnitude, elect a sign per entry from the
@@ -146,18 +148,25 @@ def _disjoint(da, db, wa: float, wb: float):
     return torch.where(den > 0, num / den.clamp_min(1e-300), torch.zeros_like(num))
 
 
-def _merge_from_base(sa: dict, sb: dict, sc: dict, method: str, alpha: float,
+def _merge_from_base(sa: dict, sb: dict, sc: dict | None, method: str, alpha: float,
                      density: float = 1.0, strength: float = 1.0) -> dict:
     """A task-vector merge of A and B relative to ``sc``, the base's slot.
 
+    ``sc`` None is a zero base: the task vectors are the weights themselves.
     Computed in float64 and cast back. Tensors the three do not share, or that
     differ in shape, are A's.
     """
     out = {}
     for k, ta in sa.items():
-        tb, tc = sb.get(k), sc.get(k)
+        tb = sb.get(k)
+        tc = ta.new_zeros(ta.shape) if sc is None and torch.is_tensor(ta) else (sc or {}).get(k)
         if not all(torch.is_tensor(t) for t in (ta, tb, tc)) or not ta.is_floating_point() \
                 or not (ta.shape == tb.shape == tc.shape):
+            out[k] = ta
+            continue
+        if sc is None and torch.equal(ta, tb):
+            # With no base, what A and B hold alike (a fixed noise schedule,
+            # say) is not a change to trim or scale.
             out[k] = ta
             continue
         c = tc.double()
@@ -235,20 +244,32 @@ def merge(
     base: str | None = None,
     density: float = 1.0,
     strength: float = 1.0,
+    align: str = "none",
 ) -> dict:
+    """Blend A and B into a new checkpoint.
+
+    ``base`` (for the methods that work from one; None is a zero base) and
+    ``align`` ("weights" or "activations": reorder B's units, and the base's,
+    to line up with A's first -- see rebasin.py) are options to experiment
+    with: neither is refused for a pair it is unlikely to suit.
+    """
+    from app.core.craft import rebasin
+
     if method not in METHODS:
         raise ValidationError(f"unknown merge method: {method}")
     if which not in WHICH:
         raise ValidationError(f"unknown weights choice: {which}")
+    if align not in rebasin.ALIGN:
+        raise ValidationError(f"unknown alignment: {align}")
     from_base = method in BASE_METHODS
+    if not from_base:
+        base = None
     if from_base:
-        if not base:
-            raise ValidationError(f"{method} merges need a base model")
         check_base_params(density, strength)
     compat = check_compat(path_a, path_b)
     if not compat["compatible"]:
         raise IncompatibleModelError("; ".join(compat["reasons"]))
-    if from_base:
+    if base:
         check_base_compat(path_a, path_b, base)
 
     out_name = safe_name(out_name, "merged model name")
@@ -260,14 +281,22 @@ def merge(
     # itself is plain arithmetic on matching tensors and is shared by both.
     slots_a = backend.merge_slots(ref_a)
     slots_b = backend.merge_slots(ref_b)
-    slots_c = backend.merge_slots(backends.resolve(base)[1]) if from_base else {}
+    slots_c = backend.merge_slots(backends.resolve(base)[1]) if base else None
+    if align != "none":
+        slots_b = rebasin.align_slots(slots_b, *rebasin.pair_perms(path_a, path_b, align,
+                                                                   _probe_device()))
+        if slots_c is not None:
+            slots_c = rebasin.align_slots(slots_c, *rebasin.pair_perms(path_a, base, align,
+                                                                       _probe_device()))
 
     merge_info = {"method": method, "alpha": alpha,
-                  "block_weights": block_weights, "which": which}
+                  "block_weights": block_weights, "which": which, "align": align}
     merged_from = [_display_name(path_a), _display_name(path_b)]
     if from_base:
-        merge_info.update(base=_display_name(base), density=density, strength=strength)
-        merged_from.append(_display_name(base))
+        merge_info.update(base=_display_name(base) if base else None,
+                          density=density, strength=strength)
+        if base:
+            merged_from.append(_display_name(base))
 
     blend = blended_slots(slots_a, which)
     slots = {}
@@ -276,8 +305,8 @@ def merge(
         if sb is None or slot not in blend:
             slots[slot] = sa
         elif from_base:
-            slots[slot] = _merge_from_base(sa, sb, base_slot(slots_c, slot), method, alpha,
-                                           density, strength)
+            sc = base_slot(slots_c, slot) if slots_c is not None else None
+            slots[slot] = _merge_from_base(sa, sb, sc, method, alpha, density, strength)
         else:
             slots[slot] = _merge_state(sa, sb, method, alpha, block_weights, backend)
     if not slots:
@@ -292,6 +321,12 @@ def merge(
     log.info("merged %s + %s -> %s", merged_from[0], merged_from[1], Path(dest).name)
     return {"path": dest, "name": out_name, **merge_info, "merged_from": merged_from,
             "slots": sorted(slots), "blended": sorted(blend & set(slots_b))}
+
+
+def _probe_device() -> str:
+    from app.core.engine.sampler import pick_device
+
+    return pick_device("auto")
 
 
 def check_base_compat(path_a: str, path_b: str, base: str):

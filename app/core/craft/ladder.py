@@ -49,7 +49,7 @@ def recipe(method: str, alpha: float = 0.5, block_weights: dict | None = None,
     return {"method": method, "alpha": _unit(alpha, "alpha")}
 
 
-def end_of(r: dict) -> str | None:
+def end_of(r: dict, aligned: bool = False) -> str | None:
     """"a" or "b" when a recipe is exactly that model, else None.
 
     Exact, not approximate: lerp and slerp at 0 and 1, and block-wise with every
@@ -57,13 +57,16 @@ def end_of(r: dict) -> str | None:
     so the ladder reuses A's and B's own samples for those cells. A base method
     never claims an end: base + (A - base) is A only up to rounding, and the
     trim or drop makes it something else entirely, so its ends are sampled.
+    Nor does an aligned B: it computes B's function in A's unit order, which
+    sums in another order and is not B bit for bit -- sampling that end shows
+    the alignment kept B.
     """
     if r["method"] in BASE_METHODS:
         return None
     vals = list(r["block_weights"].values()) if r["method"] == "blockwise" else [r["alpha"]]
     if all(v == 0 for v in vals):
         return "a"
-    if all(v == 1 for v in vals):
+    if all(v == 1 for v in vals) and not aligned:
         return "b"
     return None
 
@@ -73,7 +76,8 @@ def _recipe_of(d: dict, method: str) -> dict:
                   d.get("density", 1.0), d.get("strength", 1.0))
 
 
-def plan(method: str, fixed: dict | None, axes: list, known: list | None = None) -> list[dict]:
+def plan(method: str, fixed: dict | None, axes: list, known: list | None = None,
+         aligned: bool = False) -> list[dict]:
     """The cells of one ladder, in the order they should be sampled.
 
     ``axes`` holds up to two ``{"param", "values"}``; with two, the first runs
@@ -156,7 +160,7 @@ def plan(method: str, fixed: dict | None, axes: list, known: list | None = None)
                     blocks[p] = v
             r = recipe(m, alpha, blocks, density, strength)
             key = _key(r)
-            same = end_of(r) or ("known" if key in have else None)
+            same = end_of(r, aligned) or ("known" if key in have else None)
             if same is None and key in seen:
                 same = seen[key]
             seen.setdefault(key, len(cells))
@@ -196,6 +200,10 @@ def _unit(v, name: str) -> float:
 class LadderRig:
     """Two models' weights (and a base's) and one net to sample their blends with.
 
+    ``base`` None is a zero base for the base methods. ``align`` reorders B's
+    units (and the base's) to line up with A's first, with the permutation
+    ``merge()`` will use for the same pair.
+
     The net is the rig's own copy, never ``ModelManager``'s cached model A:
     another run may be sampling A while rungs are swapped in. It is built on
     the calling thread's stream, which for a lane job is the stream every rung
@@ -203,17 +211,25 @@ class LadderRig:
     """
 
     def __init__(self, path_a: str, path_b: str, device: str, ema: bool = True,
-                 base: str | None = None):
+                 base: str | None = None, align: str = "none", cancel=None):
+        from app.core.craft import rebasin
+
         backend, ref_a = backends.resolve(path_a)
         _, ref_b = backends.resolve(path_b)
         slots_a = backend.merge_slots(ref_a)
         slots_b = backend.merge_slots(ref_b)
+        slots_c = backend.merge_slots(backends.resolve(base)[1]) if base else None
+        if align != "none":
+            slots_b = rebasin.align_slots(slots_b, *rebasin.pair_perms(
+                path_a, path_b, align, device, ema, cancel))
+            if slots_c is not None:
+                slots_c = rebasin.align_slots(slots_c, *rebasin.pair_perms(
+                    path_a, base, align, device, ema, cancel))
         self.backend = backend
         self.slot = backend.sampled_slot(slots_a, ema)
         self.a = slots_a[self.slot]
         self.b = slots_b.get(self.slot)  # merge() keeps A's slot when B lacks it
-        self.c = (base_slot(backend.merge_slots(backends.resolve(base)[1]), self.slot)
-                  if base else None)
+        self.c = base_slot(slots_c, self.slot) if slots_c is not None else None
         net, meta = backend.load(ref_a, device=device, ema=ema)
         _own(net)
         self.bundle = {"model": net, "meta": meta, "backend": backend, "ref": ref_a}
@@ -226,8 +242,6 @@ class LadderRig:
 
         if method not in METHODS:
             raise ValidationError(f"unknown merge method: {method}")
-        if method in BASE_METHODS and self.c is None:
-            raise ValidationError(f"{method} merges need a base model")
         # The same blend twice in a row (Generate again on one recipe) is
         # already in the net.
         key = (method, round(float(alpha), 6), tuple(sorted((block_weights or {}).items())),

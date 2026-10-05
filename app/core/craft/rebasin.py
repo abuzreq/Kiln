@@ -37,6 +37,7 @@ channel LayerNorm has no parameters and averages over channels, so it commutes
 with any permutation. Diffusers' GroupNorm does not, which is why Diffusers
 models are out of scope here.
 """
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
 ATTN3 = "tinyunet_with_attention3"
@@ -292,26 +293,42 @@ def noised_inputs(x0, alphas_cumprod, timesteps=(20, 100, 250, 400, 550, 700, 85
     return torch.cat(xs), torch.cat(ts)
 
 
-def activations(net, spec: Spec, x, t) -> dict:
-    """Each group's units as rows, every input position as a column, for one forward pass."""
+def activations(net, spec: Spec, x, t, chunk: int = 16, keep: int = 8192) -> dict:
+    """Each group's units as rows, a sample of input positions as columns.
+
+    Run in chunks, each keeping an evenly spaced share of its positions and
+    moving it to the CPU at once: a full record of every probed layer for a
+    few hundred inputs runs to gigabytes, and on a card shared with anything
+    else that spills into system memory and crawls. Correlations need a few
+    thousand samples per unit, not millions.
+    """
     import torch
 
     mods = dict(getattr(net, "wrapped", net).named_modules())
-    seen = {}
-    hooks = [mods[name].register_forward_hook(
-        lambda m, i, o, name=name: seen.__setitem__(name, o.detach()))
-        for name in {n for names in spec.probes.values() for n in names}]
-    try:
-        with torch.no_grad():
-            net(x, t)
-    finally:
-        for h in hooks:
-            h.remove()
+    names = {n for ns in spec.probes.values() for n in ns}
+    chunks = max(1, -(-len(x) // chunk))
+    per = max(1, keep // chunks)
+    out = {g: [] for g in spec.probes}
 
     def rows(o):
         return o.transpose(0, 1).reshape(o.shape[1], -1) if o.dim() == 4 else o.T
 
-    return {g: torch.cat([rows(seen[n]) for n in names], 1) for g, names in spec.probes.items()}
+    for i in range(0, len(x), chunk):
+        seen = {}
+        hooks = [mods[n].register_forward_hook(
+            lambda m, inp, o, n=n: seen.__setitem__(n, o.detach())) for n in names]
+        try:
+            with torch.no_grad():
+                net(x[i:i + chunk], t[i:i + chunk])
+        finally:
+            for h in hooks:
+                h.remove()
+        for g, ns in spec.probes.items():
+            r = torch.cat([rows(seen[n]) for n in ns], 1)
+            cols = torch.linspace(0, r.shape[1] - 1, min(per, r.shape[1]), device=r.device).long()
+            out[g].append(r[:, cols].float().cpu())
+        del seen
+    return {g: torch.cat(parts, 1) for g, parts in out.items()}
 
 
 def match_activations(acts_a: dict, acts_b: dict) -> dict:
@@ -333,3 +350,112 @@ def match_activations(acts_a: dict, acts_b: dict) -> dict:
         _, cols = linear_sum_assignment(corr, maximize=True)
         perms[g] = torch.as_tensor(cols, dtype=torch.long)
     return perms
+
+
+# --- aligning one model to another, for merges ---------------------------------
+#: "Align B to A" in a merge: off, or which matching finds the permutation.
+ALIGN = ("none", "weights", "activations")
+#: Activation matching probes with the models' own samples: this many of each,
+#: small and short, on a fixed seed, so the probe never depends on the
+#: sampling settings of the moment.
+PROBE_SAMPLES, PROBE_SIZE, PROBE_STEPS = 8, 64, 20
+
+_PERMS: "OrderedDict[tuple, tuple]" = OrderedDict()
+_PERMS_MAX = 16
+
+
+def can_align(path: str) -> bool:
+    from app.core.model_manager import read_meta
+
+    return supports(read_meta(path).mtype)
+
+
+def _prefix_of(state: dict) -> str:
+    from app.core.backends.xurdif.loader import DENOISE_PREFIX
+
+    return DENOISE_PREFIX if any(k.startswith(DENOISE_PREFIX) for k in state) else ""
+
+
+class Cancelled(Exception):
+    """An alignment stopped because its job was cancelled; nothing was kept."""
+
+
+def pair_perms(path_a: str, path_b: str, how: str, device: str = "cpu", ema: bool = True,
+               cancel=None):
+    """``(spec, perms)`` that reorder ``path_b``'s units to line up with ``path_a``'s.
+
+    Found on the slot the sampler reads and applied to every slot: a model's
+    raw and averaged weights share one unit order. Kept per file state and
+    method, so a ladder and the merge saved from it use the same permutation --
+    activation matching samples on the GPU, which need not repeat bit for bit.
+    ``cancel`` (a callable) stops activation matching's probe; it raises
+    ``Cancelled`` and nothing is kept.
+    """
+    from app.core import backends, library
+    from utils.exceptions import ValidationError
+
+    if how not in ALIGN or how == "none":
+        raise ValidationError(f"unknown alignment: {how}")
+
+    def stamp(p):
+        f = library.weights_file(p)
+        return (str(p), *(library.file_stamp(f) if f else ()))
+
+    key = (stamp(path_a), stamp(path_b), how, bool(ema))
+    if key in _PERMS:
+        _PERMS.move_to_end(key)
+        return _PERMS[key]
+    backend, ref_a = backends.resolve(path_a)
+    _, ref_b = backends.resolve(path_b)
+    meta = backend.describe(ref_a)
+    if not supports(meta.mtype):
+        raise ValidationError(f"aligning is not available for {meta.mtype} models yet")
+    slots_a, slots_b = backend.merge_slots(ref_a), backend.merge_slots(ref_b)
+    slot = backend.sampled_slot(slots_a, ema)
+    sa = backend.net_state(slots_a[slot])
+    sb = backend.net_state(slots_b.get(slot) or next(iter(slots_b.values())))
+    spec = spec_for(meta.mtype, sa, _prefix_of(sa))
+    if how == "weights":
+        perms = match(sa, sb, spec)
+    else:
+        perms = _activation_perms(backend, ref_a, path_a, sa, sb, spec, device, ema, cancel)
+    _PERMS[key] = (spec, perms)
+    while len(_PERMS) > _PERMS_MAX:
+        _PERMS.popitem(last=False)
+    return spec, perms
+
+
+def _activation_perms(backend, ref_a, path_a, sa, sb, spec, device, ema, cancel=None):
+    import torch
+
+    from app.core.craft.ladder import _own
+    from app.core.engine.sampler import SampleParams, sampler
+
+    net, meta = backend.load(ref_a, device=device, ema=ema)
+    _own(net)
+    bundle = {"model": net, "meta": meta, "backend": backend, "ref": ref_a}
+    x0 = []
+    for state in (sa, sb):
+        backend.load_slot(net, state)
+        for seed in range(0, PROBE_SAMPLES, 4):
+            p = SampleParams(model_path=path_a, image_size=PROBE_SIZE, steps=PROBE_STEPS,
+                             seed=seed, batch_size=4, device=device, ema=ema)
+            last = None
+            for last in sampler.run(p, bundle=bundle, cancel=cancel):
+                pass
+            if cancel is not None and cancel():
+                raise Cancelled()
+            x0.append(last._x.detach())
+    x0 = torch.cat(x0)
+    betas = torch.as_tensor(backend.schedule(ref_a).trained_betas, dtype=torch.float32)
+    xs, ts = noised_inputs(x0, torch.cumprod(1 - betas, 0))
+    backend.load_slot(net, sa)
+    acts_a = activations(net, spec, xs, ts)
+    backend.load_slot(net, sb)
+    acts_b = activations(net, spec, xs, ts)
+    return match_activations(acts_a, acts_b)
+
+
+def align_slots(slots: dict, spec: Spec, perms: dict) -> dict:
+    """Every slot of a checkpoint reordered by ``perms``; tensors outside the spec as they are."""
+    return {name: apply(state, spec, perms) for name, state in slots.items()}

@@ -39,6 +39,13 @@ const STAGES = [
 const STAT_STAGES = [["encoder", "enc"], ["mid", "mid"], ["decoder", "dec"], ["other", "time"]];
 const DENSITIES = [0.2, 0.5, 1];
 const STRENGTHS = [0.5, 0.75, 1, 1.25, 1.5];
+const ALIGNS = [
+  { id: "none", label: "Off" },
+  { id: "weights", label: "By weights" },
+  { id: "activations", label: "By activations" },
+];
+// The only architecture re-basin has a permutation spec for (rebasin.py).
+const ALIGNABLE = "tinyunet_with_attention3";
 // Where each ladder starts, per method; zooming pushes onto the method's own stack.
 const START_VIEWS = {
   linear: [{ kind: "1d", lo: 0, hi: 1 }],
@@ -62,20 +69,23 @@ const fix2 = (v) => (v == null ? "–" : v.toFixed(2));
 // Cosines get a third place: 0.998 and 0.9993 are different pairs, and both read "1.00".
 const fix3 = (v) => (v == null ? "–" : v.toFixed(3));
 
-// The base belongs to the ladder, not the recipe, but a merge from one base
-// is not a merge from another: the cache keys it in.
-const recipeKey = (r, base = "") => {
-  if (r.method === "blockwise") return `blockwise:${STAGES.map((s) => r.block_weights[s.id]).join("/")}`;
-  if (isBase(r.method)) return `${r.method}:${r.alpha}:${r.density}:${r.strength}@${base}`;
-  return `${r.method}:${r.alpha}`;
+// The base and the alignment belong to the ladder, not the recipe, but a merge
+// from one base, or with B aligned, is not the same merge: the cache keys them in.
+const recipeKey = (r, base = "", align = "none") => {
+  const al = align && align !== "none" ? `~${align}` : "";
+  if (r.method === "blockwise") return `blockwise:${STAGES.map((s) => r.block_weights[s.id]).join("/")}${al}`;
+  if (isBase(r.method)) return `${r.method}:${r.alpha}:${r.density}:${r.strength}@${base}${al}`;
+  return `${r.method}:${r.alpha}${al}`;
 };
 
-/** "a" or "b" when a recipe is exactly that model (the server reuses its sample). */
-function endOf(r) {
+/** "a" or "b" when a recipe is exactly that model (the server reuses its sample).
+ *  An aligned B is B's function in A's unit order, not B bit for bit, so with
+ *  alignment only A's end is reused. */
+function endOf(r, aligned = false) {
   if (isBase(r.method)) return null;
   const vals = r.method === "blockwise" ? Object.values(r.block_weights) : [r.alpha];
   if (vals.every((v) => v === 0)) return "a";
-  if (vals.every((v) => v === 1)) return "b";
+  if (vals.every((v) => v === 1) && !aligned) return "b";
   return null;
 }
 
@@ -261,7 +271,10 @@ export default function Merge() {
   const modelB = byPath[b];
   const optsA = useMemo(() => selectOptions(models), [models]);
   const optsB = useMemo(() => optsA.filter((o) => o.value !== modelPath), [optsA, modelPath]);
-  const optsBase = useMemo(() => optsA.filter((o) => o.value !== modelPath && o.value !== b), [optsA, modelPath, b]);
+  // Any compatible model may be the base, A and B included; none is a zero base.
+  const optsBase = useMemo(() => optsA.map((o) => ({
+    ...o, label: o.value === modelPath ? `${o.label}  (A)` : o.value === b ? `${o.label}  (B)` : o.label,
+  })), [optsA, modelPath, b]);
 
   useEffect(() => {
     if (!models.length) return;
@@ -305,14 +318,18 @@ export default function Merge() {
     setBaseState(d.base);
   }, [check, pairKey, choice, method, base, setChoices, setMethodState, setBaseState]);
 
+  const align = choice?.align || "none";
+  const aligned = align !== "none";
   const choose = (patch) => {
-    const next = { method, base, ...patch };
-    setChoices((prev) => ({ ...prev, [pairKey]: { method: next.method, base: next.base, by: "you" } }));
+    const next = { method, base, align, ...patch };
+    setChoices((prev) => ({ ...prev, [pairKey]: { method: next.method, base: next.base, align: next.align, by: "you" } }));
     if (patch.method !== undefined) setMethodState(patch.method);
     if (patch.base !== undefined) setBaseState(patch.base);
   };
   const setMethod = (m) => choose({ method: m });
   const setBase = (p) => choose({ base: p });
+  const setAlign = (a) => choose({ align: a });
+  const canAlign = modelA?.mtype === ALIGNABLE;
 
   // The samples a ladder holds are only good for these two models and these
   // sampling settings. The seed is kept apart: a blank Create seed is resolved
@@ -339,23 +356,23 @@ export default function Merge() {
 
   const running = LIVE.includes(job?.status);
   const incompatible = check && !check.compatible;
-  const needsBase = fromBase && !base;
-  const ready = !!(modelPath && b) && !incompatible && !needsBase;
+  const ready = !!(modelPath && b) && !incompatible;
 
   const refKey = (k) => (k === "base" ? `base:${ladderBase}` : k);
   const shotOf = (r) => {
-    const end = endOf(r);
-    return end ? cache.refs[end] : cache.cells[recipeKey(r, ladderBase)];
+    const end = endOf(r, aligned);
+    return end ? cache.refs[end] : cache.cells[recipeKey(r, ladderBase, align)];
   };
   // What a render of this view would still have to sample.
   const missing = useMemo(() => {
     const keys = new Set();
     ladder.rows.forEach((row) => row.cells.forEach((r) => {
-      if (!endOf(r) && !cache.cells[recipeKey(r, ladderBase)]) keys.add(recipeKey(r, ladderBase));
+      const k = recipeKey(r, ladderBase, align);
+      if (!endOf(r, aligned) && !cache.cells[k]) keys.add(k);
     }));
     return keys.size;
-  }, [ladder, cache, ladderBase]);
-  const refsMissing = !(cache.refs.a && cache.refs.b && (!fromBase || cache.refs[refKey("base")]));
+  }, [ladder, cache, ladderBase, align, aligned]);
+  const refsMissing = !(cache.refs.a && cache.refs.b && (!ladderBase || cache.refs[refKey("base")]));
   const newCount = missing + (refsMissing ? 1 : 0);
 
   const run = async ({ fresh = false, only = null } = {}) => {
@@ -369,13 +386,14 @@ export default function Merge() {
       }
       : ladder;
     const reqBase = ladderBase;
+    const reqAlign = align;
     const known = usable
-      ? (only ? [] : ladder.rows.flatMap((row) => row.cells)).filter((r) => cache.cells[recipeKey(r, reqBase)])
+      ? (only ? [] : ladder.rows.flatMap((row) => row.cells)).filter((r) => cache.cells[recipeKey(r, reqBase, reqAlign)])
       : [];
     const seed = fresh ? null : (userSeed ?? (usable ? cache.seed : null));
     try {
       const { job: j } = await api.post("/craft/merge/ladder", {
-        model_a: modelPath, model_b: b, model_base: reqBase || undefined,
+        model_a: modelPath, model_b: b, model_base: reqBase || undefined, align: reqAlign,
         method: spec.method, fixed: spec.fixed, axes: spec.axes, known,
         refs: !(usable && !refsMissing),
         sample: { ...payload.rest, seed },
@@ -397,7 +415,7 @@ export default function Merge() {
           });
           const cells = { ...prev.cells };
           (snap.detail?.cells || []).forEach((c) => {
-            if (c.image) cells[recipeKey(c.recipe, reqBase)] = { image: c.image, card: c.card };
+            if (c.image) cells[recipeKey(c.recipe, reqBase, reqAlign)] = { image: c.image, card: c.card };
           });
           return { ...prev, refs, cells };
         });
@@ -417,7 +435,9 @@ export default function Merge() {
 
   const chosen = fine || pick;
   const chosenBase = chosen && isBase(chosen.method) ? base : "";
-  const chosenShot = chosen ? (endOf(chosen) ? cache.refs[endOf(chosen)] : cache.cells[recipeKey(chosen, chosenBase)]) : null;
+  const chosenShot = chosen
+    ? (endOf(chosen, aligned) ? cache.refs[endOf(chosen, aligned)] : cache.cells[recipeKey(chosen, chosenBase, align)])
+    : null;
   const sampledSlot = sampleParams.ema === false ? "model" : "ema";
   const showWhich = modelA?.ema === "distinct" && modelB?.ema === "distinct";
   const slotKept = showWhich && which !== "both" && which !== sampledSlot;
@@ -485,7 +505,7 @@ export default function Merge() {
         method: chosen.method, alpha: chosen.alpha ?? 0.5,
         block_weights: chosen.block_weights || {},
         density: chosen.density ?? 1, strength: chosen.strength ?? 1,
-        model_base: chosenBase || undefined,
+        model_base: chosenBase || undefined, align,
         which: showWhich ? which : "both", save_recipe: keepRecipe,
         thumbnail: chosenShot?.image || null, card: chosenShot?.card || null,
         recipe_thumbnail: keepRecipe && chosenShot ? await presetThumb(chosenShot.image) : null,
@@ -508,17 +528,17 @@ export default function Merge() {
     if (cur === "a" || cur === "b") return cur;
     if (cur === "base") return `base:${ladderBase}`;
     const c = job.detail.cells?.[cur];
-    return c ? recipeKey(c.recipe, ladderBase) : null;
+    return c ? recipeKey(c.recipe, ladderBase, align) : null;
   })();
   const queuedKeys = useMemo(() => new Set(running
-    ? (job?.detail?.cells || []).filter((c) => c.order != null && c.rev == null).map((c) => recipeKey(c.recipe, ladderBase))
-    : []), [running, job, ladderBase]);
+    ? (job?.detail?.cells || []).filter((c) => c.order != null && c.rev == null).map((c) => recipeKey(c.recipe, ladderBase, align))
+    : []), [running, job, ladderBase, align]);
 
   const cellProps = (r, rowLabel) => {
-    const end = endOf(r);
-    const key = end || recipeKey(r, ladderBase);
+    const end = endOf(r, aligned);
+    const key = end || recipeKey(r, ladderBase, align);
     const shot = shotOf(r);
-    const picked = !!chosen && recipeKey(chosen, chosenBase) === recipeKey(r, ladderBase);
+    const picked = !!chosen && recipeKey(chosen, chosenBase, align) === recipeKey(r, ladderBase, align);
     let tag = end === "a" ? "model A" : end === "b" ? "model B" : "";
     if (!tag && r.method === "blockwise" && ladder.headStage === "decoder") tag = gridTag(r);
     if (picked) tag = tag ? `picked · ${tag}` : "picked";
@@ -599,9 +619,8 @@ export default function Merge() {
   const renderLabel = running
     ? `Rendering ${Math.round((job?.progress || 0) * (job?.detail?.planned || 0))} of ${job?.detail?.planned || 0}…`
     : newCount > 0 ? "Render ladder" : userSeed == null ? "New seed" : "Up to date";
-  const renderTip = needsBase ? "Pick a base model first"
-    : !running && newCount === 0 && userSeed == null
-      ? "Everything here is rendered. Render the ladder again on a new random seed." : undefined;
+  const renderTip = !running && newCount === 0 && userSeed == null
+    ? "Everything here is rendered. Render the ladder again on a new random seed." : undefined;
 
   const isGrid = method === "blockwise";
   const stats = check?.pairKey === pairKey ? check.stats : null;
@@ -635,7 +654,7 @@ export default function Merge() {
           <div className="merge-pick">
             <span className="merge-badge wide" aria-hidden="true">Base</span>
             <select aria-label="Base model" value={base} onChange={(e) => setBase(e.target.value)}>
-              <option value="">— pick the model both came from —</option>
+              <option value="">No base: merge the weights themselves</option>
               {optsBase.map((o) => (
                 <option key={o.value} value={o.value}>
                   {o.label}{check?.suggested_base?.path === o.value ? "  (from lineage)" : ""}
@@ -707,6 +726,12 @@ export default function Merge() {
               Compare with linear
             </label>
           )}
+          <label className="merge-inline" title={canAlign ? "Reorder B's units to line up with A's before merging (re-basin)" : `Re-basin is only set up for ${ALIGNABLE} models so far`}>
+            Align B to A
+            <select value={canAlign ? align : "none"} disabled={!canAlign} onChange={(e) => setAlign(e.target.value)}>
+              {ALIGNS.map((x) => <option key={x.id} value={x.id}>{x.label}</option>)}
+            </select>
+          </label>
           {fromBase && view.kind !== "strength" && (
             <label className="merge-inline">Strength
               <select value={strength} onChange={(e) => setStrength(Number(e.target.value))}>
@@ -760,7 +785,8 @@ export default function Merge() {
         )}
         <p className="hint mb-0">
           {METHOD_TIPS[method]}
-          {needsBase && <b> Pick the base model both A and B were trained from.</b>}
+          {fromBase && !base && " With no base, the changes are the weights themselves (a zero base)."}
+          {aligned && ` B is aligned to A ${align === "weights" ? "by its weights" : "by its activations"} first, so its 100% end is sampled rather than reused.`}
         </p>
         <p className="hint mb-0">
           No bends here: merging blends the two models&rsquo; weights, while bends rewrite activations as an
@@ -801,8 +827,8 @@ export default function Merge() {
                   {row.label}
                 </span>
                 {row.cells.map((r) => {
-                  if (y > 0 && view.kind === "1d" && endOf(r)) {
-                    return <div className="merge-same" key={recipeKey(r)}>Same as the row above: {endOf(r).toUpperCase()}</div>;
+                  if (y > 0 && view.kind === "1d" && endOf(r, aligned)) {
+                    return <div className="merge-same" key={recipeKey(r)}>Same as the row above: {endOf(r, aligned).toUpperCase()}</div>;
                   }
                   const c = cellProps(r, row.label);
                   return <LadderCell key={c.key} {...c} />;
@@ -814,7 +840,7 @@ export default function Merge() {
             <aside className="merge-refs">
               <div className="section-title">For reference</div>
               <div className="merge-refs-pair">
-                {["a", "b", ...(fromBase ? ["base"] : [])].map((k) => {
+                {["a", "b", ...(ladderBase ? ["base"] : [])].map((k) => {
                   const ref = cache.refs[refKey(k)];
                   const label = k === "base" ? "Base" : k.toUpperCase();
                   return (
@@ -832,7 +858,8 @@ export default function Merge() {
                 })}
               </div>
               <p className="sub mb-0">
-                {fromBase ? "Every cell is the base plus a mix of A's and B's changes from it."
+                {fromBase ? (ladderBase ? "Every cell is the base plus a mix of A's and B's changes from it."
+                  : "With no base, every cell merges A's and B's weights themselves.")
                   : view.kind === "mid"
                     ? "Encoder and decoder stay at the picked cell; only the mid stage moves."
                     : mid === 0 || mid === 1
@@ -963,7 +990,7 @@ export default function Merge() {
             </button>
             <button type="button"
               className={`btn ${chosenShot && newCount === 0 && !saving ? "primary" : ""}`}
-              disabled={!chosen || !(modelPath && b) || incompatible || saving || (isBase(chosen?.method) && !chosenBase)}
+              disabled={!chosen || !(modelPath && b) || incompatible || saving}
               onClick={save}>
               {saving ? "Saving…" : "Save model"}
             </button>

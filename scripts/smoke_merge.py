@@ -636,8 +636,10 @@ def check_base_methods():
     body = {"model_a": da, "model_b": db, "method": "ties", "fixed": {"density": 0.5},
             "axes": [{"param": "alpha", "values": [0.25, 0.75]}],
             "sample": {"image_size": 32, "steps": 4, "seed": 5}}
+    # without a base it runs from a zero base, and samples no base reference
     r = c.post("/api/craft/merge/ladder", json=body)
-    assert r.status_code == 422 and "base" in r.get_json()["error"], r.get_json()
+    assert r.status_code == 200, r.get_json()
+    assert set(r.get_json()["data"]["job"]["detail"]["refs"]) == {"a", "b"}
     r = c.post("/api/craft/merge/ladder", json={**body, "model_base": d_bad})
     assert r.status_code == 409, r.get_json()
     r = c.post("/api/craft/merge/ladder", json={**body, "model_base": base,
@@ -656,7 +658,7 @@ def check_base_methods():
     jb = c.post("/api/craft/merge/ladder", json={**body, "method": "linear", "fixed": {},
                                                  "model_base": base}).get_json()["data"]["job"]
     assert "base" not in (jb["detail"]["refs"] or {}), jb["detail"]["refs"]
-    print("  route: needs a compatible base, samples it as a reference, cards record it")
+    print("  route: a base must fit A and B, is sampled as a reference, cards record it")
 
     res = c.post("/api/craft/merge", json={"model_a": da, "model_b": db, "out_name": "tiesSaved",
                                            "method": "ties", "alpha": 0.5, "density": 0.5,
@@ -671,6 +673,65 @@ def check_base_methods():
 
 
 check_base_methods()
+
+
+def check_align_and_zero_base():
+    """Options to experiment with: a zero base, and B aligned to A before any method."""
+    from app.core.craft import ladder, rebasin
+    from app.core.engine.sampler import SampleParams, sampler
+    from app.core.model_manager import manager
+
+    sa_, sb_ = slots_of(ta), slots_of(tb)
+    # a zero base: task vectors are the weights, so task arithmetic is the linear blend
+    zero = slots_of(do_merge(ta, tb, "zeroTa", method="task_arithmetic", alpha=0.3)["path"])
+    lin = slots_of(do_merge(ta, tb, "zeroLin", method="linear", alpha=0.3)["path"])
+    gap = max((zero[s][k] - lin[s][k]).abs().max().item() for s in ("model", "ema") for k in lin[s])
+    assert gap < 1e-6, f"zero-base task arithmetic is not the linear blend ({gap})"
+    zt = do_merge(ta, tb, "zeroTies", method="ties", alpha=0.5, density=0.5)
+    assert zt["base"] is None and len(zt["merged_from"]) == 2, zt
+    assert not same(slots_of(zt["path"])["ema"], lin["ema"])
+    print(f"  zero base: task arithmetic is the linear blend ({gap:.0e}); TIES runs on the weights")
+
+    # aligned by weights: B's units reordered first, then blended
+    spec, perms = rebasin.pair_perms(ta, tb, "weights")
+    assert rebasin.pair_perms(ta, tb, "weights")[1] is perms, "alignment was not kept for the pair"
+    al = slots_of(do_merge(ta, tb, "alignLin", method="linear", alpha=0.4, align="weights")["path"])
+    want = {k: torch.lerp(sa_["ema"][k].float(), v.float(), 0.4)
+            for k, v in rebasin.apply(sb_["ema"], spec, perms).items()}
+    assert same(al["ema"], want), "an aligned merge is not the blend with aligned B"
+    assert not same(al["ema"], slots_of(do_merge(ta, tb, "plainLin", method="linear", alpha=0.4)["path"])["ema"])
+
+    # rungs equal saved merges with alignment, by weights and by activations
+    def x0(path, bundle=None):
+        p = SampleParams(model_path=path, image_size=32, steps=4, seed=8, device="cpu")
+        last = None
+        for last in sampler.run(p, bundle=bundle):
+            pass
+        return last._x.detach()
+
+    for how in ("weights", "activations"):
+        rig = ladder.LadderRig(ta, tb, "cpu", align=how)
+        for method, kw in (("linear", {}), ("ties", {"density": 0.5})):
+            path = do_merge(ta, tb, f"al_{how}_{method}", method=method, alpha=0.6, align=how, **kw)["path"]
+            want = x0(path)
+            manager.evict(path)
+            got = x0(ta, rig.apply(method, 0.6, None, kw.get("density", 1.0), 1.0))
+            assert torch.equal(got, want), f"{how} {method}: an aligned rung differs from its saved merge"
+            (workspace.models / f"al_{how}_{method}.pt").unlink(missing_ok=True)
+    print("  aligned rungs == saved merges, by weights and by activations, blend and TIES")
+
+    cells = ladder.plan("linear", {}, [{"param": "alpha", "values": [0, 0.5, 1]}], aligned=True)
+    assert [x["same_as"] for x in cells] == ["a", None, None], "an aligned B is not B bit for bit"
+    r = c.post("/api/craft/merge/ladder", json={"model_a": ca, "model_b": cb, "align": "weights",
+               "axes": [{"param": "alpha", "values": [0.5]}]})
+    assert r.status_code == 422, "aligning an architecture with no spec should be refused"
+    r = c.post("/api/craft/merge/ladder", json={"model_a": ta, "model_b": tb, "align": "sideways",
+               "axes": [{"param": "alpha", "values": [0.5]}]})
+    assert r.status_code == 422
+    print("align and zero base: options that run, replay, and refuse what they cannot do")
+
+
+check_align_and_zero_base()
 
 
 def check_rebasin():
@@ -731,7 +792,7 @@ check_rebasin()
 for n in ("mergeA", "mergeB", "mergeC", "merged_linear", "merged_slerp", "merged_blockwise",
           "confA", "confB", "confC", "merged_conf", "twoA", "twoB", "ends", "which",
           "picked", "rawonly", "kept", "relBase", "relA", "relB", "relC", "ta", "lin", "ties",
-          "dare1", "dare2", "tiesSaved"):
+          "dare1", "dare2", "tiesSaved", "zeroTa", "zeroLin", "zeroTies", "alignLin", "plainLin"):
     (workspace.models / f"{n}.pt").unlink(missing_ok=True)
 for n in ("merged_blockwise", "half", "kept", "tiesSaved"):
     (workspace.recipes / f"{n}.json").unlink(missing_ok=True)
