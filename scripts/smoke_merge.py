@@ -87,8 +87,65 @@ assert merged["opt"].attn_config == {-1: "linear", "mid": "full"}, merged["opt"]
 assert merged["opt"].model == "tinyunet_conf_attention" and merged["opt"].mults == [1, 2, 2, 2]
 print("conf guardrail:", diff["reasons"], "| merged conf carries", merged["attn_conf"])
 
+# Exact ends, and "Weights to merge" honoured. These fixtures carry distinct
+# model and ema weights; the ones above share one state, which is how "EMA
+# only" blending both slots went unnoticed.
+from app.core.craft.merging import merge as do_merge
+
+
+def make_two_slot(name, seed):
+    torch.manual_seed(seed)
+    raw = build_unet("tinyunet_with_attention3", [1, 2, 2, 2]).state_dict()
+    ema = build_unet("tinyunet_with_attention3", [1, 2, 2, 2]).state_dict()
+    p = workspace.models / f"{name}.pt"
+    torch.save({"step": 0, "mults": [1, 2, 2, 2], "mtype": "tinyunet_with_attention3",
+                "pred": "x0",
+                "model": {f"denoise_fn.{k}": v for k, v in raw.items()},
+                "ema": {f"denoise_fn.{k}": v for k, v in ema.items()}}, p)
+    return str(p)
+
+
+def slots_of(path):
+    data = _t.load(path, map_location="cpu", weights_only=False)
+    return {k: data[k] for k in ("model", "ema")}
+
+
+def same(x, y):
+    return all(torch.equal(x[k], y[k]) for k in x)
+
+
+ta, tb = make_two_slot("twoA", 7), make_two_slot("twoB", 8)
+sa, sb = slots_of(ta), slots_of(tb)
+assert not same(sa["model"], sa["ema"]), "fixture slots must differ"
+all0 = {"encoder": 0.0, "mid": 0.0, "decoder": 0.0}
+all1 = {"encoder": 1.0, "mid": 1.0, "decoder": 1.0}
+for method, alpha, blocks, want, label in (
+    ("linear", 0.0, {}, sa, "linear a=0 -> A"),
+    ("linear", 1.0, {}, sb, "linear a=1 -> B"),
+    ("slerp", 0.0, {}, sa, "slerp a=0 -> A"),
+    ("blockwise", 0.7, all0, sa, "blockwise all-0 -> A"),
+    ("blockwise", 0.3, all1, sb, "blockwise all-1 -> B"),
+):
+    out = slots_of(do_merge(ta, tb, "ends", method=method, alpha=alpha,
+                            block_weights=blocks)["path"])
+    for slot in ("model", "ema"):
+        assert same(out[slot], want[slot]), f"{label}: {slot} differs"
+    print(f"  {label:24s} exact in both slots")
+
+for which, kept in (("ema", "model"), ("model", "ema")):
+    out = slots_of(do_merge(ta, tb, "which", method="linear", alpha=0.5, which=which)["path"])
+    assert same(out[kept], sa[kept]), f"which={which}: {kept} should be A's"
+    assert not same(out[which], sa[which]), f"which={which}: {which} was not blended"
+    want = {k: torch.lerp(sa[which][k].float(), sb[which][k].float(), 0.5) for k in sa[which]}
+    assert same(out[which], want), f"which={which}: {which} is not the linear blend"
+    print(f"  which={which:5s} blends {which}, keeps A's {kept}")
+bad = c.post("/api/craft/merge", json={"model_a": ta, "model_b": tb, "out_name": "x",
+                                       "which": "neither"}).get_json()
+assert not bad["ok"], bad
+print("weights to merge: honoured, and an unknown choice is refused")
+
 for n in ("mergeA", "mergeB", "mergeC", "merged_linear", "merged_slerp", "merged_blockwise",
-          "confA", "confB", "confC", "merged_conf"):
+          "confA", "confB", "confC", "merged_conf", "twoA", "twoB", "ends", "which"):
     (workspace.models / f"{n}.pt").unlink(missing_ok=True)
 (workspace.recipes / "merged_blockwise.json").unlink(missing_ok=True)
 print("OK")
