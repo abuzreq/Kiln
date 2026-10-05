@@ -1,9 +1,18 @@
 """Two-way model merging for xurdif checkpoints.
 
-Strategies:
+Blends of A and B:
 - linear:    out = (1-a)*A + a*B, per tensor
 - slerp:     spherical interpolation per tensor (preserves norm/character better)
 - blockwise: linear, but with a different alpha per stage (encoder / mid / decoder)
+
+From a base both were trained from, on task vectors tau = model - base (only
+meaningful when A and B share that ancestor; see relatedness.py):
+- task_arithmetic: out = base + strength * ((1-a)*tau_A + a*tau_B)
+- ties:      TIES-Merging (Yadav et al. 2023): trim each tau to its top
+             ``density`` share by magnitude, elect a sign per entry from the
+             weighted sum, and average only the entries that agree with it
+- dare_ties: the same, with DARE's random drop and 1/density rescale
+             (Yu et al. 2024) in place of the trim
 
 Guardrails: both checkpoints must share architecture (mtype) and channel
 multipliers (mults); tensor keys and shapes must match. Merges are strictly 2-way.
@@ -88,6 +97,90 @@ def check_compat(path_a: str, path_b: str) -> dict:
     }
 
 
+BLEND_METHODS = ("linear", "slerp", "blockwise")
+BASE_METHODS = ("task_arithmetic", "ties", "dare_ties")
+METHODS = BLEND_METHODS + BASE_METHODS
+#: strength (lambda) is allowed past 1: adding both deltas at full weight is
+#: the community's "add difference", and the point of the knob.
+STRENGTH_MAX = 2.0
+
+
+def _trim(t, density: float):
+    """TIES' trim: keep the top ``density`` share of entries by magnitude."""
+    if density >= 1:
+        return t
+    mag = t.abs().flatten()
+    k = max(1, round(mag.numel() * density))
+    thr = mag.kthvalue(mag.numel() - k + 1).values
+    return torch.where(t.abs() >= thr, t, torch.zeros_like(t))
+
+
+def _dare(t, density: float, seed_key: str):
+    """DARE's drop: keep each entry with probability ``density``, rescaled by 1/density.
+
+    The mask is seeded from the model's role, the tensor and the density --
+    not from the balance or the strength -- so a saved merge replays its
+    ladder rung exactly and a ladder's mask stays put as the balance moves.
+    """
+    if density >= 1:
+        return t
+    import zlib
+
+    g = torch.Generator().manual_seed(zlib.crc32(f"{seed_key}|{density}".encode()))
+    keep = torch.rand(t.shape, generator=g, dtype=torch.float64) < density
+    return torch.where(keep, t / density, torch.zeros_like(t))
+
+
+def _disjoint(da, db, wa: float, wb: float):
+    """TIES' elect and disjoint merge for two task vectors with weights.
+
+    The elected sign is that of the weighted sum; each entry is the weighted
+    mean of the deltas that agree with it, so a conflict goes to the larger
+    weighted change and an entry only one model kept stays whole.
+    """
+    elected = torch.sign(wa * da + wb * db)
+    ka = (torch.sign(da) == elected) & (da != 0)
+    kb = (torch.sign(db) == elected) & (db != 0)
+    num = wa * da * ka + wb * db * kb
+    den = wa * ka + wb * kb
+    return torch.where(den > 0, num / den.clamp_min(1e-300), torch.zeros_like(num))
+
+
+def _merge_from_base(sa: dict, sb: dict, sc: dict, method: str, alpha: float,
+                     density: float = 1.0, strength: float = 1.0) -> dict:
+    """A task-vector merge of A and B relative to ``sc``, the base's slot.
+
+    Computed in float64 and cast back. Tensors the three do not share, or that
+    differ in shape, are A's.
+    """
+    out = {}
+    for k, ta in sa.items():
+        tb, tc = sb.get(k), sc.get(k)
+        if not all(torch.is_tensor(t) for t in (ta, tb, tc)) or not ta.is_floating_point() \
+                or not (ta.shape == tb.shape == tc.shape):
+            out[k] = ta
+            continue
+        c = tc.double()
+        da, db = ta.double() - c, tb.double() - c
+        if method == "task_arithmetic":
+            tau = (1 - alpha) * da + alpha * db
+        else:
+            if method == "ties":
+                da, db = _trim(da, density), _trim(db, density)
+            else:
+                da, db = _dare(da, density, f"a|{k}"), _dare(db, density, f"b|{k}")
+            tau = _disjoint(da, db, 1 - alpha, alpha)
+        out[k] = (c + strength * tau).to(ta.dtype)
+    return out
+
+
+def check_base_params(density: float, strength: float):
+    if not 0 < density <= 1:
+        raise ValidationError("density must be above 0 and at most 1")
+    if not 0 <= strength <= STRENGTH_MAX:
+        raise ValidationError(f"strength must be between 0 and {STRENGTH_MAX:g}")
+
+
 def _merge_state(sa: dict, sb: dict, method: str, alpha: float, block_weights: dict,
                  backend=None) -> dict:
     keys_a, keys_b = set(sa), set(sb)
@@ -139,14 +232,24 @@ def merge(
     block_weights: dict | None = None,
     which: str = "both",
     out_dir: str | None = None,
+    base: str | None = None,
+    density: float = 1.0,
+    strength: float = 1.0,
 ) -> dict:
-    if method not in ("linear", "slerp", "blockwise"):
+    if method not in METHODS:
         raise ValidationError(f"unknown merge method: {method}")
     if which not in WHICH:
         raise ValidationError(f"unknown weights choice: {which}")
+    from_base = method in BASE_METHODS
+    if from_base:
+        if not base:
+            raise ValidationError(f"{method} merges need a base model")
+        check_base_params(density, strength)
     compat = check_compat(path_a, path_b)
     if not compat["compatible"]:
         raise IncompatibleModelError("; ".join(compat["reasons"]))
+    if from_base:
+        check_base_compat(path_a, path_b, base)
 
     out_name = safe_name(out_name, "merged model name")
     block_weights = block_weights or {}
@@ -157,17 +260,26 @@ def merge(
     # itself is plain arithmetic on matching tensors and is shared by both.
     slots_a = backend.merge_slots(ref_a)
     slots_b = backend.merge_slots(ref_b)
+    slots_c = backend.merge_slots(backends.resolve(base)[1]) if from_base else {}
 
     merge_info = {"method": method, "alpha": alpha,
                   "block_weights": block_weights, "which": which}
     merged_from = [_display_name(path_a), _display_name(path_b)]
+    if from_base:
+        merge_info.update(base=_display_name(base), density=density, strength=strength)
+        merged_from.append(_display_name(base))
 
     blend = blended_slots(slots_a, which)
     slots = {}
     for slot, sa in slots_a.items():
         sb = slots_b.get(slot)
-        slots[slot] = (_merge_state(sa, sb, method, alpha, block_weights, backend)
-                       if sb is not None and slot in blend else sa)
+        if sb is None or slot not in blend:
+            slots[slot] = sa
+        elif from_base:
+            slots[slot] = _merge_from_base(sa, sb, base_slot(slots_c, slot), method, alpha,
+                                           density, strength)
+        else:
+            slots[slot] = _merge_state(sa, sb, method, alpha, block_weights, backend)
     if not slots:
         raise IncompatibleModelError("these models expose no weights to merge")
 
@@ -180,6 +292,19 @@ def merge(
     log.info("merged %s + %s -> %s", merged_from[0], merged_from[1], Path(dest).name)
     return {"path": dest, "name": out_name, **merge_info, "merged_from": merged_from,
             "slots": sorted(slots), "blended": sorted(blend & set(slots_b))}
+
+
+def check_base_compat(path_a: str, path_b: str, base: str):
+    """A base must have A's and B's shape too, or there is no task vector to take."""
+    for other in (path_a, path_b):
+        c = check_compat(other, base)
+        if not c["compatible"]:
+            raise IncompatibleModelError("base: " + "; ".join(c["reasons"]))
+
+
+def base_slot(slots_c: dict, slot: str) -> dict:
+    """The base's weights to measure a slot against: the same slot, else any it has."""
+    return slots_c.get(slot) or next(iter(slots_c.values()))
 
 
 def _display_name(locator: str) -> str:

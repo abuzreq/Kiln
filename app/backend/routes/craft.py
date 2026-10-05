@@ -5,7 +5,7 @@ from app.core import library
 from app.core.craft import bending, ops, starters
 from app.core.model_manager import manager
 from utils.api_responses import ok, err
-from utils.exceptions import NotFoundError
+from utils.exceptions import NotFoundError, ValidationError
 from utils.logger import get_logger
 from utils.imaging import data_url, from_data_url, save_with_params
 from utils.validators import require
@@ -269,15 +269,21 @@ def _recipe_entry(body: dict, model_a: str, model_b: str, thumbnail=None) -> dic
 
     Like a bend preset's ``model_hint``, ``model_a`` says what it was made on;
     used from Create, the recipe blends into whatever model is selected.
-    ``model_b`` is the partner Create offers by default.
+    ``model_b`` is the partner Create offers by default. A merge from a base
+    keeps its base too: the mix means nothing without it.
     """
     from app.core.craft import ladder
+    from app.core.craft.merging import BASE_METHODS
 
+    mix = ladder.recipe(body.get("method") or "linear", body.get("alpha", 0.5),
+                        body.get("block_weights"), body.get("density", 1.0),
+                        body.get("strength", 1.0))
     entry = {
         "model_a": model_a,
         "model_b": model_b,
-        **ladder.recipe(body.get("method") or "linear", body.get("alpha", 0.5),
-                        body.get("block_weights")),
+        **mix,
+        **({"model_base": body["model_base"]}
+           if mix["method"] in BASE_METHODS and body.get("model_base") else {}),
         "which": body.get("which", "both"),
         "notes": body.get("notes", ""),
     }
@@ -310,9 +316,10 @@ def merge_ladder():
     ``block_weights``), up to two ``axes`` of ``{param, values}``, ``sample``
     (Create's sampling fields), ``refs`` (default true: also sample A and B,
     which a zoom that already has them skips) and ``known`` (recipes the client
-    already holds samples of, which are not sampled again). A blank seed is resolved here,
-    once, so every cell and both references share it; ``detail.seed`` says
-    which. Cells are published as they finish -- see ``ladder.plan`` for their
+    already holds samples of, which are not sampled again), and ``model_base``
+    for the methods that merge from a base (it is sampled as a third reference).
+    A blank seed is resolved here, once, so every cell and the references share
+    it; ``detail.seed`` says which. Cells are published as they finish -- see ``ladder.plan`` for their
     shape -- and blends are never written to disk. Each finished cell and
     reference is stamped with ``rev``, and ``detail.rev`` is the latest, so a
     poll can ask for only what is new (``GET /api/jobs/<id>?since=``).
@@ -321,7 +328,7 @@ def merge_ladder():
 
     from app.backend.routes.perform import _params_from_body, _throttled_preview
     from app.core.craft import ladder
-    from app.core.craft.merging import check_compat
+    from app.core.craft.merging import BASE_METHODS, check_base_compat, check_compat
     from app.core.engine.lanes import enqueue, is_oom
     from app.core.engine.sampler import pick_device, sampler
     from utils.exceptions import IncompatibleModelError
@@ -335,6 +342,13 @@ def merge_ladder():
     compat = check_compat(a, b)
     if not compat["compatible"]:
         raise IncompatibleModelError("; ".join(compat["reasons"]))
+    base_model = body.get("model_base") or None
+    if any(c["recipe"]["method"] in BASE_METHODS for c in cells):
+        if not base_model:
+            raise ValidationError("merges from a base need a base model")
+        check_base_compat(a, b, base_model)
+    else:
+        base_model = None  # a blend does not use one; don't sample it
     # One image per cell: variations would multiply the cost for pictures the
     # ladder has nowhere to show.
     base = _params_from_body({**(body.get("sample") or {}), "model_path": a, "batch_size": 1})
@@ -342,7 +356,9 @@ def merge_ladder():
     live = (body.get("sample") or {}).get("live_preview", True) is not False
     todo = sorted((i for i, c in enumerate(cells) if c["order"] is not None),
                   key=lambda i: cells[i]["order"])
-    merge_of = {"model_a": a, "model_b": b}
+    merge_of = {"model_a": a, "model_b": b, **({"model_base": base_model} if base_model else {})}
+    ref_steps = ([("a", a, "model A"), ("b", b, "model B")]
+                 + ([("base", base_model, "the base")] if base_model else [])) if want_refs else []
 
     job = registry.create("merge_ladder", status="queued")
     job.message = "queued"
@@ -353,8 +369,8 @@ def merge_ladder():
         "rows": len(axes[0]["values"]) if len(axes) == 2 else 1,
         "cols": len(axes[-1]["values"]) if axes else 1,
         "cells": [{**c, "image": None, "card": None, "rev": None} for c in cells],
-        "refs": {"a": None, "b": None} if want_refs else None,
-        "planned": len(todo) + (2 if want_refs else 0),
+        "refs": {k: None for k, _, _ in ref_steps} if want_refs else None,
+        "planned": len(todo) + len(ref_steps),
         "current": None,
         "rev": 0,
     })
@@ -381,8 +397,7 @@ def merge_ladder():
         detail = job.detail
         total, done = detail["planned"], 0
         try:
-            steps = [("a", a, "model A"), ("b", b, "model B")] if want_refs else []
-            for key, path, label in steps:
+            for key, path, label in ref_steps:
                 detail["current"] = key
                 job.message = f"sampling {label}"
                 last = sample(path)
@@ -399,10 +414,12 @@ def merge_ladder():
                 detail["current"] = i
                 job.message = f"merge {n} of {len(todo)}"
                 if rig is None:
-                    rig = ladder.LadderRig(a, b, pick_device(base.device), ema=base.ema)
+                    rig = ladder.LadderRig(a, b, pick_device(base.device), ema=base.ema,
+                                           base=base_model)
                 r = c["recipe"]
                 last = sample(a, rig.apply(r["method"], r.get("alpha", 0.5),
-                                           r.get("block_weights")))
+                                           r.get("block_weights"), r.get("density", 1.0),
+                                           r.get("strength", 1.0)))
                 if last is None:
                     job.finish("cancelled")
                     return
@@ -428,7 +445,7 @@ def merge_ladder():
             job.finish("error")
             job.message = str(e)
 
-    enqueue(job, [a, b], worker)
+    enqueue(job, [a, b] + ([base_model] if base_model else []), worker)
     return ok({"job": job.to_dict()})
 
 
@@ -455,13 +472,19 @@ def merge():
 
     body = request.get_json(force=True, silent=True) or {}
     (a, b, out_name) = require(body, "model_a", "model_b", "out_name")
+    base = body.get("model_base") or None
     res = do_merge(
         a, b, out_name,
         method=body.get("method", "linear"),
         alpha=float(body.get("alpha", 0.5)),
         block_weights=body.get("block_weights") or {},
         which=body.get("which", "both"),
+        base=base,
+        density=float(body.get("density", 1.0)),
+        strength=float(body.get("strength", 1.0)),
     )
+    if "base" not in res:
+        base = None  # a blend ignores a base it was sent
     manager.evict(res["path"])  # in case this name overwrote a cached model
     if res.get("path"):
         library.ensure_card(
@@ -471,7 +494,8 @@ def merge():
             trained_as=res.get("merged_from") or [out_name],
             kind="merge",
             lineage=library.lineage("merge", [library.parent_ref(a, "a"),
-                                              library.parent_ref(b, "b")]),
+                                              library.parent_ref(b, "b")]
+                                    + ([library.parent_ref(base, "base")] if base else [])),
         )
         # The ladder already rendered this exact recipe; saving that image as
         # the model's thumbnail gives it a real one for free.
@@ -494,7 +518,9 @@ def merge():
     if body.get("save_recipe"):
         library.save_entry("recipes", out_name, _recipe_entry(
             {**body, "method": res["method"], "alpha": res["alpha"],
-             "block_weights": res.get("block_weights")},
+             "block_weights": res.get("block_weights"),
+             "density": res.get("density", 1.0), "strength": res.get("strength", 1.0),
+             "model_base": base},
             a, b, body.get("recipe_thumbnail")))
     return ok(res)
 

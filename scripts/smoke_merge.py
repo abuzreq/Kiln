@@ -528,6 +528,151 @@ def check_relatedness():
 check_relatedness()
 
 
+def check_base_methods():
+    """Task arithmetic, TIES and DARE-TIES from a base: right numbers, replayable rungs."""
+    import time
+
+    import numpy as np
+
+    from app.core import library
+    from app.core.craft import ladder
+    from app.core.engine.sampler import SampleParams, sampler
+    from utils.exceptions import ValidationError
+
+    base, da, db = (str(workspace.models / f"{n}.pt") for n in ("relBase", "relA", "relB"))
+    sc = slots_of(base)
+
+    def saved(method, name, **kw):
+        return slots_of(do_merge(da, db, name, method=method, base=base, **kw)["path"])
+
+    # task arithmetic at full strength, nothing trimmed, is the linear blend
+    ta_ = saved("task_arithmetic", "ta", alpha=0.3)
+    lin = slots_of(do_merge(da, db, "lin", method="linear", alpha=0.3)["path"])
+    gap = max((ta_[s][k] - lin[s][k]).abs().max().item() for s in ("model", "ema") for k in lin[s])
+    assert gap < 1e-6, f"task arithmetic at strength 1 is not the linear blend (max gap {gap})"
+    print(f"  task arithmetic, strength 1: the linear blend to {gap:.0e}")
+
+    # TIES against the paper's steps, written again in numpy
+    def ref_ties(a, b, c, alpha, density, strength):
+        a, b, c = (x.double().numpy() for x in (a, b, c))
+        def trim(t):
+            k = max(1, round(t.size * density))
+            return np.where(np.abs(t) >= np.sort(np.abs(t).ravel())[-k], t, 0.0)
+        ta, tb = trim(a - c), trim(b - c)
+        wa, wb = 1 - alpha, alpha
+        g = np.sign(wa * ta + wb * tb)
+        ka, kb = (np.sign(ta) == g) & (ta != 0), (np.sign(tb) == g) & (tb != 0)
+        num, den = wa * ta * ka + wb * tb * kb, wa * ka + wb * kb
+        tau = np.where(den > 0, num / np.where(den > 0, den, 1.0), 0.0)
+        return torch.from_numpy(c + strength * tau).float()
+
+    ties = saved("ties", "ties", alpha=0.4, density=0.5, strength=1.2)
+    sa_, sb_ = slots_of(da), slots_of(db)
+    worst = 0.0
+    for s in ("model", "ema"):
+        for k in sc[s]:
+            if not sc[s][k].is_floating_point() or sc[s][k].numel() < 2:
+                continue
+            want = ref_ties(sa_[s][k], sb_[s][k], sc[s][k], 0.4, 0.5, 1.2)
+            worst = max(worst, (ties[s][k] - want).abs().max().item())
+    assert worst < 1e-6, f"TIES differs from the reference by {worst}"
+    print(f"  TIES matches the paper's steps in numpy (max gap {worst:.0e}), both slots")
+
+    d1 = saved("dare_ties", "dare1", alpha=0.4, density=0.5)
+    d2 = saved("dare_ties", "dare2", alpha=0.4, density=0.5)
+    assert same(d1["ema"], d2["ema"]) and same(d1["model"], d2["model"]), "DARE is not deterministic"
+    assert not same(d1["ema"], ties["ema"]), "DARE drew the same entries as TIES' trim"
+    print("  DARE-TIES: the same masks every time, and not TIES' trim")
+
+    # a rung blended in memory samples like the saved merge, bit for bit
+    def x0(path, bundle=None, device="cpu"):
+        p = SampleParams(model_path=path, image_size=32, steps=5, seed=77, device=device)
+        last = None
+        for last in sampler.run(p, bundle=bundle):
+            pass
+        return last._x.detach().cpu()
+
+    for device in ("cpu", "cuda") if torch.cuda.is_available() else ("cpu",):
+        rig = ladder.LadderRig(da, db, device, base=base)
+        for method, kw in (("ties", {"density": 0.5, "strength": 1.2}),
+                           ("dare_ties", {"density": 0.5, "strength": 1.0}),
+                           ("task_arithmetic", {"strength": 1.5})):
+            path = do_merge(da, db, f"rung_{method}", method=method, alpha=0.4, base=base, **kw)["path"]
+            want = x0(path, device=device)
+            from app.core.model_manager import manager
+            manager.evict(path)
+            got = x0(da, rig.apply(method, 0.4, None, kw.get("density", 1.0), kw.get("strength", 1.0)),
+                     device=device)
+            assert torch.equal(got, want), f"{device} {method}: rung differs from the saved merge"
+            (workspace.models / f"rung_{method}.pt").unlink(missing_ok=True)
+        print(f"  {device}: TIES, DARE-TIES and task arithmetic rungs == saved merges, bit for bit")
+
+    # the plan: ends are sampled, density and strength are axes, families stay apart
+    cells = ladder.plan("ties", {"density": 0.5}, [{"param": "density", "values": [0.2, 0.5, 1]},
+                                                    {"param": "alpha", "values": [0, 0.5, 1]}])
+    assert len(cells) == 9 and all(c["same_as"] is None for c in cells), cells
+    assert cells[4]["order"] == 0 and cells[4]["recipe"] == {
+        "method": "ties", "alpha": 0.5, "density": 0.5, "strength": 1.0}, cells[4]
+    pair = ladder.plan("ties", {}, [{"param": "method", "values": ["ties", "dare_ties"]}])
+    assert [c["recipe"]["method"] for c in pair] == ["ties", "dare_ties"]
+    zoom = ladder.plan("ties", {"density": 0.5}, [{"param": "alpha", "values": [0.25, 0.5]}],
+                       known=[{"method": "ties", "alpha": 0.25, "density": 0.5, "strength": 1}])
+    assert [c["same_as"] for c in zoom] == ["known", None], zoom
+    for m, fixed, axes in (
+        ("linear", {}, [{"param": "density", "values": [0.5]}]),
+        ("ties", {}, [{"param": "encoder", "values": [0]}]),
+        ("ties", {}, [{"param": "method", "values": ["ties", "linear"]}]),
+        ("ties", {"strength": 3}, [{"param": "alpha", "values": [0.5]}]),
+        ("ties", {"density": 0}, [{"param": "alpha", "values": [0.5]}]),
+    ):
+        try:
+            ladder.plan(m, fixed, axes)
+        except ValidationError:
+            continue
+        raise AssertionError(f"plan accepted {m} {fixed} {axes}")
+    print("  plan: base ladders sample their ends; density and strength axes; families kept apart")
+
+    # the route: refusals, then a ladder with the base as a third reference
+    body = {"model_a": da, "model_b": db, "method": "ties", "fixed": {"density": 0.5},
+            "axes": [{"param": "alpha", "values": [0.25, 0.75]}],
+            "sample": {"image_size": 32, "steps": 4, "seed": 5}}
+    r = c.post("/api/craft/merge/ladder", json=body)
+    assert r.status_code == 422 and "base" in r.get_json()["error"], r.get_json()
+    r = c.post("/api/craft/merge/ladder", json={**body, "model_base": d_bad})
+    assert r.status_code == 409, r.get_json()
+    r = c.post("/api/craft/merge/ladder", json={**body, "model_base": base,
+                                                "fixed": {"density": 0.5, "strength": 5}})
+    assert r.status_code == 422, r.get_json()
+    jid = c.post("/api/craft/merge/ladder", json={**body, "model_base": base}).get_json()["data"]["job"]["id"]
+    t0 = time.time()
+    while (j := c.get(f"/api/jobs/{jid}").get_json()["data"])["status"] in ("queued", "running"):
+        assert time.time() - t0 < 120, j["message"]
+        time.sleep(0.1)
+    assert j["status"] == "done", j["message"]
+    assert set(j["detail"]["refs"]) == {"a", "b", "base"} and j["detail"]["refs"]["base"]["image"]
+    cell = j["detail"]["cells"][0]
+    assert cell["image"] and cell["card"]["merge"]["model_base"] == base, cell["card"]
+    # a blend ignores a base it is sent, and does not sample it
+    jb = c.post("/api/craft/merge/ladder", json={**body, "method": "linear", "fixed": {},
+                                                 "model_base": base}).get_json()["data"]["job"]
+    assert "base" not in (jb["detail"]["refs"] or {}), jb["detail"]["refs"]
+    print("  route: needs a compatible base, samples it as a reference, cards record it")
+
+    res = c.post("/api/craft/merge", json={"model_a": da, "model_b": db, "out_name": "tiesSaved",
+                                           "method": "ties", "alpha": 0.5, "density": 0.5,
+                                           "model_base": base, "save_recipe": True}).get_json()["data"]
+    assert res["base"] == "relBase.pt" and res["merged_from"][-1] == "relBase.pt", res
+    lin_ = library.read_card(res["path"])["lineage"]
+    assert [p["role"] for p in lin_["parents"]] == ["a", "b", "base"], lin_
+    rec = c.get("/api/library/recipes").get_json()["data"]
+    assert any(x["name"] == "tiesSaved" and x["density"] == 0.5 and x["model_base"] == base
+               for x in rec), rec
+    print("base methods: right numbers, replayable rungs, a base in the plan, the route and the save")
+
+
+check_base_methods()
+
+
 def check_rebasin():
     """The attn3 permutation spec keeps a network's function, and matching finds it."""
     from app.core.craft import rebasin
@@ -585,8 +730,9 @@ check_rebasin()
 
 for n in ("mergeA", "mergeB", "mergeC", "merged_linear", "merged_slerp", "merged_blockwise",
           "confA", "confB", "confC", "merged_conf", "twoA", "twoB", "ends", "which",
-          "picked", "rawonly", "kept", "relBase", "relA", "relB", "relC"):
+          "picked", "rawonly", "kept", "relBase", "relA", "relB", "relC", "ta", "lin", "ties",
+          "dare1", "dare2", "tiesSaved"):
     (workspace.models / f"{n}.pt").unlink(missing_ok=True)
-for n in ("merged_blockwise", "half", "kept"):
+for n in ("merged_blockwise", "half", "kept", "tiesSaved"):
     (workspace.recipes / f"{n}.json").unlink(missing_ok=True)
 print("OK")
