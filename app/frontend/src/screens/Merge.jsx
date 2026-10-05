@@ -274,12 +274,16 @@ export default function Merge() {
       setCache((prev) => (usable && prev.key === reqKey && prev.seed === reqSeed
         ? prev : { key: reqKey, seed: reqSeed, refs: {}, cells: {} }));
       setJob(j);
+      // Polls send each picture once (pollJob's delta), so the cache is the
+      // only place a finished sample is kept.
       const absorb = (snap) => {
         setJob(snap);
         setCache((prev) => {
           if (prev.key !== reqKey || prev.seed !== reqSeed) return prev;
           const refs = { ...prev.refs };
-          Object.entries(snap.detail?.refs || {}).forEach(([k, v]) => { if (v) refs[k] = v; });
+          Object.entries(snap.detail?.refs || {}).forEach(([k, v]) => {
+            if (v?.image) refs[k] = { image: v.image, card: v.card };
+          });
           const cells = { ...prev.cells };
           (snap.detail?.cells || []).forEach((c) => {
             if (c.image) cells[recipeKey(c.recipe)] = { image: c.image, card: c.card };
@@ -287,7 +291,7 @@ export default function Merge() {
           return { ...prev, refs, cells };
         });
       };
-      const done = await pollJob(j.id, absorb, 600);
+      const done = await pollJob(j.id, absorb, 600, { delta: true });
       if (done.status === "error") toast(done.message || "The ladder failed", "error");
       else if (done.status === "done" && only) { setPick(only); setFine(null); }
     } catch (e) {
@@ -337,7 +341,7 @@ export default function Merge() {
     return c ? recipeKey(c.recipe) : null;
   })();
   const queuedKeys = useMemo(() => new Set(running
-    ? (job?.detail?.cells || []).filter((c) => c.order != null && !c.image).map((c) => recipeKey(c.recipe))
+    ? (job?.detail?.cells || []).filter((c) => c.order != null && c.rev == null).map((c) => recipeKey(c.recipe))
     : []), [running, job]);
 
   const cellProps = (r, rowLabel) => {

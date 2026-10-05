@@ -191,13 +191,50 @@ def list_jobs():
     return ok(jobs)
 
 
+# What a stamped entry sheds once the poller has it.
+_PUBLISHED = ("image", "card")
+
+
+def _since(out: dict, since: int | None) -> dict:
+    """A job snapshot without the pictures the poller already holds.
+
+    A job that keeps ``detail.rev`` stamps each finished entry -- an item of a
+    list in detail, or a value of a dict in detail -- with the ``rev`` it was
+    published at. Entries at or below ``since`` lose their picture and card;
+    the rest of the entry, and of detail, is left alone. ``rev`` is read before
+    anything is copied, and the worker bumps it only after an entry is in
+    place, so every entry at or below the returned ``rev`` is in this copy.
+    """
+    detail = out["detail"]
+    rev = detail.get("rev")
+    if rev is None:
+        return out
+    floor = -1 if since is None else since
+
+    def entry(e):
+        if not isinstance(e, dict) or not isinstance(e.get("rev"), int) or e["rev"] > floor:
+            return e
+        return {k: v for k, v in e.items() if k not in _PUBLISHED}
+
+    copy = {}
+    for k, v in list(detail.items()):
+        if isinstance(v, list):
+            v = [entry(e) for e in list(v)]
+        elif isinstance(v, dict):
+            v = {kk: entry(e) for kk, e in list(v.items())}
+        copy[k] = v
+    copy["rev"] = rev
+    return {**out, "detail": copy}
+
+
 @bp.get("/jobs/<job_id>")
 def get_job(job_id):
+    """One job. ``since=<rev>`` leaves out pictures published at or before it."""
     registry.prune()
     job = registry.get(job_id)
     if not job:
         return ok(None)
-    return ok(job.to_dict())
+    return ok(_since(job.to_dict(), request.args.get("since", type=int)))
 
 
 @bp.post("/jobs/<job_id>/cancel")
