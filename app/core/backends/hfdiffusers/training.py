@@ -19,6 +19,7 @@ the ecosystem -- rather than a private tensor dump.
 import json
 import threading
 import time
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -117,7 +118,13 @@ class DiffusersTrainConfig:
     precision: str = "no"                 # no | fp16 | bf16
     gradient_checkpointing: bool = False
     compile_model: bool = False
+    # The snapshots are the averaged weights; see _Ema.
     use_ema: bool = True
+    ema_decay: float = 0.9995
+    # AdamW's own 0.01 for a new model. A fine-tune or adapter gets 0: decay
+    # pulls weights toward zero, not toward the base model, which is the
+    # opposite of what "stay close" asks for.
+    weight_decay: float = 0.01
     # lora only
     lora_r: int = 8
     lora_alpha: int = 16
@@ -135,6 +142,14 @@ class DiffusersTrainConfig:
 def presets() -> dict:
     return {k: {kk: (list(vv) if isinstance(vv, tuple) else vv)
                 for kk, vv in v.items()} for k, v in SCRATCH_PRESETS.items()}
+
+
+def run_defaults() -> dict:
+    """The Train form's starting numbers on this engine, from the config's own
+    defaults so the two cannot drift apart."""
+    d = DiffusersTrainConfig(dataset="", out_dir="")
+    return {"lr": d.lr, "batch_size": d.batch_size, "accum": d.accum,
+            "train_steps": d.train_steps, "save_every": d.save_every}
 
 
 def config_from_body(body: dict, dataset: str, out_dir: str) -> DiffusersTrainConfig:
@@ -193,11 +208,59 @@ def config_from_body(body: dict, dataset: str, out_dir: str) -> DiffusersTrainCo
         gradient_checkpointing=bool(body.get("gradient_checkpointing", False)),
         compile_model=bool(body.get("compile", False)),
         use_ema=bool(body.get("use_ema", True)),
+        weight_decay=as_float(body.get("weight_decay", 0.0 if mode in ("finetune", "lora") else 0.01),
+                              "weight_decay", 0.0, 1.0),
         lora_r=as_int(body.get("lora_r", 8), "lora_r", 1, 256),
         lora_alpha=as_int(body.get("lora_alpha", 16), "lora_alpha", 1, 512),
         lora_dropout=as_float(body.get("lora_dropout", 0.0), "lora_dropout", 0.0, 0.9),
         lora_targets=list(body.get("lora_targets") or LORA_TARGETS),
     )
+
+
+class _Ema:
+    """A running average of the trainable weights, which is what snapshots save.
+
+    The raw weights at any one step carry that step's noise; the average is the
+    smoother model, and the one an xurdif snapshot has always been sampled
+    from. The default decay, 0.9995 per update, is the vendored trainer's 0.995
+    every 10 updates. It ramps up from nothing, (1+n)/(10+n), so a short
+    fine-tune's average is not still mostly the base model it started from.
+    """
+
+    def __init__(self, params, decay: float):
+        import torch
+
+        self.params = [p for p in params if p.requires_grad]
+        self.decay = float(decay)
+        self.n = 0
+        with torch.no_grad():
+            self.shadow = [p.detach().float().clone() for p in self.params]
+
+    def update(self):
+        import torch
+
+        self.n += 1
+        d = min(self.decay, (1 + self.n) / (10 + self.n))
+        with torch.no_grad():
+            for avg, p in zip(self.shadow, self.params):
+                avg.lerp_(p.detach().float(), 1.0 - d)
+
+    @contextmanager
+    def applied(self):
+        """The averaged weights in the model for the duration; the raw ones,
+        which training carries on from, put back afterwards."""
+        import torch
+
+        with torch.no_grad():
+            raw = [p.detach().clone() for p in self.params]
+            for avg, p in zip(self.shadow, self.params):
+                p.copy_(avg)
+        try:
+            yield
+        finally:
+            with torch.no_grad():
+                for r, p in zip(raw, self.params):
+                    p.copy_(r)
 
 
 def _lr_plan_from(body: dict, *, lr: float, train_steps: int, save_every: int) -> dict:
@@ -508,15 +571,20 @@ def _run(job: Job, cfg: DiffusersTrainConfig):
             emit(f"dataset: {len(ds)} images from {cfg.dataset}")
         dl = DataLoader(ds, batch_size=cfg.batch_size, shuffle=True,
                         num_workers=0, drop_last=len(ds) >= cfg.batch_size)
-        opt = torch.optim.AdamW(trainable, lr=cfg.lr)
+        opt = torch.optim.AdamW(trainable, lr=cfg.lr, weight_decay=cfg.weight_decay)
         net, opt, dl = accel.prepare(net, opt, dl)
         lr_watch = lrplan.Watcher(out_dir, cfg.lr)
+        # After prepare, so the average lives on the device the weights do.
+        ema = _Ema(trainable, cfg.ema_decay) if cfg.use_ema else None
+        if ema is not None:
+            emit(f"snapshots save the averaged weights (EMA {cfg.ema_decay:g})")
 
         torch.manual_seed(cfg.seed)
         losses = job.detail.setdefault("losses", [])
         job.detail["checkpoints"] = []
         step = 0
         running = []
+        micro = []
         t0 = time.time()
 
         while step < cfg.train_steps:
@@ -556,8 +624,17 @@ def _run(job: Job, cfg: DiffusersTrainConfig):
                     opt.step()
                     opt.zero_grad()
 
+                # A step is one weight update, as in the vendored trainer: with
+                # accumulation on, the batches before it only add to its gradient,
+                # and train_steps, save_every and the rate plan all count updates.
+                micro.append(float(loss.detach().item()))
+                if not accel.sync_gradients:
+                    continue
                 step += 1
-                val = float(loss.detach().item())
+                if ema is not None:
+                    ema.update()
+                val = sum(micro) / len(micro)
+                micro = []
                 running.append(val)
                 job.progress = min(step / max(cfg.train_steps, 1), 0.999)
                 job.detail["step"] = step
@@ -578,7 +655,8 @@ def _run(job: Job, cfg: DiffusersTrainConfig):
                     running = []
                     emit(f"average loss: {avg:.6f}")
                     unwrapped = accel.unwrap_model(net)
-                    dest = _save_snapshot(unwrapped, cfg, sched_cfg, out_dir, milestone)
+                    with ema.applied() if ema is not None else nullcontext():
+                        dest = _save_snapshot(unwrapped, cfg, sched_cfg, out_dir, milestone)
                     emit(f"saved {dest.name}")
                     try:
                         png = out_dir / f"sample-{milestone}.png"

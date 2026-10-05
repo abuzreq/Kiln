@@ -227,6 +227,10 @@ class XurdifBackend(Backend):
 
         return CONFIG_PRESETS
 
+    def training_defaults(self) -> dict:
+        # The rest comes from the run-size presets; accumulation is not in them.
+        return {"accum": 10}
+
     def training_config(self, body: dict, dataset, out_dir):
         """Build a TrainConfig. Moved verbatim from routes/train.py."""
         from app.core.engine import lr_plan as lrplan

@@ -278,6 +278,16 @@ class Backend:
         """Named starting configurations for the Train screen."""
         return {}
 
+    def training_defaults(self) -> dict:
+        """The run-size numbers a new run on this engine starts from: some of
+        ``lr``, ``batch_size``, ``accum``, ``train_steps``, ``save_every``.
+
+        Per engine because they are not interchangeable: xurdif's 4e-4 over
+        280k steps of ten accumulated batches is a long way from what a
+        Diffusers UNet wants.
+        """
+        return {}
+
     def training_config(self, body: dict, dataset, out_dir):
         """Validate a request into this backend's own training config."""
         raise NotImplementedError

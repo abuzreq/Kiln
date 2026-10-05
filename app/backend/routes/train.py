@@ -114,6 +114,7 @@ def train_backends():
             "modes": list(b.training_modes),
             "capabilities": b.capabilities.to_dict(),
             "presets": b.training_presets(),
+            "defaults": b.training_defaults(),
             "trainable_here": reason is None,
             "unavailable_reason": reason,
         })

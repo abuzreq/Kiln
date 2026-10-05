@@ -601,6 +601,77 @@ def check_diffusers_finetune(base: str):
     check_run_shape(out_dir, job, "diffusers finetune", expect_dirs=True)
 
 
+def check_diffusers_steps_are_updates():
+    """With accumulation on, a step is one weight update, as it is in xurdif.
+
+    It used to be one batch, so a 280k-step run at accumulation 10 made 28k
+    updates, and the rate plan and snapshots were spaced in batches.
+    """
+    from app.core.backends.hfdiffusers import training
+
+    calls = []
+    real = training.objectives.compute_loss
+
+    def counting(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+
+    training.objectives.compute_loss = counting
+    try:
+        out_dir, job = run_diffusers("scratch", "daccum", accum=2)
+    finally:
+        training.objectives.compute_loss = real
+    check_run_shape(out_dir, job, "diffusers accum 2", expect_dirs=True)
+    assert job.detail["step"] == 20, job.detail["step"]
+    # 12 images in batches of 4 is three batches a pass: two updates of 2 + 1.
+    assert len(calls) == 30, len(calls)
+    assert any("averaged weights" in l for l in job.detail.get("log") or []), \
+        (job.detail.get("log") or [])[:8]
+    print("  accumulation 2: 20 steps took %d batches; snapshots average the weights"
+          % len(calls))
+
+
+def check_diffusers_ema_and_decay():
+    """The averaged copy is what a snapshot saves, and training resumes on the
+    raw weights; a fine-tune does not decay its weights toward zero. No GPU."""
+    import torch.nn as nn
+
+    from app.core.backends.hfdiffusers import training
+
+    net = nn.Linear(4, 4)
+    ema = training._Ema(net.parameters(), 0.9995)
+    start = net.weight.detach().clone()
+    with torch.no_grad():
+        net.weight.add_(1.0)
+    for _ in range(5):
+        ema.update()
+    raw = net.weight.detach().clone()
+    with ema.applied():
+        inside = net.weight.detach().clone()
+    assert torch.equal(net.weight, raw), "the raw weights must come back after a save"
+    # The ramp, (1+n)/(10+n), keeps an early average close to the model itself.
+    assert (inside - start).abs().min() > 0.5 and (inside - raw).abs().max() < 0.5, \
+        (inside - start)
+
+    body = {"preset": "small-64", "image_size": 64, "model_name": "d"}
+    scratch = training.config_from_body(dict(body), "d", "o")
+    tune = training.config_from_body(dict(body, mode="finetune", base_model="x"), "d", "o")
+    lora = training.config_from_body(dict(body, mode="lora", base_model="x"), "d", "o")
+    assert scratch.weight_decay == 0.01 and tune.weight_decay == 0.0 and lora.weight_decay == 0.0
+    assert scratch.use_ema and scratch.to_meta()["ema_decay"] == 0.9995
+    # The engine's starting numbers, as the Train form receives them.
+    d = backends.get("diffusers").training_defaults()
+    assert d == {"lr": 1e-4, "batch_size": 4, "accum": 1, "train_steps": 20000,
+                 "save_every": 500}, d
+    assert backends.get("xurdif").training_defaults() == {"accum": 10}
+    # And a new run on each engine starts with its warm-up.
+    assert scratch.lr_plan["warmup"] == 400, scratch.lr_plan
+    x = backends.get("xurdif").training_config(
+        {"image_size": 64, "batch_size": 2, "lr_schedule": "drops-2"}, DATASET, "o")
+    assert x.lr_plan["warmup"] == 1000 and x.lr_plan["preset"] == "drops-2", x.lr_plan
+    print("  EMA swaps in for the save and back out; fine-tunes have no weight decay")
+
+
 def check_tinyunet(objective: str):
     """The re-homed xurdif architecture, trained through the Diffusers loop."""
     import json
@@ -753,6 +824,7 @@ def main():
         print("learning-rate schedules:")
         check_lr_plan()
         check_lr_warmup()
+        check_diffusers_ema_and_decay()
         check_lr_log_merge()
         check_vram_estimate()
         check_vram_estimate_amp()
@@ -768,6 +840,7 @@ def main():
         check_tinyunet("mse")
         check_tinyunet("xurdif")
         check_diffusers_finetune(base)
+        check_diffusers_steps_are_updates()
         check_diffusers_lora(base)
         print("record dataset (linked folder, every combination of its augmentations):")
         check_record_dataset(diffusers_only)
