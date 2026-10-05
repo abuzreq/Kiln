@@ -104,12 +104,17 @@ export const mediaUrl = (path) => `/api/media?path=${encodeURIComponent(path)}`;
 export const thumbUrl = (path) => `/api/thumb?path=${encodeURIComponent(path)}`;
 
 // Poll a job until it finishes; onUpdate receives each snapshot.
-export async function pollJob(jobId, onUpdate, interval = 350) {
+// With `delta`, a job that stamps its pictures (detail.rev) sends each one
+// once: later snapshots carry entries the caller has already seen without
+// their image and card, so onUpdate must keep what it was given.
+export async function pollJob(jobId, onUpdate, interval = 350, { delta = false } = {}) {
+  let since = null;
   return new Promise((resolve, reject) => {
     const tick = async () => {
       try {
-        const job = await api.get(`/jobs/${jobId}`);
+        const job = await api.get(since == null ? `/jobs/${jobId}` : `/jobs/${jobId}?since=${since}`);
         if (!job) return reject(new Error("job disappeared"));
+        if (delta && job.detail?.rev != null) since = job.detail.rev;
         onUpdate && onUpdate(job);
         if (["done", "error", "cancelled"].includes(job.status)) {
           return resolve(job);

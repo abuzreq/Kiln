@@ -265,9 +265,29 @@ def check_ladder_route():
         "sample": sample,
     }).get_json()
     assert r["ok"], r
-    j = wait(r["data"]["job"]["id"])
+    # Poll as the Merge tab does: each picture once, by revision.
+    jid, since, got, sent = r["data"]["job"]["id"], None, {}, 0
+    while True:
+        q = f"/api/jobs/{jid}" + ("" if since is None else f"?since={since}")
+        j = c.get(q).get_json()["data"]
+        since = j["detail"]["rev"]
+        entries = [(f"ref {k}", v) for k, v in (j["detail"]["refs"] or {}).items() if v]
+        entries += [(f"cell {n}", x) for n, x in enumerate(j["detail"]["cells"])]
+        for key, x in entries:
+            if x.get("image"):
+                assert key not in got, f"{key} sent twice"
+                got[key] = x["image"]
+                sent += 1
+        if j["status"] in ("done", "error", "cancelled"):
+            break
+        time.sleep(0.05)
+    j = c.get(f"/api/jobs/{jid}").get_json()["data"]
     assert j["status"] == "done", j["message"]
     d = j["detail"]
+    full = {f"ref {k}": v["image"] for k, v in d["refs"].items()}
+    full |= {f"cell {n}": x["image"] for n, x in enumerate(d["cells"]) if x["image"]}
+    assert got == full and sent == d["rev"] == 8, (sorted(got), sorted(full), sent, d["rev"])
+    print("ladder polls: each of 8 pictures sent once by revision, same set as a full poll")
     assert (d["rows"], d["cols"]) == (2, 5) and len(d["cells"]) == 10
     seeds = {d["refs"][k]["card"]["params"]["seed"] for k in "ab"}
     seeds |= {x["card"]["params"]["seed"] for x in d["cells"] if x["card"]}

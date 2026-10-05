@@ -247,7 +247,9 @@ def merge_ladder():
     already holds samples of, which are not sampled again). A blank seed is resolved here,
     once, so every cell and both references share it; ``detail.seed`` says
     which. Cells are published as they finish -- see ``ladder.plan`` for their
-    shape -- and blends are never written to disk.
+    shape -- and blends are never written to disk. Each finished cell and
+    reference is stamped with ``rev``, and ``detail.rev`` is the latest, so a
+    poll can ask for only what is new (``GET /api/jobs/<id>?since=``).
     """
     from dataclasses import replace
 
@@ -284,11 +286,22 @@ def merge_ladder():
         "axes": axes,
         "rows": len(axes[0]["values"]) if len(axes) == 2 else 1,
         "cols": len(axes[-1]["values"]) if axes else 1,
-        "cells": [{**c, "image": None, "card": None} for c in cells],
+        "cells": [{**c, "image": None, "card": None, "rev": None} for c in cells],
         "refs": {"a": None, "b": None} if want_refs else None,
         "planned": len(todo) + (2 if want_refs else 0),
         "current": None,
+        "rev": 0,
     })
+
+    def publish(slots, key, entry):
+        """Put a finished picture in place, then move ``detail.rev`` past it.
+
+        In that order: the jobs route reads ``rev`` before it copies the
+        entries, so a picture is always in some poll before ``since`` can skip it.
+        """
+        rev = job.detail["rev"] + 1
+        slots[key] = {**entry, "rev": rev}
+        job.detail["rev"] = rev
 
     def sample(path, bundle=None):
         """The final frame of one run, or None if the job was cancelled."""
@@ -310,8 +323,8 @@ def merge_ladder():
                 if last is None:
                     job.finish("cancelled")
                     return
-                detail["refs"][key] = {"image": data_url(last["image_pp"]),
-                                       "card": build_card(base, model_path=path)}
+                publish(detail["refs"], key, {"image": data_url(last["image_pp"]),
+                                              "card": build_card(base, model_path=path)})
                 done += 1
                 job.progress = done / total
             rig = None
@@ -329,12 +342,12 @@ def merge_ladder():
                     return
                 # A rung is not a model yet, so its card names no model_path;
                 # the recipe travels in "merge" until the blend is saved.
-                detail["cells"][i] = {
+                publish(detail["cells"], i, {
                     **detail["cells"][i],
                     "image": data_url(last["image_pp"]),
                     "card": build_card(base, model_path="", kind="merge-ladder",
                                        extra={"merge": {**merge_of, **r}}),
-                }
+                })
                 done += 1
                 job.progress = done / total
             detail["current"] = None
