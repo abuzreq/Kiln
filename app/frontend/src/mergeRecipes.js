@@ -41,11 +41,15 @@ export function recipeOf(method, alpha, blocks, density = 1, strength = 1) {
 export const mixOf = (r) => recipeOf(r.method || "linear", r.alpha, r.block_weights, r.density, r.strength);
 
 /** "Slerp · 70% A / 30% B", the three stages of a block-wise mix, or a merge
- *  from a base with its density and strength. */
-export function describeMix(r) {
+ *  from a base with its density and strength. ``onto`` is "A" or "B" when the
+ *  base is that model: TIES from it. */
+export function describeMix(r, onto = null) {
   if (r.method === "blockwise") {
     const w = r.block_weights;
     return `Block-wise · B ${pct(w.encoder)} encoder, ${pct(w.mid)} mid, ${pct(w.decoder)} decoder`;
+  }
+  if (onto && isBaseMethod(r.method)) {
+    return `${methodLabel(r.method)} onto ${onto} · ${pct(r.density)} of weights moved · strength ${r.strength}`;
   }
   const head = `${methodLabel(r.method)} · ${pct(1 - r.alpha)} A / ${pct(r.alpha)} B`;
   if (!isBaseMethod(r.method)) return head;

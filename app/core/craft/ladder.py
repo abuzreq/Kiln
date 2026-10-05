@@ -200,8 +200,8 @@ def _unit(v, name: str) -> float:
 class LadderRig:
     """Two models' weights (and a base's) and one net to sample their blends with.
 
-    ``base`` None is a zero base for the base methods. ``align`` reorders B's
-    units (and the base's) to line up with A's first, with the permutation
+    ``base`` is needed by the base methods only. ``align`` reorders B's units
+    (and the base's) to line up with A's first, with the permutation
     ``merge()`` will use for the same pair.
 
     The net is the rig's own copy, never ``ModelManager``'s cached model A:
@@ -251,6 +251,8 @@ class LadderRig:
         if self.b is None:
             state = self.a
         elif method in BASE_METHODS:
+            if self.c is None:
+                raise ValidationError("merges from a base need a base model")
             state = _merge_from_base(self.a, self.b, self.c, method, float(alpha),
                                      float(density), float(strength))
         else:

@@ -5,16 +5,14 @@ Blends of A and B:
 - slerp:     spherical interpolation per tensor (preserves norm/character better)
 - blockwise: linear, but with a different alpha per stage (encoder / mid / decoder)
 
-From a base both were trained from, on task vectors tau = model - base. These
-are meant for A and B that share that ancestor (see relatedness.py), but any
-compatible base is allowed, and with no base at all tau is the weights
-themselves -- a zero base -- for experiments:
+From a base, on task vectors tau = model - base. The base is meant to be one
+A and B were both trained from (see relatedness.py), but any compatible model
+is allowed, A or B included -- TIES from A is A plus the share of B's
+differences that are largest, moved by the strength:
 - task_arithmetic: out = base + strength * ((1-a)*tau_A + a*tau_B)
 - ties:      TIES-Merging (Yadav et al. 2023): trim each tau to its top
              ``density`` share by magnitude, elect a sign per entry from the
              weighted sum, and average only the entries that agree with it
-- dare_ties: the same, with DARE's random drop and 1/density rescale
-             (Yu et al. 2024) in place of the trim
 
 Guardrails: both checkpoints must share architecture (mtype) and channel
 multipliers (mults); tensor keys and shapes must match. Merges are strictly 2-way.
@@ -100,7 +98,7 @@ def check_compat(path_a: str, path_b: str) -> dict:
 
 
 BLEND_METHODS = ("linear", "slerp", "blockwise")
-BASE_METHODS = ("task_arithmetic", "ties", "dare_ties")
+BASE_METHODS = ("task_arithmetic", "ties")
 METHODS = BLEND_METHODS + BASE_METHODS
 #: strength (lambda) is allowed past 1: adding both deltas at full weight is
 #: the community's "add difference", and the point of the knob.
@@ -115,22 +113,6 @@ def _trim(t, density: float):
     k = max(1, round(mag.numel() * density))
     thr = mag.kthvalue(mag.numel() - k + 1).values
     return torch.where(t.abs() >= thr, t, torch.zeros_like(t))
-
-
-def _dare(t, density: float, seed_key: str):
-    """DARE's drop: keep each entry with probability ``density``, rescaled by 1/density.
-
-    The mask is seeded from the model's role, the tensor and the density --
-    not from the balance or the strength -- so a saved merge replays its
-    ladder rung exactly and a ladder's mask stays put as the balance moves.
-    """
-    if density >= 1:
-        return t
-    import zlib
-
-    g = torch.Generator().manual_seed(zlib.crc32(f"{seed_key}|{density}".encode()))
-    keep = torch.rand(t.shape, generator=g, dtype=torch.float64) < density
-    return torch.where(keep, t / density, torch.zeros_like(t))
 
 
 def _disjoint(da, db, wa: float, wb: float):
@@ -148,25 +130,18 @@ def _disjoint(da, db, wa: float, wb: float):
     return torch.where(den > 0, num / den.clamp_min(1e-300), torch.zeros_like(num))
 
 
-def _merge_from_base(sa: dict, sb: dict, sc: dict | None, method: str, alpha: float,
+def _merge_from_base(sa: dict, sb: dict, sc: dict, method: str, alpha: float,
                      density: float = 1.0, strength: float = 1.0) -> dict:
     """A task-vector merge of A and B relative to ``sc``, the base's slot.
 
-    ``sc`` None is a zero base: the task vectors are the weights themselves.
     Computed in float64 and cast back. Tensors the three do not share, or that
     differ in shape, are A's.
     """
     out = {}
     for k, ta in sa.items():
-        tb = sb.get(k)
-        tc = ta.new_zeros(ta.shape) if sc is None and torch.is_tensor(ta) else (sc or {}).get(k)
+        tb, tc = sb.get(k), sc.get(k)
         if not all(torch.is_tensor(t) for t in (ta, tb, tc)) or not ta.is_floating_point() \
                 or not (ta.shape == tb.shape == tc.shape):
-            out[k] = ta
-            continue
-        if sc is None and torch.equal(ta, tb):
-            # With no base, what A and B hold alike (a fixed noise schedule,
-            # say) is not a change to trim or scale.
             out[k] = ta
             continue
         c = tc.double()
@@ -174,10 +149,7 @@ def _merge_from_base(sa: dict, sb: dict, sc: dict | None, method: str, alpha: fl
         if method == "task_arithmetic":
             tau = (1 - alpha) * da + alpha * db
         else:
-            if method == "ties":
-                da, db = _trim(da, density), _trim(db, density)
-            else:
-                da, db = _dare(da, density, f"a|{k}"), _dare(db, density, f"b|{k}")
+            da, db = _trim(da, density), _trim(db, density)
             tau = _disjoint(da, db, 1 - alpha, alpha)
         out[k] = (c + strength * tau).to(ta.dtype)
     return out
@@ -248,10 +220,9 @@ def merge(
 ) -> dict:
     """Blend A and B into a new checkpoint.
 
-    ``base`` (for the methods that work from one; None is a zero base) and
-    ``align`` ("weights" or "activations": reorder B's units, and the base's,
-    to line up with A's first -- see rebasin.py) are options to experiment
-    with: neither is refused for a pair it is unlikely to suit.
+    ``base`` is required by the methods that work from one, and may be any
+    compatible model, A or B included. ``align`` ("activations") reorders B's
+    units, and the base's, to line up with A's first -- see rebasin.py.
     """
     from app.core.craft import rebasin
 
@@ -265,6 +236,8 @@ def merge(
     if not from_base:
         base = None
     if from_base:
+        if not base:
+            raise ValidationError("merges from a base need a base model")
         check_base_params(density, strength)
     compat = check_compat(path_a, path_b)
     if not compat["compatible"]:
@@ -293,10 +266,8 @@ def merge(
                   "block_weights": block_weights, "which": which, "align": align}
     merged_from = [_display_name(path_a), _display_name(path_b)]
     if from_base:
-        merge_info.update(base=_display_name(base) if base else None,
-                          density=density, strength=strength)
-        if base:
-            merged_from.append(_display_name(base))
+        merge_info.update(base=_display_name(base), density=density, strength=strength)
+        merged_from.append(_display_name(base))
 
     blend = blended_slots(slots_a, which)
     slots = {}
@@ -305,8 +276,8 @@ def merge(
         if sb is None or slot not in blend:
             slots[slot] = sa
         elif from_base:
-            sc = base_slot(slots_c, slot) if slots_c is not None else None
-            slots[slot] = _merge_from_base(sa, sb, sc, method, alpha, density, strength)
+            slots[slot] = _merge_from_base(sa, sb, base_slot(slots_c, slot), method, alpha,
+                                           density, strength)
         else:
             slots[slot] = _merge_state(sa, sb, method, alpha, block_weights, backend)
     if not slots:

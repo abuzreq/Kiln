@@ -18,18 +18,23 @@ const BLEND_METHODS = [
   { id: "blockwise", label: "Block-wise", tip: "A different mix per UNet stage" },
 ];
 const BASE_METHODS = [
-  { id: "task_arithmetic", label: "Task arithmetic", tip: "Adds A's and B's changes from the base" },
-  { id: "ties", label: "TIES", tip: "Keeps each model's strongest changes and settles sign conflicts" },
-  { id: "dare_ties", label: "DARE-TIES", tip: "TIES with random drops instead of the trim" },
+  { id: "ties", label: "TIES", tip: "Moves only the strongest changes; where A and B pull opposite ways, the stronger wins" },
+  { id: "task_arithmetic", label: "Task arithmetic", tip: "Adds A's and B's changes from the base they share" },
 ];
 const isBase = (m) => BASE_METHODS.some((x) => x.id === m);
+const METHOD_IDS = [...BLEND_METHODS, ...BASE_METHODS].map((x) => x.id);
 const METHOD_TIPS = {
   linear: "Each step is a straight weighted average. The ends are A and B themselves, so only the steps between are new merges.",
   slerp: "Each step blends along a sphere, so layers keep their size. Slerp and linear share their ends, so comparing them only adds the steps between.",
   blockwise: "Rows set how much of the structure (encoder) comes from B; columns do the same for texture (decoder). The diagonal mixes both evenly. The mid stage, the bottleneck between them, is on neither axis: every cell uses the one share set in “Mid stage, every cell”.",
   task_arithmetic: "Each step adds A's and B's changes from the base in the balance shown. At strength 1 it is the linear blend; above 1 it pushes past both.",
   ties: "Rows keep that share of each model's strongest changes from the base; where A and B pull opposite ways, the stronger change wins. Columns set the balance.",
-  dare_ties: "Like TIES, but each model's changes are dropped at random and the rest scaled up. It suits small changes, so keep density high for Kiln models.",
+};
+/** TIES from A (or B) itself: the other model's largest differences, moved by the strength. */
+const graftTip = (from) => {
+  const other = from === "A" ? "B" : "A";
+  return `Starts from ${from} and moves only the weights where ${other} differs most, by the strength shown. `
+    + `Rows set how many move; the 100% row moves them all, which is the linear ladder.`;
 };
 const STAGES = [
   { id: "encoder", label: "Encoder", role: "structure" },
@@ -39,11 +44,8 @@ const STAGES = [
 const STAT_STAGES = [["encoder", "enc"], ["mid", "mid"], ["decoder", "dec"], ["other", "time"]];
 const DENSITIES = [0.2, 0.5, 1];
 const STRENGTHS = [0.5, 0.75, 1, 1.25, 1.5];
-const ALIGNS = [
-  { id: "none", label: "Off" },
-  { id: "weights", label: "By weights" },
-  { id: "activations", label: "By activations" },
-];
+// TIES from A: how far the moved weights go towards B. 1 at 100% density is B.
+const GRAFT_STRENGTHS = [0.25, 0.5, 0.75, 1, 1.25];
 // The only architecture re-basin has a permutation spec for (rebasin.py).
 const ALIGNABLE = "tinyunet_with_attention3";
 // Where each ladder starts, per method; zooming pushes onto the method's own stack.
@@ -53,7 +55,6 @@ const START_VIEWS = {
   blockwise: [{ kind: "grid", enc: [0, 1], dec: [0, 1] }],
   task_arithmetic: [{ kind: "1d", lo: 0, hi: 1 }],
   ties: [{ kind: "base", lo: 0, hi: 1 }],
-  dare_ties: [{ kind: "base", lo: 0, hi: 1 }],
 };
 const EMPTY_CACHE = { key: "", seed: null, refs: {}, cells: {} };
 const LIVE = ["queued", "running"];
@@ -61,13 +62,15 @@ const LIVE = ["queued", "running"];
 // Measured on Kiln models: trained-apart pairs 0.000 +- 0.005, same-origin
 // pairs 0.76 and up (docs: merge-methods, step 2).
 const SAME_ORIGIN = 0.1;
+const verdictOf = (cos) => (cos == null ? null
+  : cos >= 0.99 ? "same run" : cos >= SAME_ORIGIN ? "same origin" : "trained apart");
 
 const clamp01 = (v) => Math.min(1, Math.max(0, v));
 const linspace = (lo, hi, n) =>
   Array.from({ length: n }, (_, i) => round4(lo + (hi - lo) * (i / Math.max(n - 1, 1))));
 const fix2 = (v) => (v == null ? "–" : v.toFixed(2));
 // Cosines get a third place: 0.998 and 0.9993 are different pairs, and both read "1.00".
-const fix3 = (v) => (v == null ? "–" : v.toFixed(3));
+const fix3 = (v) => (v == null ? "–" : (Math.abs(v) < 5e-4 ? 0 : v).toFixed(3)); // no "-0.000"
 
 // The base and the alignment belong to the ladder, not the recipe, but a merge
 // from one base, or with B aligned, is not the same merge: the cache keys them in.
@@ -101,8 +104,23 @@ function gridTag(r) {
   return "";
 }
 
-/** What one view of the ladder asks the server for, and how it lays out. */
-function ladderFor(method, view, { steps, compare, grid, mid, strength, density }) {
+/** What one view of the ladder asks the server for, and how it lays out.
+ *  ``graft`` is the balance when the base is A (1) or B (0): TIES from that
+ *  model, where the balance drops out and the strength is the axis instead. */
+function ladderFor(method, view, { steps, compare, grid, mid, strength, graft }) {
+  if (view.kind === "base" && graft != null) {
+    return {
+      method,
+      fixed: { alpha: graft },
+      axes: [{ param: "density", values: DENSITIES }, { param: "strength", values: GRAFT_STRENGTHS }],
+      heads: GRAFT_STRENGTHS.map((v) => `Strength ${v}`),
+      label: 112,
+      rows: DENSITIES.map((d) => ({
+        label: `${pct(d)} moved`,
+        cells: GRAFT_STRENGTHS.map((v) => recipeOf(method, graft, null, d, v)),
+      })),
+    };
+  }
   if (view.kind === "1d") {
     const values = linspace(view.lo, view.hi, steps);
     const methods = method === "slerp" && compare ? ["slerp", "linear"] : [method];
@@ -194,7 +212,7 @@ function autoName(a, b, r) {
   let tag;
   if (r.method === "blockwise") tag = `b${STAGES.map((s) => Math.round(r.block_weights[s.id] * 100)).join("-")}`;
   else if (isBase(r.method)) {
-    const short = { task_arithmetic: "ta", ties: "ties", dare_ties: "dare" }[r.method];
+    const short = { task_arithmetic: "ta", ties: "ties" }[r.method];
     tag = `${short}${Math.round(r.alpha * 100)}-d${Math.round(r.density * 100)}-s${Math.round(r.strength * 100)}`;
   } else tag = `${r.method === "slerp" ? "slerp" : ""}${Math.round(r.alpha * 100)}`;
   return `${a?.name || "a"}-x-${b?.name || "b"}-${tag}`.replace(/[^A-Za-z0-9_-]+/g, "-");
@@ -240,7 +258,9 @@ export default function Merge() {
   // Everything lives in the Play provider: a ladder is a long run, and the
   // recipe you are tuning should still be there when you come back to the tab.
   const [b, setB] = usePlayState("merge.b", "");
-  const [method, setMethodState] = usePlayState("merge.method", "linear");
+  const [methodState, setMethodState] = usePlayState("merge.method", "linear");
+  // A method or alignment saved before the trials pruned them falls back.
+  const method = METHOD_IDS.includes(methodState) ? methodState : methodState === "dare_ties" ? "ties" : "linear";
   const [base, setBaseState] = usePlayState("merge.base", "");
   const [choices, setChoices] = usePlayState("merge.choice", {});
   const [steps, setSteps] = usePlayState("merge.steps", 5);
@@ -258,6 +278,7 @@ export default function Merge() {
   const [which, setWhich] = usePlayState("merge.which", "both");
   const [saving, setSaving] = usePlayState("merge.writing", false);
   const [result, setResult] = usePlayState("merge.result", null);
+  const [statsOpen, setStatsOpen] = usePlayState("merge.statsOpen", false);
   const [check, setCheck] = useState(null);
   // The recipe shown enlarged next to A and B, or null.
   const [big, setBig] = useState(null);
@@ -271,10 +292,6 @@ export default function Merge() {
   const modelB = byPath[b];
   const optsA = useMemo(() => selectOptions(models), [models]);
   const optsB = useMemo(() => optsA.filter((o) => o.value !== modelPath), [optsA, modelPath]);
-  // Any compatible model may be the base, A and B included; none is a zero base.
-  const optsBase = useMemo(() => optsA.map((o) => ({
-    ...o, label: o.value === modelPath ? `${o.label}  (A)` : o.value === b ? `${o.label}  (B)` : o.label,
-  })), [optsA, modelPath, b]);
 
   useEffect(() => {
     if (!models.length) return;
@@ -293,15 +310,18 @@ export default function Merge() {
 
   // Compatibility, how related the pair is, and the base their lineage names.
   // The figures read both checkpoints, so they arrive a moment after the pair.
+  // Figures from the base only mean something for a third model.
+  const pickedBase = base.startsWith("@") ? "" : base;
+  const statsBase = fromBase && pickedBase && pickedBase !== modelPath && pickedBase !== b ? pickedBase : "";
   useEffect(() => {
     setCheck(null);
     if (!modelPath || !b) return;
     let live = true;
     api.post("/craft/merge/check", {
-      model_a: modelPath, model_b: b, stats: true, model_base: fromBase && base ? base : undefined,
+      model_a: modelPath, model_b: b, stats: true, model_base: statsBase || undefined,
     }).then((c) => live && setCheck({ ...c, pairKey })).catch(() => {});
     return () => { live = false; };
-  }, [modelPath, b, base, fromBase, pairKey]);
+  }, [modelPath, b, statsBase, pairKey]);
 
   // An untouched pair gets the default its figures suggest; a pair you have
   // set keeps your choice, whichever way you went.
@@ -318,7 +338,7 @@ export default function Merge() {
     setBaseState(d.base);
   }, [check, pairKey, choice, method, base, setChoices, setMethodState, setBaseState]);
 
-  const align = choice?.align || "none";
+  const align = choice?.align === "activations" ? "activations" : "none";
   const aligned = align !== "none";
   const choose = (patch) => {
     const next = { method, base, align, ...patch };
@@ -330,6 +350,27 @@ export default function Merge() {
   const setBase = (p) => choose({ base: p });
   const setAlign = (a) => choose({ align: a });
   const canAlign = modelA?.mtype === ALIGNABLE;
+  const stats = check?.pairKey === pairKey ? check.stats : null;
+  const cos = stats?.overall?.cosine;
+  const related = cos != null && cos >= SAME_ORIGIN;
+  const suggested = check?.pairKey === pairKey ? check.suggested_base : null;
+
+  // The base is stored as "@a" / "@b" when it is A or B, so it follows the
+  // role; blank means the base the lineage names, else A.
+  const basePath = (() => {
+    const t = base || suggested?.path || "@a";
+    return t === "@a" ? modelPath : t === "@b" ? b : t;
+  })();
+  const baseSel = basePath === modelPath ? "@a" : basePath === b ? "@b" : basePath;
+  const graft = method === "ties" ? (basePath === modelPath ? 1 : basePath === b ? 0 : null) : null;
+  const onto = graft == null ? null : graft ? "A" : "B";
+  const otherBases = useMemo(
+    () => optsA.filter((o) => o.value !== modelPath && o.value !== b && o.value !== suggested?.path),
+    [optsA, modelPath, b, suggested],
+  );
+  // Task arithmetic needs a base the two share; it shows once lineage names one.
+  const methodTabs = [...BLEND_METHODS,
+    ...BASE_METHODS.filter((m) => m.id !== "task_arithmetic" || suggested || method === m.id)];
 
   // The samples a ladder holds are only good for these two models and these
   // sampling settings. The seed is kept apart: a blank Create seed is resolved
@@ -345,13 +386,14 @@ export default function Merge() {
   const cacheValid = cacheState.key === settingsKey
     && (userSeed == null || cacheState.seed === userSeed);
   const cache = cacheValid ? cacheState : EMPTY_CACHE;
-  const ladderBase = fromBase ? base : "";
+  const ladderBase = fromBase ? basePath : "";
+  const thirdBase = !!ladderBase && ladderBase !== modelPath && ladderBase !== b;
 
   const viewStack = views[method] || START_VIEWS[method];
   const view = viewStack[viewStack.length - 1];
   const ladder = useMemo(
-    () => ladderFor(method, view, { steps, compare, grid, mid, strength }),
-    [method, view, steps, compare, grid, mid, strength],
+    () => ladderFor(method, view, { steps, compare, grid, mid, strength, graft }),
+    [method, view, steps, compare, grid, mid, strength, graft],
   );
 
   const running = LIVE.includes(job?.status);
@@ -372,7 +414,7 @@ export default function Merge() {
     }));
     return keys.size;
   }, [ladder, cache, ladderBase, align, aligned]);
-  const refsMissing = !(cache.refs.a && cache.refs.b && (!ladderBase || cache.refs[refKey("base")]));
+  const refsMissing = !(cache.refs.a && cache.refs.b && (!thirdBase || cache.refs[refKey("base")]));
   const newCount = missing + (refsMissing ? 1 : 0);
 
   const run = async ({ fresh = false, only = null } = {}) => {
@@ -434,7 +476,7 @@ export default function Merge() {
   const pushView = (v) => setView([...viewStack, v]);
 
   const chosen = fine || pick;
-  const chosenBase = chosen && isBase(chosen.method) ? base : "";
+  const chosenBase = chosen && isBase(chosen.method) ? ladderBase : "";
   const chosenShot = chosen
     ? (endOf(chosen, aligned) ? cache.refs[endOf(chosen, aligned)] : cache.cells[recipeKey(chosen, chosenBase, align)])
     : null;
@@ -550,7 +592,8 @@ export default function Merge() {
       picked,
       src: !!end,
       tag,
-      label: `${rowLabel}, ${r.method === "blockwise" ? describe(r) : `${pct(r.alpha)} B`}`,
+      label: `${rowLabel}, ${r.method === "blockwise" ? describe(r)
+        : graft != null && isBase(r.method) ? `strength ${r.strength}` : `${pct(r.alpha)} B`}`,
       onPick: () => { setPick(r); setFine(null); },
       onEnlarge: shot ? () => setBig(r) : null,
     };
@@ -575,7 +618,7 @@ export default function Merge() {
 
   // Zoom and refine offers, around the picked cell when it is in this view.
   const zooms = (() => {
-    if (!pick) return [];
+    if (!pick || graft != null) return [];
     const inView = ladder.rows.some((rw) => rw.cells.some((r) => recipeKey(r, ladderBase) === recipeKey(pick, chosenBase)));
     if (view.kind === "1d" || view.kind === "base") {
       if (!inView) return [];
@@ -623,8 +666,7 @@ export default function Merge() {
     ? "Everything here is rendered. Render the ladder again on a new random seed." : undefined;
 
   const isGrid = method === "blockwise";
-  const stats = check?.pairKey === pairKey ? check.stats : null;
-  const baseStats = stats?.overall?.base;
+  const baseStats = statsBase ? stats?.overall?.base : null;
   const showRefs = isGrid || fromBase;
 
   return (
@@ -650,32 +692,18 @@ export default function Merge() {
             {optsB.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
         </div>
-        {fromBase && (
-          <div className="merge-pick">
-            <span className="merge-badge wide" aria-hidden="true">Base</span>
-            <select aria-label="Base model" value={base} onChange={(e) => setBase(e.target.value)}>
-              <option value="">No base: merge the weights themselves</option>
-              {optsBase.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}{check?.suggested_base?.path === o.value ? "  (from lineage)" : ""}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
-        {check && (check.compatible
-          ? <span className="pill good">Compatible</span>
-          : <span className="pill bad">Incompatible</span>)}
+        {check && !check.compatible && <span className="pill bad">Incompatible</span>}
+        {stats && <SimilarityChip cos={cos} open={statsOpen} onToggle={() => setStatsOpen(!statsOpen)} />}
       </div>
       {incompatible && (
         <ul className="hint merge-reasons">{check.reasons.map((r) => <li key={r}>{r}</li>)}</ul>
       )}
 
-      {stats && <Relatedness stats={stats} baseStats={fromBase && base ? baseStats : null} />}
+      {stats && statsOpen && <SimilarityDetails stats={stats} baseStats={baseStats} />}
 
       <section className="card merge-ladder" aria-label="Blend ladder">
         <div className="merge-bar">
-          <h3 className="mb-0">Blend ladder</h3>
+          <h3 className="mb-0">Merge ladder</h3>
           <Popover
             label="Saved merge recipes"
             triggerClass="btn sm"
@@ -707,10 +735,30 @@ export default function Merge() {
               )}
             </div>
           </Popover>
-          <span className="merge-family">Blend</span>
-          <Seg tabs={BLEND_METHODS} value={method} onChange={setMethod} ariaLabel="Blend methods" size="sm" />
-          <span className="merge-family">From a base</span>
-          <Seg tabs={BASE_METHODS} value={method} onChange={setMethod} ariaLabel="Methods from a base" size="sm" />
+          <Seg tabs={methodTabs} value={method} onChange={setMethod} ariaLabel="Merge method" size="sm" />
+          {fromBase && (
+            <label className="merge-inline">Base
+              <select aria-label="Base model" value={baseSel} onChange={(e) => setBase(e.target.value)}>
+                {suggested && suggested.path !== modelPath && suggested.path !== b && (
+                  <option value={suggested.path}>{suggested.name} (from lineage)</option>
+                )}
+                <option value="@a">{method === "ties" ? "A: B's biggest differences go onto A" : "A"}</option>
+                <option value="@b">{method === "ties" ? "B: A's biggest differences go onto B" : "B"}</option>
+                {otherBases.length > 0 && (
+                  <optgroup label="Other models">
+                    {otherBases.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </optgroup>
+                )}
+              </select>
+            </label>
+          )}
+          {canAlign && (!related || aligned) && (
+            <label className="merge-inline merge-toggle"
+              title="Reorder B's units to match A's before merging (re-basin, by activations). B still draws the same pictures; models trained apart blend more cleanly this way.">
+              <input type="checkbox" checked={aligned} onChange={(e) => setAlign(e.target.checked ? "activations" : "none")} />
+              Line up B with A first
+            </label>
+          )}
         </div>
         <div className="merge-bar">
           {(method === "linear" || method === "slerp" || method === "task_arithmetic") && (
@@ -726,13 +774,7 @@ export default function Merge() {
               Compare with linear
             </label>
           )}
-          <label className="merge-inline" title={canAlign ? "Reorder B's units to line up with A's before merging (re-basin)" : `Re-basin is only set up for ${ALIGNABLE} models so far`}>
-            Align B to A
-            <select value={canAlign ? align : "none"} disabled={!canAlign} onChange={(e) => setAlign(e.target.value)}>
-              {ALIGNS.map((x) => <option key={x.id} value={x.id}>{x.label}</option>)}
-            </select>
-          </label>
-          {fromBase && view.kind !== "strength" && (
+          {fromBase && view.kind !== "strength" && graft == null && (
             <label className="merge-inline">Strength
               <select value={strength} onChange={(e) => setStrength(Number(e.target.value))}>
                 {STRENGTHS.map((v) => <option key={v} value={v}>{v}</option>)}
@@ -760,7 +802,7 @@ export default function Merge() {
           <span className="spacer" />
           <span className="sub">
             Seed {userSeed ?? cache.seed ?? "random"} · {payload.rest.steps} steps ·{" "}
-            {newCount ? `${missing} new merge${missing === 1 ? "" : "s"}${refsMissing ? ` + ${fromBase ? "A, B and the base" : "A and B"}` : ""}` : "all rendered"}
+            {newCount ? `${missing} new merge${missing === 1 ? "" : "s"}${refsMissing ? ` + ${thirdBase ? "A, B and the base" : "A and B"}` : ""}` : "all rendered"}
           </span>
           {running && <button type="button" className="btn" onClick={stop}>Stop</button>}
           <button
@@ -784,9 +826,8 @@ export default function Merge() {
           </p>
         )}
         <p className="hint mb-0">
-          {METHOD_TIPS[method]}
-          {fromBase && !base && " With no base, the changes are the weights themselves (a zero base)."}
-          {aligned && ` B is aligned to A ${align === "weights" ? "by its weights" : "by its activations"} first, so its 100% end is sampled rather than reused.`}
+          {onto ? graftTip(onto) : METHOD_TIPS[method]}
+          {aligned && " B is lined up with A first, so its 100% end is sampled rather than reused."}
         </p>
         <p className="hint mb-0">
           No bends here: merging blends the two models&rsquo; weights, while bends rewrite activations as an
@@ -840,7 +881,7 @@ export default function Merge() {
             <aside className="merge-refs">
               <div className="section-title">For reference</div>
               <div className="merge-refs-pair">
-                {["a", "b", ...(ladderBase ? ["base"] : [])].map((k) => {
+                {["a", "b", ...(thirdBase ? ["base"] : [])].map((k) => {
                   const ref = cache.refs[refKey(k)];
                   const label = k === "base" ? "Base" : k.toUpperCase();
                   return (
@@ -858,8 +899,8 @@ export default function Merge() {
                 })}
               </div>
               <p className="sub mb-0">
-                {fromBase ? (ladderBase ? "Every cell is the base plus a mix of A's and B's changes from it."
-                  : "With no base, every cell merges A's and B's weights themselves.")
+                {fromBase ? (onto ? `At 100% moved, strength 1 is ${onto === "A" ? "B" : "A"} itself; above 1 pushes past it.`
+                  : "Every cell is the base plus a mix of A's and B's changes from it.")
                   : view.kind === "mid"
                     ? "Encoder and decoder stay at the picked cell; only the mid stage moves."
                     : mid === 0 || mid === 1
@@ -890,7 +931,7 @@ export default function Merge() {
           </div>
         ) : (
           <p className="merge-next-empty mb-0">
-            Click a {isGrid || view.kind === "base" ? "cell" : "step"} to pick it{view.kind === "mid" || view.kind === "strength" ? "." : `, then ${isGrid ? "refine around it" : "zoom in around it"}.`}
+            Click a {isGrid || view.kind === "base" ? "cell" : "step"} to pick it{view.kind === "mid" || view.kind === "strength" || graft != null ? "." : `, then ${isGrid ? "refine around it" : "zoom in around it"}.`}
             {" "}Double-click a picture, or use its <ExpandIcon size={12} aria-hidden="true" /> button, to see it large between A and B.
           </p>
         )}
@@ -900,7 +941,7 @@ export default function Merge() {
         <section className="card merge-picked" aria-label="Picked mix">
           <div className="row center gap-2">
             <h3 className="mb-0">Picked mix</h3>
-            <span className="sub">{chosen ? describe(chosen) : "Nothing picked yet"}</span>
+            <span className="sub">{chosen ? describe(chosen, onto) : "Nothing picked yet"}</span>
           </div>
           {chosen && (
             <div className="merge-picked-body">
@@ -924,7 +965,7 @@ export default function Merge() {
                       onChange={(v) => setFine(recipeOf("blockwise", 0, { ...chosen.block_weights, [s.id]: v }))}
                     />
                   ))
-                  : (
+                  : !(onto && isBase(chosen.method)) && (
                     <FineSlider
                       label="A ↔ B"
                       aria="Share of model B"
@@ -1036,16 +1077,30 @@ export default function Merge() {
   );
 }
 
-/** Raw similarity figures with a legend, not a verdict (docs: merge-methods, step 2). */
-function Relatedness({ stats, baseStats }) {
+/** One number for how alike A and B are; the figures behind it on demand. */
+function SimilarityChip({ cos, open, onToggle }) {
+  const v = verdictOf(cos);
+  return (
+    <button type="button" className="merge-sim" aria-expanded={open} onClick={onToggle}
+      title={open ? "Hide the figures per stage" : "Show the figures per stage"}>
+      <span className="sub">Similarity</span> <b>{fix3(cos)}</b>
+      {v && <span className={`merge-verdict ${v === "trained apart" ? "apart" : ""}`}>{v}</span>}
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+        strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d={open ? "M6 15l6-6 6 6" : "M6 9l6 6 6-6"} />
+      </svg>
+    </button>
+  );
+}
+
+function SimilarityDetails({ stats, baseStats }) {
   const stages = stats.stages || {};
   return (
     <div className="merge-related">
-      <span className="merge-related-head">Similarity</span>
+      <span className="merge-related-head">Per stage</span>
       {STAT_STAGES.filter(([id]) => stages[id]).map(([id, label]) => (
         <span key={id} className="merge-stat"><span className="sub">{label}</span> {fix3(stages[id].cosine)}</span>
       ))}
-      <span className="merge-stat"><span className="sub">overall</span> <b>{fix3(stats.overall?.cosine)}</b></span>
       {baseStats && (
         <>
           <span className="merge-related-head">From the base</span>
@@ -1055,15 +1110,18 @@ function Relatedness({ stats, baseStats }) {
           <span className="merge-stat"><span className="sub">signs agree</span> {baseStats.agreement == null ? "–" : pct(baseStats.agreement)}</span>
         </>
       )}
-      <details className="merge-legend">
-        <summary>What these mean</summary>
+      <div className="merge-legend">
         <ul>
           <li><b>Similarity</b> is the cosine of A's and B's weights, per UNet stage. 0.99 and up: the same model, slightly moved (two checkpoints of one run). 0.1 to 0.99: one origin, moved apart. Below 0.1: trained apart, with their units in unrelated orders, so a 50% blend tends to come out as noise.</li>
-          <li><b>Drift</b> is how far each model moved from the base, relative to the base's own size.</li>
-          <li><b>Changes alike</b> is the cosine of A's and B's changes from the base: near 1, they moved the same way.</li>
-          <li><b>Signs agree</b>: of the strongest 20% of each model's changes, the share pointing the same way. TIES settles the rest by keeping the stronger change.</li>
+          {baseStats && (
+            <>
+              <li><b>Drift</b> is how far each model moved from the base, relative to the base's own size.</li>
+              <li><b>Changes alike</b> is the cosine of A's and B's changes from the base: near 1, they moved the same way.</li>
+              <li><b>Signs agree</b>: of the strongest 20% of each model's changes, the share pointing the same way. TIES settles the rest by keeping the stronger change.</li>
+            </>
+          )}
         </ul>
-      </details>
+      </div>
     </div>
   );
 }

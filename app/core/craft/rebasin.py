@@ -23,7 +23,8 @@ Two ways to find the permutations, both from the paper:
   of A's and B's weights in every segment, with every other group's current
   permutation applied. On Kiln's narrow UNets trained apart it only finds
   chance correlations -- it scores the same on two untrained networks -- and
-  made 50% merges worse in tests.
+  made 50% merges worse in tests, so merges do not offer it. It stays as the
+  spec's check: a shuffled copy of a model is matched back exactly.
 - **Activation matching** correlates each unit's response in A with every
   unit's in B, on the same inputs, and solves one assignment per group. The
   inputs can be noised samples of A's and B's own outputs (``noised_inputs``),
@@ -353,8 +354,8 @@ def match_activations(acts_a: dict, acts_b: dict) -> dict:
 
 
 # --- aligning one model to another, for merges ---------------------------------
-#: "Align B to A" in a merge: off, or which matching finds the permutation.
-ALIGN = ("none", "weights", "activations")
+#: "Line up B with A" in a merge: off, or by activation matching.
+ALIGN = ("none", "activations")
 #: Activation matching probes with the models' own samples: this many of each,
 #: small and short, on a fixed seed, so the probe never depends on the
 #: sampling settings of the moment.
@@ -415,10 +416,7 @@ def pair_perms(path_a: str, path_b: str, how: str, device: str = "cpu", ema: boo
     sa = backend.net_state(slots_a[slot])
     sb = backend.net_state(slots_b.get(slot) or next(iter(slots_b.values())))
     spec = spec_for(meta.mtype, sa, _prefix_of(sa))
-    if how == "weights":
-        perms = match(sa, sb, spec)
-    else:
-        perms = _activation_perms(backend, ref_a, path_a, sa, sb, spec, device, ema, cancel)
+    perms = _activation_perms(backend, ref_a, path_a, sa, sb, spec, device, ema, cancel)
     _PERMS[key] = (spec, perms)
     while len(_PERMS) > _PERMS_MAX:
         _PERMS.popitem(last=False)

@@ -558,21 +558,31 @@ body {
 }
 .merge-badge.wide { width: auto; padding: 0 6px; }
 .merge-reasons { margin: 0; padding-left: var(--s-5); color: var(--bad); font-size: var(--fs-sm); }
-.merge-family { font-size: var(--fs-xs); color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.06em; }
 .merge-default {
   display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); margin: 0;
   font-size: var(--fs-sm); color: var(--text-dim);
 }
-/* How related A and B are: raw figures in one wrapping line, a legend on demand. */
+/* How related A and B are: one number in the model row, the figures on demand. */
+.merge-sim {
+  display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px;
+  border-radius: 999px; border: 1px solid var(--line); background: var(--bg-2);
+  color: var(--text); font: inherit; font-size: var(--fs-sm); font-variant-numeric: tabular-nums; cursor: pointer;
+}
+.merge-sim:hover { border-color: var(--text-faint); }
+.merge-sim svg { color: var(--text-faint); }
+.merge-verdict {
+  font-size: var(--fs-xs); padding: 1px 7px; border-radius: 999px;
+  color: var(--good); background: rgba(74, 222, 128, 0.12);
+}
+.merge-verdict.apart { color: var(--warn); background: rgba(251, 191, 36, 0.12); }
 .merge-related {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px var(--s-3);
   font-size: var(--fs-sm); font-variant-numeric: tabular-nums;
+  padding: var(--s-2) var(--s-3); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg-1);
 }
 .merge-related-head { color: var(--text-dim); font-weight: 600; }
 .merge-stat .sub { margin-right: 2px; }
 .merge-legend { flex-basis: 100%; color: var(--text-dim); }
-.merge-legend summary { cursor: pointer; color: var(--text-faint); font-size: var(--fs-xs); width: max-content; }
-.merge-legend summary:hover { color: var(--text); }
 .merge-legend ul { margin: var(--s-1) 0 0; padding-left: var(--s-5); display: flex; flex-direction: column; gap: 3px; max-width: 900px; }
 .merge-ladder { display: flex; flex-direction: column; gap: var(--s-3); }
 .merge-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2) var(--s-3); }

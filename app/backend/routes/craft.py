@@ -319,9 +319,9 @@ def merge_ladder():
     (Create's sampling fields), ``refs`` (default true: also sample A and B,
     which a zoom that already has them skips) and ``known`` (recipes the client
     already holds samples of, which are not sampled again), ``model_base`` for
-    the methods that merge from a base (sampled as a third reference; without
-    one they work from a zero base), and ``align`` ("weights" or
-    "activations": reorder B's units to line up with A's first).
+    the methods that merge from a base (sampled as a third reference, unless
+    it is A or B), and ``align`` ("activations": reorder B's units to line up
+    with A's first).
     A blank seed is resolved here, once, so every cell and the references share
     it; ``detail.seed`` says which. Cells are published as they finish -- see ``ladder.plan`` for their
     shape -- and blends are never written to disk. Each finished cell and
@@ -354,7 +354,9 @@ def merge_ladder():
     base_model = body.get("model_base") or None
     if not any(c["recipe"]["method"] in BASE_METHODS for c in cells):
         base_model = None  # a blend does not use one; don't sample it
-    elif base_model:
+    elif not base_model:
+        raise ValidationError("merges from a base need a base model")
+    else:
         check_base_compat(a, b, base_model)
     # One image per cell: variations would multiply the cost for pictures the
     # ladder has nowhere to show.
@@ -365,8 +367,10 @@ def merge_ladder():
                   key=lambda i: cells[i]["order"])
     merge_of = {"model_a": a, "model_b": b, **({"model_base": base_model} if base_model else {}),
                 **({"align": align} if align != "none" else {})}
+    # A base that is A or B already has its sample
+    third = base_model and base_model not in (a, b)
     ref_steps = ([("a", a, "model A"), ("b", b, "model B")]
-                 + ([("base", base_model, "the base")] if base_model else [])) if want_refs else []
+                 + ([("base", base_model, "the base")] if third else [])) if want_refs else []
 
     job = registry.create("merge_ladder", status="queued")
     job.message = "queued"
@@ -500,7 +504,7 @@ def merge():
         align=body.get("align") or "none",
     )
     if not res.get("base"):
-        base = None  # a blend ignores a base it was sent; a zero base names none
+        base = None  # a blend ignores a base it was sent
     manager.evict(res["path"])  # in case this name overwrote a cached model
     if res.get("path"):
         library.ensure_card(
