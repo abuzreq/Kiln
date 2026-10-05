@@ -123,6 +123,7 @@ for method, alpha, blocks, want, label in (
     ("linear", 0.0, {}, sa, "linear a=0 -> A"),
     ("linear", 1.0, {}, sb, "linear a=1 -> B"),
     ("slerp", 0.0, {}, sa, "slerp a=0 -> A"),
+    ("slerp", 1.0, {}, sb, "slerp a=1 -> B"),
     ("blockwise", 0.7, all0, sa, "blockwise all-0 -> A"),
     ("blockwise", 0.3, all1, sb, "blockwise all-1 -> B"),
 ):
@@ -193,6 +194,117 @@ check_ladder_matches_saved("cpu")
 if torch.cuda.is_available():
     check_ladder_matches_saved("cuda")
 print("ladder rungs: identical to saved merges")
+
+
+def check_ladder_plan():
+    from app.core.craft.ladder import plan
+    from utils.exceptions import ValidationError
+
+    five = [0, 0.25, 0.5, 0.75, 1]
+    cells = plan("linear", {}, [{"param": "alpha", "values": five}])
+    assert [c["same_as"] for c in cells] == ["a", None, None, None, "b"]
+    assert [c["order"] for c in cells] == [None, 1, 0, 2, None], "not middle-out"
+    two = plan("slerp", {}, [{"param": "method", "values": ["slerp", "linear"]},
+                             {"param": "alpha", "values": five}])
+    assert len(two) == 10 and sum(c["order"] is not None for c in two) == 6
+    assert [c["recipe"]["method"] for c in two if c["order"] in (0, 1)] == ["slerp", "linear"]
+    dup = plan("linear", {}, [{"param": "alpha", "values": [0.5, 0.3, 0.5]}])
+    assert dup[2]["same_as"] == 0 and dup[2]["order"] is None, dup
+    grid = plan("linear", {"block_weights": {"mid": 0.5}},
+                [{"param": "encoder", "values": [0, 0.5, 1]},
+                 {"param": "decoder", "values": [0, 0.5, 1]}])
+    assert all(c["recipe"]["method"] == "blockwise" for c in grid)
+    assert all(c["same_as"] is None for c in grid), "mid held at 0.5: no corner is A or B"
+    assert grid[4]["order"] == 0, "the centre of a grid comes first"
+    corners = plan("blockwise", {"block_weights": {"mid": 0}},
+                   [{"param": "encoder", "values": [0, 1]}, {"param": "decoder", "values": [0, 1]}])
+    assert corners[0]["same_as"] == "a" and corners[3]["same_as"] is None
+    for bad in (
+        [{"param": "alpha", "values": [0.1] * 26}],
+        [{"param": "alpha", "values": [0.1] * 6}, {"param": "method", "values": ["a"] * 5}],
+        [{"param": "encoder", "values": [0]}, {"param": "method", "values": ["linear"]}],
+        [{"param": "alpha", "values": [1.5]}],
+        [{"param": "zoom", "values": [0]}],
+    ):
+        try:
+            plan("linear", {}, bad)
+        except ValidationError:
+            continue
+        raise AssertionError(f"plan accepted {bad}")
+    print("ladder plan: ends reuse A and B, duplicates collapse, middle first, bad axes refused")
+
+
+def check_ladder_route():
+    import time
+
+    def wait(job_id, until=lambda j: j["status"] in ("done", "error", "cancelled"), limit=300):
+        t0 = time.time()
+        while True:
+            j = c.get(f"/api/jobs/{job_id}").get_json()["data"]
+            if until(j):
+                return j
+            assert time.time() - t0 < limit, f"job stuck: {j['status']} {j['message']}"
+            time.sleep(0.1)
+
+    sample = {"image_size": 32, "steps": 4, "seed": None}
+    five = [0, 0.25, 0.5, 0.75, 1]
+    r = c.post("/api/craft/merge/ladder", json={
+        "model_a": ta, "model_b": tb, "method": "slerp",
+        "axes": [{"param": "method", "values": ["slerp", "linear"]},
+                 {"param": "alpha", "values": five}],
+        "sample": sample,
+    }).get_json()
+    assert r["ok"], r
+    j = wait(r["data"]["job"]["id"])
+    assert j["status"] == "done", j["message"]
+    d = j["detail"]
+    assert (d["rows"], d["cols"]) == (2, 5) and len(d["cells"]) == 10
+    seeds = {d["refs"][k]["card"]["params"]["seed"] for k in "ab"}
+    seeds |= {x["card"]["params"]["seed"] for x in d["cells"] if x["card"]}
+    assert seeds == {d["seed"]}, f"a blank seed must resolve once, got {seeds}"
+    sampled = [x for x in d["cells"] if x["image"]]
+    assert len(sampled) == 6 and all(x["same_as"] is None for x in sampled)
+    assert {x["same_as"] for x in d["cells"] if not x["image"]} == {"a", "b"}
+    card = sampled[0]["card"]
+    assert card["kind"] == "merge-ladder" and "model_path" not in card
+    assert card["merge"]["model_a"] == ta and card["merge"]["method"] in ("slerp", "linear")
+    print(f"ladder job: 2 refs + 6 merges on seed {d['seed']}, ends shared, cards carry the recipe")
+
+    r = c.post("/api/craft/merge/ladder", json={
+        "model_a": ta, "model_b": tb, "refs": False,
+        "axes": [{"param": "alpha", "values": [0.3, 0.4]}], "sample": {**sample, "seed": 7},
+    }).get_json()
+    j = wait(r["data"]["job"]["id"])
+    assert j["detail"]["refs"] is None and j["detail"]["seed"] == 7
+    assert all(x["image"] for x in j["detail"]["cells"])
+    print("ladder job: a zoom without refs samples only its own steps, on the seed it was given")
+
+    bad = c.post("/api/craft/merge/ladder", json={"model_a": a, "model_b": d_bad,
+                 "axes": [{"param": "alpha", "values": [0.5]}]})
+    assert bad.status_code == 409 and not bad.get_json()["ok"], bad.get_json()
+    big = c.post("/api/craft/merge/ladder", json={"model_a": ta, "model_b": tb,
+                 "axes": [{"param": "alpha", "values": [0.5] * 30}]})
+    assert big.status_code == 422 and "25" in big.get_json()["error"], big.get_json()
+    print("ladder route: incompatible pair refused (409), oversized ladder refused (422)")
+
+    r = c.post("/api/craft/merge/ladder", json={
+        "model_a": ta, "model_b": tb, "refs": False,
+        "axes": [{"param": "alpha", "values": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]}],
+        "sample": {**sample, "steps": 30},
+    }).get_json()
+    jid = r["data"]["job"]["id"]
+    wait(jid, until=lambda j: any(x["image"] for x in j["detail"]["cells"])
+         or j["status"] != "running" and j["status"] != "queued")
+    c.post(f"/api/jobs/{jid}/cancel")
+    j = wait(jid)
+    kept = sum(bool(x["image"]) for x in j["detail"]["cells"])
+    assert j["status"] == "cancelled" and 1 <= kept < 9, (j["status"], kept)
+    print(f"ladder cancel: stopped with {kept} of 9 merges kept")
+
+
+d_bad = d
+check_ladder_plan()
+check_ladder_route()
 
 for n in ("mergeA", "mergeB", "mergeC", "merged_linear", "merged_slerp", "merged_blockwise",
           "confA", "confB", "confC", "merged_conf", "twoA", "twoB", "ends", "which"):

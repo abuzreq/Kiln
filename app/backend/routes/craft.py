@@ -236,6 +236,121 @@ def merge_check():
     return ok(check_compat(a, b))
 
 
+@bp.post("/merge/ladder")
+def merge_ladder():
+    """Sample A, B and a ladder of blends between them, all on one seed.
+
+    Body: ``model_a``, ``model_b``, ``method``, ``fixed`` (``alpha``,
+    ``block_weights``), up to two ``axes`` of ``{param, values}``, ``sample``
+    (Create's sampling fields) and ``refs`` (default true: also sample A and B,
+    which a zoom that already has them skips). A blank seed is resolved here,
+    once, so every cell and both references share it; ``detail.seed`` says
+    which. Cells are published as they finish -- see ``ladder.plan`` for their
+    shape -- and blends are never written to disk.
+    """
+    from dataclasses import replace
+
+    from app.backend.routes.perform import _params_from_body, _throttled_preview
+    from app.core.craft import ladder
+    from app.core.craft.merging import check_compat
+    from app.core.engine.lanes import enqueue, is_oom
+    from app.core.engine.sampler import pick_device, sampler
+    from utils.exceptions import IncompatibleModelError
+    from utils.imaging import build_card
+    from utils.process_control import registry
+
+    body = request.get_json(force=True, silent=True) or {}
+    (a, b) = require(body, "model_a", "model_b")
+    cells = ladder.plan(body.get("method", "linear"), body.get("fixed"), body.get("axes"))
+    compat = check_compat(a, b)
+    if not compat["compatible"]:
+        raise IncompatibleModelError("; ".join(compat["reasons"]))
+    # One image per cell: variations would multiply the cost for pictures the
+    # ladder has nowhere to show.
+    base = _params_from_body({**(body.get("sample") or {}), "model_path": a, "batch_size": 1})
+    want_refs = body.get("refs", True) is not False
+    live = (body.get("sample") or {}).get("live_preview", True) is not False
+    todo = sorted((i for i, c in enumerate(cells) if c["order"] is not None),
+                  key=lambda i: cells[i]["order"])
+    merge_of = {"model_a": a, "model_b": b}
+
+    job = registry.create("merge_ladder", status="queued")
+    job.message = "queued"
+    axes = body.get("axes") or []
+    job.detail.update({
+        "seed": base.seed,
+        "axes": axes,
+        "rows": len(axes[0]["values"]) if len(axes) == 2 else 1,
+        "cols": len(axes[-1]["values"]) if axes else 1,
+        "cells": [{**c, "image": None, "card": None} for c in cells],
+        "refs": {"a": None, "b": None} if want_refs else None,
+        "planned": len(todo) + (2 if want_refs else 0),
+        "current": None,
+    })
+
+    def sample(path, bundle=None):
+        """The final frame of one run, or None if the job was cancelled."""
+        last = None
+        for last in sampler.run(replace(base, model_path=path), bundle=bundle,
+                                cancel=job.cancelled):
+            _throttled_preview(job, last, live)
+        return None if job.cancelled() or last is None else last
+
+    def worker(job):
+        detail = job.detail
+        total, done = detail["planned"], 0
+        try:
+            steps = [("a", a, "model A"), ("b", b, "model B")] if want_refs else []
+            for key, path, label in steps:
+                detail["current"] = key
+                job.message = f"sampling {label}"
+                last = sample(path)
+                if last is None:
+                    job.finish("cancelled")
+                    return
+                detail["refs"][key] = {"image": data_url(last["image_pp"]),
+                                       "card": build_card(base, model_path=path)}
+                done += 1
+                job.progress = done / total
+            rig = None
+            for n, i in enumerate(todo, 1):
+                c = cells[i]
+                detail["current"] = i
+                job.message = f"merge {n} of {len(todo)}"
+                if rig is None:
+                    rig = ladder.LadderRig(a, b, pick_device(base.device), ema=base.ema)
+                r = c["recipe"]
+                last = sample(a, rig.apply(r["method"], r.get("alpha", 0.5),
+                                           r.get("block_weights")))
+                if last is None:
+                    job.finish("cancelled")
+                    return
+                # A rung is not a model yet, so its card names no model_path;
+                # the recipe travels in "merge" until the blend is saved.
+                detail["cells"][i] = {
+                    **detail["cells"][i],
+                    "image": data_url(last["image_pp"]),
+                    "card": build_card(base, model_path="", kind="merge-ladder",
+                                       extra={"merge": {**merge_of, **r}}),
+                }
+                done += 1
+                job.progress = done / total
+            detail["current"] = None
+            detail.pop("frame", None)
+            job.message = f"{len(todo)} merges"
+            job.progress = 1.0
+            job.finish("done")
+        except Exception as e:  # noqa: BLE001
+            if is_oom(e):
+                raise       # the lane decides: retry alone, or fail
+            log.exception("merge ladder failed")
+            job.finish("error")
+            job.message = str(e)
+
+    enqueue(job, [a, b], worker)
+    return ok({"job": job.to_dict()})
+
+
 @bp.post("/merge/preview")
 def merge_preview():
     """Write a temporary merge into the cache for same-seed A/B/merged compare."""
