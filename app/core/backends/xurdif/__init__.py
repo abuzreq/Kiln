@@ -33,6 +33,23 @@ def cosine_betas(timesteps: int):
     return torch.clip(betas, 0, 0.999).numpy()
 
 
+def _start_step(resume) -> int:
+    """The step the vendored trainer will count on from: a checkpoint's own,
+    which it restores on --load, or 0 for a new model.
+
+    Unknown counts as 0, which puts a warm-up before a run that is already past
+    it -- that is, no warm-up, exactly as before warm-ups existed.
+    """
+    if not resume:
+        return 0
+    try:
+        from app.core.continue_train import inspect_source
+
+        return int(inspect_source(resume).get("step") or 0)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def _clean_mults(raw, image_size: int) -> list:
     """Channel multipliers, validated before they can reach the subprocess.
 
@@ -238,10 +255,12 @@ class XurdifBackend(Backend):
             accum=as_int(body.get("accum", 10), "accum", 1, 128),
             lr=lr,
             # The schedule, compiled to absolute steps here so the numbers the UI
-            # previewed and the ones the trainer runs are the same numbers.
-            lr_plan=lrplan.compile_plan(
-                body.get("lr_plan") or {"preset": body.get("lr_schedule") or "constant"},
-                lr=lr, train_steps=train_steps, save_every=save_every),
+            # previewed and the ones the trainer runs are the same numbers. A run
+            # that starts from a library checkpoint counts on from that
+            # checkpoint's step, so that is where its warm-up starts.
+            lr_plan=lrplan.new_run_plan(
+                body, lr=lr, train_steps=train_steps, save_every=save_every,
+                start_step=_start_step(resume)),
             loss_type=body.get("loss_type", "l1"),
             l1w=as_float(body.get("l1w", 1.0), "l1w", 0, 100),
             ssimw=as_float(body.get("ssimw", 0.0), "ssimw", 0, 100),

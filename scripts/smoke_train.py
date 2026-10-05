@@ -203,6 +203,108 @@ def check_lr_plan():
           % (len(lrplan.PRESETS), len(refusals)))
 
 
+def check_lr_warmup():
+    """The warm-up: new runs get one, nothing that existed before changes. No GPU."""
+    import tempfile as _tf
+
+    from app.core.engine import lr_plan as lrplan
+
+    # Plans written before warm-ups could start anywhere evaluate exactly as they
+    # did: no warmup_from, the ramp counted from step 0.
+    legacy = {"version": 1, "segments": [{"from": 0, "kind": "const", "lr": 4e-4}],
+              "warmup": 100}
+    for step in (0, 1, 50, 99, 100, 5000):
+        want = 4e-4 * min(step + 1, 100) / 100
+        assert abs(lrplan.lr_at(legacy, step) - want) < 1e-18, (step, lrplan.lr_at(legacy, step))
+    # compile_plan alone still adds none, so every existing caller is unchanged
+    for pid in lrplan.PRESETS:
+        plan = lrplan.compile_plan({"preset": pid}, lr=4e-4, train_steps=280000, save_every=1000)
+        assert plan["warmup"] == 0 and "warmup_from" not in plan, plan
+
+    # A new run: 2% of its length, at most 1000 steps, none under 10 steps.
+    assert lrplan.default_warmup(280000) == 1000
+    assert lrplan.default_warmup(20000) == 400
+    assert lrplan.default_warmup(400) == 0 and lrplan.default_warmup(100) == 0
+    n = lrplan.new_run_plan({"lr_schedule": "drops-2"}, lr=4e-4, train_steps=280000,
+                            save_every=1000)
+    assert n["warmup"] == 1000 and "warmup_from" not in n, n
+    # the drops themselves are where they always were
+    assert [g["from"] for g in n["segments"]] == [0, 84000, 182000], n["segments"]
+    assert abs(lrplan.lr_at(n, 0) - 4e-7) < 1e-18 and abs(lrplan.lr_at(n, 999) - 4e-4) < 1e-18
+    for step in (1000, 50000, 84000, 182000, 279999):
+        assert lrplan.lr_at(n, step) == lrplan.lr_at(lrplan.compile_plan(
+            {"preset": "drops-2"}, lr=4e-4, train_steps=280000, save_every=1000), step), step
+    # It is over before the vendored trainer's EMA starts (step_start_ema=2000),
+    # so no xurdif snapshot is averaged over a warm-up.
+    assert lrplan.warmup_end(n) <= 2000
+    assert "after a 1k-step warm-up" in lrplan.summarize(n), lrplan.summarize(n)
+    # Asked off, it is off; asked for, it is as long as asked.
+    off = lrplan.new_run_plan({"lr_schedule": "drops-2", "lr_warmup": 0}, lr=4e-4,
+                              train_steps=280000, save_every=1000)
+    assert off["warmup"] == 0 and lrplan.lr_at(off, 0) == 4e-4, off
+    custom = lrplan.new_run_plan({"lr_plan": {"segments": [{"from": 0, "kind": "const", "lr": 1e-4}]},
+                                  "lr_warmup": 50}, lr=1e-4, train_steps=280000, save_every=1000)
+    assert custom["warmup"] == 50, custom
+
+    # From a library checkpoint the xurdif trainer counts on from the
+    # checkpoint's step, so that is where the ramp is.
+    ft = lrplan.new_run_plan({"lr_schedule": "constant"}, lr=1.5e-4, train_steps=300000,
+                             save_every=1000, start_step=280000)
+    assert ft["warmup"] == 400 and ft["warmup_from"] == 280000, ft
+    assert abs(lrplan.lr_at(ft, 280000) - 1.5e-4 / 400) < 1e-18
+    assert lrplan.lr_at(ft, 280400) == 1.5e-4 and lrplan.lr_at(ft, 0) == 1.5e-4
+    assert "from step 280k" in lrplan.summarize(ft), lrplan.summarize(ft)
+
+    # Continuing a run or giving it a new schedule keeps the warm-up it had,
+    # which is in the past -- so a continue runs on exactly as before.
+    carried = lrplan.compile_plan({"preset": "constant"}, lr=1e-4, train_steps=400000,
+                                  save_every=1000, **lrplan.carried_warmup(n))
+    assert carried["warmup"] == 1000 and lrplan.lr_at(carried, 300000) == 1e-4, carried
+    none = lrplan.compile_plan({"preset": "constant"}, lr=1e-4, train_steps=400000,
+                               save_every=1000, **lrplan.carried_warmup(legacy | {"warmup": 0}))
+    assert none["warmup"] == 0, none
+
+    # A one-click drop inside the warm-up means "this rate, now".
+    dropped = lrplan.override_from(n, 400, 1e-5)
+    assert dropped["warmup"] == 400 and lrplan.lr_at(dropped, 400) == 1e-5, dropped
+    assert abs(lrplan.lr_at(dropped, 0) - 4e-4 / 400) < 1e-18
+    after = lrplan.override_from(n, 5000, 1e-5)
+    assert after["warmup"] == 1000, after
+
+    # The watcher reports where the warm-up starts and ends, and nothing between:
+    # the vendored trainer logs a line and Kiln records an event for each report.
+    def reports(plan, steps):
+        with _tf.TemporaryDirectory() as d:
+            lrplan.write(d, plan)
+            w = lrplan.Watcher(d, 1e-4)
+            return [st for st in steps if w.lr_for(st)[1]]
+    small = lrplan.compile_plan({"segments": [{"from": 0, "kind": "const", "lr": 1e-4},
+                                              {"from": 50, "kind": "const", "lr": 1e-5}]},
+                                lr=1e-4, train_steps=100, save_every=50, warmup=20)
+    assert reports(small, range(100)) == [0, 20, 50], reports(small, range(100))
+    no_warm = dict(small, warmup=0)
+    assert reports(no_warm, range(100)) == [0, 50], reports(no_warm, range(100))
+    # a resumed run past its warm-up reports only its first step, as before
+    assert reports(small, range(60, 100)) == [60], reports(small, range(60, 100))
+    cos = lrplan.compile_plan({"preset": "cosine-floor"}, lr=4e-4, train_steps=280000,
+                              save_every=1000)
+    before = reports(cos, range(0, 280000, 50))
+    warm = reports(dict(cos, warmup=1000), range(0, 280000, 50))
+    assert warm[:2] == [0, 1000] and set(warm[2:]) <= set(before), (warm[:4], before[:4])
+
+    # On the chart a warm-up is one mark, labelled with where it is going.
+    events = [{"step": 0, "lr": 5e-6, "why": "plan", "seg": 0},
+              {"step": 20, "lr": 1e-4, "why": "plan", "seg": 0},
+              {"step": 50, "lr": 1e-5, "why": "plan", "seg": 1}]
+    marks = lrplan.marks_for_chart(events, small)
+    assert [m["label"] for m in marks] == ["warm-up to 1e-4", "1e-5"], marks
+    assert [m["label"] for m in lrplan.marks_for_chart([], small)] == ["warm-up to 1e-4", "1e-5"]
+    old = lrplan.marks_for_chart([events[0] | {"lr": 1e-4}, events[2]], no_warm)
+    assert [m["label"] for m in old] == ["1e-4", "1e-5"], old
+    print("  warm-up: 1000 steps on a 280k run (over before the EMA at 2000), 400 on 20k, "
+          "none under 500; old plans and continues unchanged")
+
+
 def check_lr_log_merge():
     """Relaunching a run must not throw away the loss history.
 
@@ -414,10 +516,12 @@ def check_xurdif(run_name: str = "xur", **over):
         "image_size": 64, "batch_size": 2, "train_steps": 100, "save_every": 50,
         "accum": 1, "diffusion_steps": 1000, "nsamples": 1, "sample_seed": 42,
         "model_name": run_name, "mults": [1, 2, 2, 2],
-        # A two-segment plan: the only end-to-end proof that the vendored step
-        # hook is installed and fires inside the real subprocess.
+        # A two-segment plan behind a warm-up: the only end-to-end proof that the
+        # vendored step hook is installed and fires inside the real subprocess,
+        # and that it ramps, then holds, then drops on time.
         "lr_plan": {"segments": [{"from": 0, "kind": "const", "lr": 1e-4},
                                  {"from": 50, "kind": "const", "lr": 1e-5}]},
+        "lr_warmup": 20,
         **over,
     }, DATASET, out_dir)
     assert cfg.image_size == 64 and cfg.save_every == 50 and cfg.mults == [1, 2, 2, 2]
@@ -451,8 +555,9 @@ def check_xurdif(run_name: str = "xur", **over):
     from app.core.engine import lr_plan as lrplan
     logged = [l for l in (job.detail.get("log") or []) if l.startswith("lr ")]
     assert any("from step 50" in l and "1e-05" in l for l in logged), logged
-    assert [e["step"] for e in lrplan.read_events(out_dir)] == [0, 50], \
-        lrplan.read_events(out_dir)
+    events = lrplan.read_events(out_dir)
+    assert [e["step"] for e in events] == [0, 20, 50], events
+    assert abs(events[0]["lr"] - 1e-4 / 20) < 1e-12 and abs(events[1]["lr"] - 1e-4) < 1e-12, events
     print("  learning-rate plan applied inside the subprocess:", logged)
 
     # and resuming the run keeps the same layout without being told it again
@@ -647,6 +752,7 @@ def main():
         check_loss_defaults()
         print("learning-rate schedules:")
         check_lr_plan()
+        check_lr_warmup()
         check_lr_log_merge()
         check_vram_estimate()
         check_vram_estimate_amp()

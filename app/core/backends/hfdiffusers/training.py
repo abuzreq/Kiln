@@ -204,8 +204,7 @@ def _lr_plan_from(body: dict, *, lr: float, train_steps: int, save_every: int) -
     """The schedule this request asks for, compiled to absolute steps."""
     from app.core.engine import lr_plan as lrplan
 
-    spec = body.get("lr_plan") or {"preset": body.get("lr_schedule") or "constant"}
-    return lrplan.compile_plan(spec, lr=lr, train_steps=train_steps, save_every=save_every)
+    return lrplan.new_run_plan(body, lr=lr, train_steps=train_steps, save_every=save_every)
 
 
 class ImageFolder:
