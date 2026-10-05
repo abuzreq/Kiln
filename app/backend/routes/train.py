@@ -530,6 +530,7 @@ def save_checkpoint(run):
         save_every=run_meta.get("save_every"),
         lr=run_meta.get("lr"),
         batch_size=run_meta.get("batch_size"),
+        lineage=library.run_lineage(run_dir),
     )
 
     meta = read_meta(dest)

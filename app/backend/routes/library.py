@@ -239,7 +239,8 @@ def download():
                 dest.unlink(missing_ok=True)
                 library.drop_sidecars(dest)
                 raise ValueError(f"downloaded file is not a valid model checkpoint: {e}") from e
-            library.ensure_card(dest, name=name, original_name=name, trained_as=[name])
+            library.ensure_card(dest, name=name, original_name=name, trained_as=[name],
+                                lineage=library.lineage("import", source=url))
             manager.clear_cache()
         except Exception as e:  # noqa: BLE001
             job.status = "error"
@@ -337,7 +338,8 @@ def download_samples():
                 part.replace(dest)
                 part = None
                 name = dest.stem
-                library.ensure_card(dest, name=name, original_name=name, trained_as=[name])
+                library.ensure_card(dest, name=name, original_name=name, trained_as=[name],
+                                    lineage=library.lineage("import", source=sm.url_for(e)))
                 saved.append(e["file"])
                 done_bytes += e["size"]
             job.status = "done"
@@ -410,7 +412,11 @@ def import_model():
             raise
         raise ValidationError(f"that file is not a model Kiln can read: {e}") from e
 
-    library.ensure_card(dest, name=name, original_name=name, trained_as=[name])
+    # A file picked from disk is a copy, so it keeps its source; an upload arrives
+    # with no path to point back to.
+    library.ensure_card(dest, name=name, original_name=name, trained_as=[name],
+                        lineage=(library.lineage("import", source=origin) if upload
+                                 else library.lineage("copy", [library.parent_ref(src, "source")])))
     manager.clear_cache()
     return ok({"path": str(dest), "name": name, "from": str(origin)})
 
@@ -476,7 +482,8 @@ def hf_import():
             )
             job.detail.update(res)
             library.ensure_card(res["path"], name=name, original_name=name,
-                                trained_as=[name], kind="import")
+                                trained_as=[name], kind="import",
+                                lineage=library.lineage("import", source=ref))
             manager.clear_cache()
             job.status = "done"
             job.progress = 1.0
@@ -526,7 +533,8 @@ def convert_model():
         return err(str(e), 400)
 
     library.ensure_card(res["path"], name=name, original_name=name,
-                        trained_as=[res["source_name"]], kind="convert")
+                        trained_as=[res["source_name"]], kind="convert",
+                        lineage=library.lineage("convert", [library.parent_ref(src, "source")]))
     manager.clear_cache()
     return ok(res)
 

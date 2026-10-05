@@ -451,6 +451,8 @@ def merge():
             original_name=out_name,
             trained_as=res.get("merged_from") or [out_name],
             kind="merge",
+            lineage=library.lineage("merge", [library.parent_ref(a, "a"),
+                                              library.parent_ref(b, "b")]),
         )
         # The ladder already rendered this exact recipe; saving that image as
         # the model's thumbnail gives it a real one for free.

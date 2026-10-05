@@ -216,6 +216,95 @@ def check_import():
     print("import: copies in, validates, is Kiln's to delete; unreadable files are named")
 
 
+def check_lineage():
+    """Every model Kiln writes names its parents, and a parent is found again
+    after a rename -- by its card's fingerprint, or failing that by hashing."""
+    import json
+
+    from app.backend.app import create_app
+
+    c = create_app().test_client()
+    models = WORKSPACE / "models"
+    models.mkdir(parents=True, exist_ok=True)
+    runs = WORKSPACE / "runs"
+
+    def run_dir(name, meta):
+        d = runs / name
+        d.mkdir(parents=True)
+        (d / "run.json").write_text(json.dumps({"name": name, **meta}), encoding="utf-8")
+        return d
+
+    parent = _tiny_checkpoint(models / "lineage-parent.pt")
+    fp = library.fingerprint(parent)
+    assert fp and len(fp) == 64
+
+    # a continue: an xurdif run that loaded a library model
+    d = run_dir("lin-run", {"resume": str(parent), "save_every": 10})
+    _tiny_checkpoint(d / "model-1.pt")
+    r = c.post("/api/runs/lin-run/checkpoints/save",
+               json={"filename": "model-1.pt", "save_as": "lin-child"})
+    assert r.status_code == 200, r.get_json()
+    child = models / "lin-child.pt"
+    card = library.read_card(child)
+    lin = card["lineage"]
+    assert lin["kind"] == "continue" and lin["run"] == "lin-run", lin
+    (p,) = lin["parents"]
+    assert p["role"] == "start" and p["path"] == str(parent) and p["fingerprint"] == fp, p
+    assert card["fingerprint"] == library.fingerprint(child), "a card's own fingerprint is stale"
+
+    # a scratch run has no parents
+    assert library.run_lineage(run_dir("lin-scratch", {"resume": ""})) == \
+        {"kind": "scratch", "parents": [], "run": "lin-scratch"}
+
+    # a Diffusers fine-tune: its snapshot folders read the base from run.json
+    d = run_dir("lin-ft", {"backend": "diffusers", "mode": "finetune", "base_model": str(parent)})
+    (d / "model-1").mkdir()
+    lin = library.lineage_of(d / "model-1")
+    assert lin["kind"] == "finetune" and lin["parents"][0]["role"] == "base", lin
+    assert lin["parents"][0]["fingerprint"] == fp, lin
+    # a base from the Hub is recorded by name, with nothing to fingerprint
+    d = run_dir("lin-hub", {"backend": "diffusers", "mode": "lora",
+                            "base_model": "google/ddpm-cifar10-32"})
+    (base,) = library.run_lineage(d)["parents"]
+    assert base["name"] == "ddpm-cifar10-32" and base["fingerprint"] is None, base
+
+    # a merge names A and B by role
+    other = _tiny_checkpoint(models / "lineage-other.pt")
+    r = c.post("/api/craft/merge", json={"model_a": str(parent), "model_b": str(other),
+                                         "out_name": "lin-merge", "method": "linear", "alpha": 0.5})
+    assert r.status_code == 200, r.get_json()
+    lin = library.read_card(models / "lin-merge.pt")["lineage"]
+    assert lin["kind"] == "merge", lin
+    assert [(q["role"], q["fingerprint"]) for q in lin["parents"]] == \
+        [("a", fp), ("b", library.fingerprint(other))], lin
+
+    # a file picked from disk is a copy that keeps its source
+    src = _tiny_checkpoint(OUTSIDE / "lin-source.pt")
+    r = c.post("/api/library/model/import", json={"path": str(src), "name": "lin-copy"})
+    assert r.status_code == 200, r.get_json()
+    lin = library.read_card(models / "lin-copy.pt")["lineage"]
+    assert lin["kind"] == "copy" and lin["parents"][0]["role"] == "source", lin
+    assert lin["parents"][0]["fingerprint"] == library.fingerprint(src) \
+        == library.read_card(models / "lin-copy.pt")["fingerprint"], "a copy differs from its source"
+
+    # the parent renamed in Kiln: found through its card
+    library.ensure_card(parent)
+    renamed = library.rename_model(str(parent), "lineage-renamed")["path"]
+    assert library.resolve_parent(p) == renamed, "a renamed parent was lost"
+    # then moved by hand, leaving its card behind: found by hashing same-size files
+    moved = models / "moved-by-hand.pt"
+    Path(renamed).rename(moved)
+    assert library.resolve_parent(p) == str(moved), "a moved parent was not found by fingerprint"
+    moved.unlink()
+    assert library.resolve_parent(p) is None, "a deleted parent should resolve to nothing"
+
+    for name in ("lin-child", "lin-merge", "lin-copy", "lineage-other"):
+        library.delete_model_files(models / f"{name}.pt")
+    shutil.rmtree(runs, ignore_errors=True)
+    print("lineage: continue, fine-tune, merge and copy name their parents; "
+          "a renamed or moved parent is found by fingerprint")
+
+
 def check_hidden_follows_rename():
     """Both path lists have to follow a rename, or the flag goes stale.
 
@@ -364,6 +453,7 @@ def main():
         check_delete_vs_hide()
         check_scan_public_hidden()
         check_import()
+        check_lineage()
         check_hidden_follows_rename()
         check_sidecars_tucked_away()
     finally:
