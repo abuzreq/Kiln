@@ -756,6 +756,63 @@ def check_align_and_ties_from_a():
 check_align_and_ties_from_a()
 
 
+def check_recipes_from_a_base():
+    """Recipes from a base, or with B lined up, keep that, and Create replays them."""
+    import time
+
+    from app.core.engine.sampler import SampleParams, sampler
+    from utils.imaging import data_url
+
+    def wait(job_id, limit=300):
+        t0 = time.time()
+        while True:
+            j = c.get(f"/api/jobs/{job_id}").get_json()["data"]
+            if j["status"] in ("done", "error", "cancelled"):
+                return j
+            assert time.time() - t0 < limit, f"job stuck: {j['status']} {j['message']}"
+            time.sleep(0.05)
+
+    def plain(path):
+        last = None
+        for last in sampler.run(SampleParams(model_path=path, image_size=32, steps=4, seed=8)):
+            pass
+        return data_url(last["image_pp"])
+
+    base, da, db = (str(workspace.models / f"{n}.pt") for n in ("relBase", "relA", "relB"))
+    ties = {"method": "ties", "alpha": 0.5, "density": 0.5, "strength": 1.0}
+    e = c.post("/api/craft/merge/recipes", json={
+        "name": "tiesRecipe", "model_a": da, "model_b": db, "model_base": base, **ties,
+    }).get_json()["data"]
+    assert e["model_base"] == base and e["density"] == 0.5 and "align" not in e, e
+    run = {"model_path": da, "image_size": 32, "steps": 4, "seed": 8, "batch_size": 1,
+           "merge": {"model_b": db, "model_base": base, **ties}, "merge_recipe": "tiesRecipe"}
+    j = wait(c.post("/api/perform/sample", json=run).get_json()["data"]["job"]["id"])
+    assert j["status"] == "done", j["message"]
+    assert j["detail"]["frame"] == plain(str(workspace.models / "tiesSaved.pt")), \
+        "a TIES recipe run does not replay the saved TIES merge"
+    assert j["detail"]["card"]["merge"]["model_base"] == base, j["detail"]["card"]["merge"]
+    bad = c.post("/api/perform/sample", json={**run, "merge": {"model_b": db, **ties}})
+    assert bad.status_code == 422, "a merge from a base was run without one"
+
+    al = {"method": "linear", "alpha": 0.4, "align": "activations"}
+    e = c.post("/api/craft/merge/recipes", json={
+        "name": "alignRecipe", "model_a": ta, "model_b": tb, **al}).get_json()["data"]
+    assert e["align"] == "activations" and "model_base" not in e, e
+    j = wait(c.post("/api/perform/sample", json={
+        "model_path": ta, "image_size": 32, "steps": 4, "seed": 8, "batch_size": 1,
+        "merge": {"model_b": tb, **al}}).get_json()["data"]["job"]["id"])
+    assert j["status"] == "done", j["message"]
+    assert j["detail"]["frame"] == plain(str(workspace.models / "alignLin.pt")), \
+        "an aligned recipe run does not replay the saved aligned merge"
+    sideways = c.post("/api/perform/sample", json={
+        **run, "merge": {"model_b": db, "model_base": base, **ties, "align": "sideways"}})
+    assert sideways.status_code == 422
+    print("recipes: TIES from a base and B lined up with A are kept, and Create replays them")
+
+
+check_recipes_from_a_base()
+
+
 def check_rebasin():
     """The attn3 permutation spec keeps a network's function, and matching finds it."""
     from app.core.craft import rebasin
@@ -816,6 +873,6 @@ for n in ("mergeA", "mergeB", "mergeC", "merged_linear", "merged_slerp", "merged
           "picked", "rawonly", "kept", "relBase", "relA", "relB", "relC", "ta", "lin", "ties",
           "tiesSaved", "graftLin", "graftFull", "graftA", "graftB", "alignLin", "plainLin"):
     (workspace.models / f"{n}.pt").unlink(missing_ok=True)
-for n in ("merged_blockwise", "half", "kept", "tiesSaved"):
+for n in ("merged_blockwise", "half", "kept", "tiesSaved", "tiesRecipe", "alignRecipe"):
     (workspace.recipes / f"{n}.json").unlink(missing_ok=True)
 print("OK")

@@ -8,7 +8,7 @@ import { selectOptions, tagStars } from "./ModelList.jsx";
 import { buildSamplePayload, parseSeed } from "../sampleSettings.jsx";
 import { presetThumb } from "../presetThumb.js";
 import {
-  MERGE_OPEN_EVENT, describeMix as describe, mixOf, pct, recipeOf, recipeSummary, round4,
+  MERGE_OPEN_EVENT, describeMix as describe, mixOf, ontoOf, pct, recipeOf, recipeSummary, round4,
   takeMergeOpen,
 } from "../mergeRecipes.js";
 
@@ -499,26 +499,43 @@ export default function Merge() {
       const thumbnail = chosenShot ? await presetThumb(chosenShot.image) : null;
       await api.post("/craft/merge/recipes", {
         name: outName, model_a: modelPath, model_b: b, ...chosen, thumbnail,
+        model_base: chosenBase || undefined, align,
       });
       toast(`Saved the recipe “${outName}”. Use it in Create with “Merge with”.`, "success");
       loadRecipes();
     } catch (e) { toast(e.message, "error"); }
   };
 
-  /** Show a saved recipe: its models, method and mix, picked on the ladder. */
+  /** Show a saved recipe: its models, method, base and mix, picked on the ladder. */
   const loadRecipe = (r) => {
     const mix = mixOf(r);
     const got = [];
-    if (r.model_a && byPath[r.model_a] && r.model_a !== modelPath) { setModelPath(r.model_a); got.push(`A ${byPath[r.model_a].name}`); }
-    if (r.model_b && byPath[r.model_b] && r.model_b !== b) { setB(r.model_b); got.push(`B ${byPath[r.model_b].name}`); }
-    setMethod(mix.method);
+    const nextA = r.model_a && byPath[r.model_a] ? r.model_a : modelPath;
+    const nextB = r.model_b && byPath[r.model_b] && r.model_b !== nextA ? r.model_b : b;
+    if (nextA !== modelPath) { setModelPath(nextA); got.push(`A ${byPath[nextA].name}`); }
+    if (nextB !== b) { setB(nextB); got.push(`B ${byPath[nextB].name}`); }
+    // Method, base and alignment are chosen per pair: set them for the pair
+    // the recipe names, which may not be the one on screen yet. A base that
+    // was A or B is kept as that role.
+    const onto = ontoOf(r);
+    const baseChoice = !isBase(mix.method) ? "" : onto === "A" ? "@a" : onto === "B" ? "@b" : (r.model_base || "");
+    setChoices((prev) => ({
+      ...prev,
+      [`${nextA}|${nextB}`]: {
+        method: mix.method, base: baseChoice,
+        align: r.align === "activations" ? "activations" : "none", by: "you",
+      },
+    }));
+    setMethodState(mix.method);
+    setBaseState(baseChoice);
     setViews((prev) => ({ ...prev, [mix.method]: START_VIEWS[mix.method] }));
     if (mix.method === "blockwise" && [0, 0.25, 0.5, 0.75, 1].includes(mix.block_weights.mid)) setMid(mix.block_weights.mid);
     setPick(mix);
     setFine(null);
     setName(r.name);
     setRecipesOpen(false);
-    const lost = r.model_b && !byPath[r.model_b] ? " Its model B is no longer in the library." : "";
+    const lost = r.model_b && !byPath[r.model_b] ? " Its model B is no longer in the library."
+      : baseChoice && !baseChoice.startsWith("@") && !byPath[baseChoice] ? " Its base is no longer in the library." : "";
     toast(`Loaded “${r.name}”${got.length ? `: ${got.join(", ")}` : ""}.${lost}`, lost ? "warn" : "success");
   };
 
@@ -1071,6 +1088,8 @@ export default function Merge() {
           pickedKey={chosen ? recipeKey(chosen) : null}
           onPick={(r) => { setPick(r); setFine(null); }}
           onClose={() => setBig(null)}
+          aligned={aligned}
+          onto={onto}
         />
       )}
     </div>
@@ -1127,10 +1146,11 @@ function SimilarityDetails({ stats, baseStats }) {
 }
 
 /** One merge, large, with A on its left and B on its right. */
-function MergeLightbox({ list, at, onAt, shotOf, refs, nameA, nameB, pickedKey, onPick, onClose }) {
+function MergeLightbox({ list, at, onAt, shotOf, refs, nameA, nameB, pickedKey, onPick, onClose,
+  aligned = false, onto = null }) {
   const r = list[at];
   const shot = shotOf(r);
-  const end = endOf(r);
+  const end = endOf(r, aligned);
   const picked = pickedKey === recipeKey(r);
   const step = (d) => { const i = at + d; if (i >= 0 && i < list.length) onAt(i); };
 
@@ -1154,7 +1174,7 @@ function MergeLightbox({ list, at, onAt, shotOf, refs, nameA, nameB, pickedKey, 
 
   return (
     <Modal
-      title={end ? `Model ${end.toUpperCase()} itself` : describe(r)}
+      title={end ? `Model ${end.toUpperCase()} itself` : describe(r, onto)}
       wide
       onClose={onClose}
       footer={(
@@ -1180,7 +1200,7 @@ function MergeLightbox({ list, at, onAt, shotOf, refs, nameA, nameB, pickedKey, 
           <div className={`merge-big-shot${picked ? " on" : ""}`}>
             {shot && <img src={shot.image} alt={end ? `Sample from model ${end.toUpperCase()}` : `Merge: ${describe(r)}`} />}
           </div>
-          <figcaption>{end ? `Model ${end.toUpperCase()}, as rendered for the ladder` : describe(r)}</figcaption>
+          <figcaption>{end ? `Model ${end.toUpperCase()}, as rendered for the ladder` : describe(r, onto)}</figcaption>
         </figure>
         {side("b", nameB)}
       </div>

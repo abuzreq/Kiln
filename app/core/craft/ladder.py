@@ -279,15 +279,17 @@ def _stamp(path: str):
         return None
 
 
-def shared_rig(path_a: str, path_b: str, device: str, ema: bool = True) -> LadderRig:
-    """The rig for A and B, reused while neither file changes."""
+def shared_rig(path_a: str, path_b: str, device: str, ema: bool = True,
+               base: str | None = None, align: str = "none", cancel=None) -> LadderRig:
+    """The rig for A and B (and a base, and an alignment), reused while no file changes."""
     global _shared
-    key = (path_a, _stamp(path_a), path_b, _stamp(path_b), device, bool(ema))
+    key = (path_a, _stamp(path_a), path_b, _stamp(path_b),
+           base, _stamp(base) if base else None, align, device, bool(ema))
     with _shared_lock:
         if _shared is not None and _shared[0] == key:
             return _shared[1]
         _shared = None              # let the old pair go before loading the new one
-        rig = LadderRig(path_a, path_b, device, ema=ema)
+        rig = LadderRig(path_a, path_b, device, ema=ema, base=base, align=align, cancel=cancel)
         _settle(device)
         _shared = (key, rig)
         return rig

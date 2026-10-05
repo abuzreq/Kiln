@@ -206,11 +206,14 @@ def _apply_frame_to_job(job, frame, *, final=False, live=True):
 def _merge_from_body(body: dict) -> dict | None:
     """The blend a run samples instead of its model, or None.
 
-    ``merge`` is ``{model_b, method, alpha, block_weights}``: B blended into the
-    run's model (``model_path``, which stays A), in memory, the way a ladder
-    rung is. ``merge_recipe`` only names the saved recipe it came from.
+    ``merge`` is ``{model_b, method, alpha | block_weights | density and
+    strength, model_base?, align?}``: B blended into the run's model
+    (``model_path``, which stays A), in memory, the way a ladder rung is. The
+    methods from a base need ``model_base``; ``align`` lines B (and the base)
+    up with A first. ``merge_recipe`` only names the saved recipe it came from.
     """
-    from app.core.craft import ladder
+    from app.core.craft import ladder, rebasin
+    from app.core.craft.merging import BASE_METHODS
     from utils.exceptions import ValidationError
 
     m = body.get("merge")
@@ -218,9 +221,26 @@ def _merge_from_body(body: dict) -> dict | None:
         return None
     if not isinstance(m, dict) or not m.get("model_b"):
         raise ValidationError("merge needs model_b, the model to blend in")
-    return {"model_b": str(m["model_b"]),
-            **ladder.recipe(m.get("method") or "linear", m.get("alpha", 0.5),
-                            m.get("block_weights"))}
+    out = {"model_b": str(m["model_b"]),
+           **ladder.recipe(m.get("method") or "linear", m.get("alpha", 0.5),
+                           m.get("block_weights"), m.get("density", 1.0),
+                           m.get("strength", 1.0))}
+    if out["method"] in BASE_METHODS:
+        if not m.get("model_base"):
+            raise ValidationError("merges from a base need a base model")
+        out["model_base"] = str(m["model_base"])
+    align = m.get("align") or "none"
+    if align not in rebasin.ALIGN:
+        raise ValidationError(f"unknown alignment: {align}")
+    if align != "none":
+        out["align"] = align
+    return out
+
+
+def _merge_models(params, merge) -> list[str]:
+    """Every model a run with this blend reads: it waits for all of them."""
+    return [params.model_path, merge["model_b"]] + (
+        [merge["model_base"]] if merge.get("model_base") else [])
 
 
 def _merge_card(params, body, merge):
@@ -233,19 +253,27 @@ def _merge_card(params, body, merge):
     return out
 
 
-def _blend_bundle(params, merge):
+def _blend_bundle(params, merge, cancel=None):
     """A in memory with B blended in, ready for sampler.run(bundle=...)."""
+    from app.core.craft import rebasin
     from app.core.craft.ladder import shared_rig
-    from app.core.craft.merging import check_compat
+    from app.core.craft.merging import check_base_compat, check_compat
     from app.core.engine.sampler import pick_device
-    from utils.exceptions import IncompatibleModelError
+    from utils.exceptions import IncompatibleModelError, ValidationError
 
-    compat = check_compat(params.model_path, merge["model_b"])
+    a, b, base = params.model_path, merge["model_b"], merge.get("model_base")
+    align = merge.get("align", "none")
+    compat = check_compat(a, b)
     if not compat["compatible"]:
         raise IncompatibleModelError("; ".join(compat["reasons"]))
-    rig = shared_rig(params.model_path, merge["model_b"], pick_device(params.device),
-                     ema=params.ema)
-    return rig.apply(merge["method"], merge.get("alpha", 0.5), merge.get("block_weights"))
+    if base:
+        check_base_compat(a, b, base)
+    if align != "none" and not rebasin.can_align(a):
+        raise ValidationError("aligning is not available for this architecture yet")
+    rig = shared_rig(a, b, pick_device(params.device), ema=params.ema,
+                     base=base, align=align, cancel=cancel)
+    return rig.apply(merge["method"], merge.get("alpha", 0.5), merge.get("block_weights"),
+                     merge.get("density", 1.0), merge.get("strength", 1.0))
 
 
 def _sample_worker(job, params, init_image, image_prompt, bends=None, mask=None,
@@ -279,8 +307,13 @@ def _sample_worker(job, params, init_image, image_prompt, bends=None, mask=None,
 
     try:
         if merge:
-            job.message = "blending"
-            bundle = _blend_bundle(params, merge)
+            from app.core.craft.rebasin import Cancelled
+
+            job.message = "aligning B to A" if merge.get("align") else "blending"
+            try:
+                bundle = _blend_bundle(params, merge, job.cancelled)
+            except Cancelled:
+                return      # the lane marks a job asked to stop as cancelled
             meta, backend = bundle["meta"], bundle["backend"]
         else:
             meta, backend = manager.describe(params.model_path)
@@ -370,8 +403,8 @@ def sample():
         init_image=init_image is not None, kind="sample",
         extra=_merge_card(params, body, merge) or None,
     )
-    # A blend reads both models, so the run waits for both to be free.
-    enqueue(job, [params.model_path, merge["model_b"]] if merge else params.model_path, partial(
+    # A blend reads both models (and a base), so the run waits for all to be free.
+    enqueue(job, _merge_models(params, merge) if merge else params.model_path, partial(
         _sample_worker, params=params, init_image=init_image, image_prompt=image_prompt,
         bends=body.get("bends"), live=_wants_live(body), merge=merge))
     return ok({"job": job.to_dict()})
@@ -402,7 +435,7 @@ def inpaint():
         init_image=True, mask=True, kind="inpaint",
         extra={"canvas_size": list(init_image.size), **_merge_card(params, body, merge)},
     )
-    enqueue(job, [params.model_path, merge["model_b"]] if merge else params.model_path, partial(
+    enqueue(job, _merge_models(params, merge) if merge else params.model_path, partial(
         _sample_worker, params=params, init_image=init_image, image_prompt=None,
         bends=body.get("bends"), mask=mask, feather=feather, live=_wants_live(body),
         merge=merge))

@@ -1,13 +1,15 @@
 // Merge recipes: a saved blend of two models, the way a bend preset is a saved
-// stack. One keeps the mix (method, alpha or block weights), the model it was
-// made on (model_a, a hint) and the partner (model_b). The Merge tab saves and
-// loads them; Create blends a recipe's B into the selected model with "Merge
-// with". Recipes saved before they kept B have no model_b.
+// stack. One keeps the mix (method, alpha or block weights, or density and
+// strength), the model it was made on (model_a, a hint), the partner
+// (model_b), and for a merge from a base the base (model_base) and whether B
+// was lined up with A first (align). The Merge tab saves and loads them;
+// Create blends a recipe's B into the selected model with "Merge with".
+// Recipes saved before they kept B have no model_b.
 
 export const STAGE_IDS = ["encoder", "mid", "decoder"];
 // The methods that merge A's and B's changes from a base model; they carry a
 // density and a strength as well as alpha, and need the base to mean anything.
-export const BASE_METHOD_IDS = ["task_arithmetic", "ties", "dare_ties"];
+export const BASE_METHOD_IDS = ["task_arithmetic", "ties"];
 export const isBaseMethod = (m) => BASE_METHOD_IDS.includes(m);
 const METHOD_LABELS = {
   linear: "Linear", slerp: "Slerp", blockwise: "Block-wise",
@@ -63,10 +65,28 @@ export function modelName(path, models) {
   return m?.name || String(path).split(/[\\/]/).pop().replace(/\.(pt|ckpt|safetensors)$/, "");
 }
 
-/** One line for a recipe: its mix and its partner. */
+/** "A" or "B" when a recipe's base is its own A or B (TIES onto that model). */
+export function ontoOf(r) {
+  if (!isBaseMethod(r.method) || !r.model_base) return null;
+  return r.model_base === r.model_a ? "A" : r.model_base === r.model_b ? "B" : null;
+}
+
+/** The base a recipe needs when its B blends into `a` with `b`: a base that
+ *  was the recipe's own A or B follows the role, any other stays that model. */
+export function recipeBase(r, a, b) {
+  if (!isBaseMethod(r.method)) return "";
+  const onto = ontoOf(r);
+  return onto === "A" ? a : onto === "B" ? b : r.model_base || "";
+}
+
+/** One line for a recipe: its mix, its partner, its base and alignment. */
 export function recipeSummary(r, models) {
-  const mix = describeMix(mixOf(r));
-  return r.model_b ? `${mix} · with ${modelName(r.model_b, models)}` : `${mix} · partner not recorded`;
+  const onto = ontoOf(r);
+  const bits = [describeMix(mixOf(r), onto)];
+  bits.push(r.model_b ? `with ${modelName(r.model_b, models)}` : "partner not recorded");
+  if (isBaseMethod(r.method) && !onto && r.model_base) bits.push(`base ${modelName(r.model_base, models)}`);
+  if (r.align && r.align !== "none") bits.push("B lined up with A");
+  return bits.join(" · ");
 }
 
 // Library ▸ Merges opens a recipe in the Merge tab, which may not be mounted

@@ -11,7 +11,7 @@ import {
 import { compositePostprocWithMask } from "../contrastMask.js";
 import { bendPresetSynopsis, bendPresetSummary } from "../bendSynopsis.js";
 import { useCreateSelection } from "../createSelection.js";
-import { describeMix, mixOf, modelName, recipeSummary } from "../mergeRecipes.js";
+import { describeMix, mixOf, modelName, ontoOf, recipeBase, recipeSummary } from "../mergeRecipes.js";
 import { selectOptions } from "../screens/ModelList.jsx";
 
 const PANEL_KEY = "kiln.createPanelTab";
@@ -51,12 +51,20 @@ function resolveBends(presets, name) {
   return presets.find((b) => b.name === name)?.bends || null;
 }
 
-/** The blend a run asks for: a recipe's mix with the B chosen for it. */
-function resolveMerge(recipes, name, b) {
+/** The blend a run asks for: a recipe's mix with the B chosen for it, blended
+ *  into `a`, with its base and alignment. */
+function resolveMerge(recipes, name, b, a) {
   const r = name ? recipes.find((x) => x.name === name) : null;
   if (!r) return null;
   const modelB = b || r.model_b || "";
-  return modelB ? { model_b: modelB, ...mixOf(r) } : { missingB: true, name };
+  if (!modelB) return { missingB: true, name };
+  const base = recipeBase(r, a, modelB);
+  return {
+    model_b: modelB,
+    ...mixOf(r),
+    ...(base ? { model_base: base } : {}),
+    ...(r.align && r.align !== "none" ? { align: r.align } : {}),
+  };
 }
 
 export default function CreatePanel() {
@@ -174,10 +182,12 @@ export default function CreatePanel() {
     setMergeCompat(null);
     if (!mergeRecipe || !modelPath || !mergeB) return undefined;
     let live = true;
-    api.post("/craft/merge/check", { model_a: modelPath, model_b: mergeB })
+    const base = recipeBase(mergeRecipe, modelPath, mergeB);
+    api.post("/craft/merge/check", { model_a: modelPath, model_b: mergeB, model_base: base || undefined })
       .then((c) => live && setMergeCompat(c)).catch(() => {});
     return () => { live = false; };
   }, [mergeRecipe, modelPath, mergeB]);
+  const mergeBase = mergeRecipe ? recipeBase(mergeRecipe, modelPath, mergeB) : "";
   const [variations, setVariations] = useState(1);
   // Job id -> the live settings it was started (or last resumed) with. Resume
   // sends only what differs, and with a queue each run has its own baseline.
@@ -378,8 +388,8 @@ export default function CreatePanel() {
       || resolveBends(bendPresets, genBendPreset);
     const mergeName = regionMergeRecipe || selection.merge || "";
     const merge = regionMergeRecipe
-      ? resolveMerge(mergeRecipes, regionMergeRecipe, sel.mergeB)
-      : resolveMerge(mergeRecipes, selection.merge, selection.mergeB);
+      ? resolveMerge(mergeRecipes, regionMergeRecipe, sel.mergeB, modelPath)
+      : resolveMerge(mergeRecipes, selection.merge, selection.mergeB, modelPath);
     if (merge?.missingB) { toast(`Pick a model B for “${merge.name}” first`, "error"); return null; }
     // Change and Feather belong to the mask. Brush hardness does not: it is a
     // tool setting, and the first cut let a hard brush force full Change and
@@ -432,7 +442,7 @@ export default function CreatePanel() {
       await runFill({ init: frame, mask, batchSize });
       return;
     }
-    const merge = resolveMerge(mergeRecipes, selection.merge, selection.mergeB);
+    const merge = resolveMerge(mergeRecipes, selection.merge, selection.mergeB, modelPath);
     if (merge?.missingB) { toast(`Pick a model B for “${merge.name}” first`, "error"); return; }
     try {
       const genBends = resolveBends(bendPresets, genBendPreset);
@@ -744,7 +754,10 @@ export default function CreatePanel() {
                 ? `Pick a model B: “${mergeRecipe.name}” does not record one, or it is no longer in the library.`
                 : mergeCompat && !mergeCompat.compatible
                   ? `Can’t blend ${modelName(mergeB, models)} into ${modelName(modelPath, models)}: ${mergeCompat.reasons.join("; ")}`
-                  : `${describeMix(mixOf(mergeRecipe))}: ${modelName(modelPath, models)} as A, ${modelName(mergeB, models)} as B, blended in memory.`
+                  : `${describeMix(mixOf(mergeRecipe), ontoOf(mergeRecipe))}: ${modelName(modelPath, models)} as A, ${modelName(mergeB, models)} as B`
+                    + (mergeBase && !ontoOf(mergeRecipe) ? `, ${modelName(mergeBase, models)} as the base` : "")
+                    + (mergeRecipe.align && mergeRecipe.align !== "none" ? ", B lined up with A first" : "")
+                    + ", blended in memory."
                     + (mergeRecipe.model_a && mergeRecipe.model_a !== modelPath
                       ? ` Saved with ${modelName(mergeRecipe.model_a, models)} as A.` : "")}
             </p>
