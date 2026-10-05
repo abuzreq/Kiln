@@ -24,17 +24,17 @@ const BASE_METHODS = [
 const isBase = (m) => BASE_METHODS.some((x) => x.id === m);
 const METHOD_IDS = [...BLEND_METHODS, ...BASE_METHODS].map((x) => x.id);
 const METHOD_TIPS = {
-  linear: "Each step is a straight weighted average. The ends are A and B themselves, so only the steps between are new merges.",
-  slerp: "Each step blends along a sphere, so layers keep their size. Slerp and linear share their ends, so comparing them only adds the steps between.",
-  blockwise: "Rows set how much of the structure (encoder) comes from B; columns do the same for texture (decoder). The diagonal mixes both evenly. The mid stage, the bottleneck between them, is on neither axis: every cell uses the one share set in “Mid stage, every cell”.",
-  task_arithmetic: "Each step adds A's and B's changes from the base in the balance shown. At strength 1 it is the linear blend; above 1 it pushes past both.",
-  ties: "Rows keep that share of each model's strongest changes from the base; where A and B pull opposite ways, the stronger change wins. Columns set the balance.",
+  linear: "A weighted average of A and B.",
+  slerp: "Blends along a sphere, so each layer keeps its size.",
+  blockwise: "Rows: B's share of the encoder (structure). Columns: B's share of the decoder (texture). The mid stage is fixed for the whole grid.",
+  task_arithmetic: "Adds A's and B's changes from the base. Strength 1 is the linear blend; above 1 pushes past both.",
+  ties: "Rows: how many of each model's strongest changes are kept. Columns: the balance. Where A and B disagree, the stronger change wins.",
 };
 /** TIES from A (or B) itself: the other model's largest differences, moved by the strength. */
 const graftTip = (from) => {
   const other = from === "A" ? "B" : "A";
-  return `Starts from ${from} and moves only the weights where ${other} differs most, by the strength shown. `
-    + `Rows set how many move; the 100% row moves them all, which is the linear ladder.`;
+  return `Starts from ${from} and moves the weights where ${other} differs most. `
+    + `Rows: how many move (100% is the linear blend). Columns: how far.`;
 };
 const STAGES = [
   { id: "encoder", label: "Encoder", role: "structure" },
@@ -109,15 +109,19 @@ function gridTag(r) {
  *  model, where the balance drops out and the strength is the axis instead. */
 function ladderFor(method, view, { steps, compare, grid, mid, strength, graft }) {
   if (view.kind === "base" && graft != null) {
+    // A refined view narrows how many move (dens, three rows that keep the
+    // picked one) or how far (str, a range).
+    const dens = view.dens || DENSITIES;
+    const strs = view.str ? linspace(view.str[0], view.str[1], 5) : GRAFT_STRENGTHS;
     return {
       method,
       fixed: { alpha: graft },
-      axes: [{ param: "density", values: DENSITIES }, { param: "strength", values: GRAFT_STRENGTHS }],
-      heads: GRAFT_STRENGTHS.map((v) => `Strength ${v}`),
+      axes: [{ param: "density", values: dens }, { param: "strength", values: strs }],
+      heads: strs.map((v) => `Strength ${+v.toFixed(2)}`),
       label: 112,
-      rows: DENSITIES.map((d) => ({
+      rows: dens.map((d) => ({
         label: `${pct(d)} moved`,
-        cells: GRAFT_STRENGTHS.map((v) => recipeOf(method, graft, null, d, v)),
+        cells: strs.map((v) => recipeOf(method, graft, null, d, v)),
       })),
     };
   }
@@ -140,7 +144,7 @@ function ladderFor(method, view, { steps, compare, grid, mid, strength, graft })
   }
   if (view.kind === "base") {
     // density rows by balance columns: five columns keep 3 x 5 under the 25-cell cap
-    const values = linspace(view.lo, view.hi, 5);
+    const values = linspace(view.lo ?? 0, view.hi ?? 1, 5);
     return {
       method,
       fixed: { strength },
@@ -200,6 +204,11 @@ function ladderFor(method, view, { steps, compare, grid, mid, strength, graft })
 }
 
 function crumbLabel(view) {
+  if (view.kind === "base" && (view.dens || view.str)) {
+    return [view.str && `strength ${+view.str[0].toFixed(2)}–${+view.str[1].toFixed(2)}`,
+      view.dens && `${pct(view.dens[0])}–${pct(view.dens[view.dens.length - 1])} moved`].filter(Boolean).join(", ");
+  }
+  if (view.kind === "base" && (view.lo ?? 0) === 0 && (view.hi ?? 1) === 1) return "Whole grid";
   if (view.kind === "1d" || view.kind === "base") return `${pct(view.lo)}–${pct(view.hi)} B`;
   if (view.kind === "mid") return "Mid stage sweep";
   if (view.kind === "strength") return "Strength sweep";
@@ -220,14 +229,14 @@ function autoName(a, b, r) {
 
 // The mid stage is the one stage the grid does not vary, so the control says
 // what it holds still and why.
-const MID_TIP = "The UNet has three stages: the encoder (structure), the mid stage "
-  + "(the bottleneck between them) and the decoder (texture). The grid varies the "
-  + "encoder down the rows and the decoder across the columns, so the mid stage "
-  + "needs one value for the whole grid: this is how much of it comes from B in "
-  + "every cell. To vary it, pick a cell and choose “Sweep the mid stage”.";
+const MID_TIP = "The grid sets B's share of the encoder (rows) and the decoder (columns). "
+  + "The mid stage, the bottleneck between them, gets this one share in every cell. "
+  + "To vary it, pick a cell and choose “Sweep the mid stage”.";
 
-/** The default method for a pair, from how related the two are (docs: merge-methods). */
-function defaultFor(check) {
+/** The default method for a pair, from how related the two are (docs: merge-methods).
+ *  A pair trained apart has its units in unrelated orders, so it is lined up
+ *  first where the architecture allows. */
+function defaultFor(check, canAlign) {
   const cos = check?.stats?.overall?.cosine;
   const sb = check?.suggested_base;
   if (sb && cos != null && cos >= SAME_ORIGIN) {
@@ -236,7 +245,9 @@ function defaultFor(check) {
     return { method: "ties", base: sb.path, why: `TIES from a base: ${how}${sb.how === "run.json" ? " (from their run's record)" : ""}.` };
   }
   if (cos != null && cos < SAME_ORIGIN) {
-    return { method: "linear", base: "", why: `Plain blend: A and B were trained apart (similarity ${fix3(cos)}), so there is no base to merge from.` };
+    return canAlign
+      ? { method: "linear", base: "", align: "activations", why: `Plain blend with B lined up with A: they were trained apart (similarity ${fix3(cos)}).` }
+      : { method: "linear", base: "", why: `Plain blend: A and B were trained apart (similarity ${fix3(cos)}), so there is no shared base.` };
   }
   return { method: "linear", base: "", why: "Plain blend: A and B share an origin, but no base is recorded for them." };
 }
@@ -331,11 +342,11 @@ export default function Merge() {
       if ((choice.base || "") !== base) setBaseState(choice.base || "");
       return;
     }
-    const d = defaultFor(check);
+    const d = defaultFor(check, modelA?.mtype === ALIGNABLE);
     setChoices((prev) => ({ ...prev, [pairKey]: { ...d, by: "default" } }));
     setMethodState(d.method);
     setBaseState(d.base);
-  }, [check, pairKey, choice, method, base, setChoices, setMethodState, setBaseState]);
+  }, [check, pairKey, choice, method, base, setChoices, setMethodState, setBaseState, modelA?.mtype]);
 
   const align = choice?.align === "activations" ? "activations" : "none";
   const aligned = align !== "none";
@@ -632,8 +643,29 @@ export default function Merge() {
 
   // Zoom and refine offers, around the picked cell when it is in this view.
   const zooms = (() => {
-    if (!pick || graft != null) return [];
+    if (!pick) return [];
     const inView = ladder.rows.some((rw) => rw.cells.some((r) => recipeKey(r, ladderBase) === recipeKey(pick, chosenBase)));
+    if (graft != null) {
+      // TIES from A or B: a closer look at how far (strength) and how many move.
+      if (!inView || view.kind !== "base") return [];
+      const strs = ladder.rows[0].cells.map((r) => r.strength);
+      const dens = ladder.rows.map((rw) => rw.cells[0].density);
+      const i = strs.indexOf(pick.strength);
+      const j = dens.indexOf(pick.density);
+      const out = [];
+      const fmt = (v) => +v.toFixed(2);
+      if (i > 0) out.push({ label: `Strength ${fmt(strs[i - 1])} to ${fmt(strs[i])}`, view: { kind: "base", dens: view.dens, str: [strs[i - 1], strs[i]] } });
+      if (i < strs.length - 1) out.push({ label: `Strength ${fmt(strs[i])} to ${fmt(strs[i + 1])}`, view: { kind: "base", dens: view.dens, str: [strs[i], strs[i + 1]] } });
+      // Halfway to each neighbour, keeping the picked row so it is not sampled again.
+      const d = dens[j];
+      const lo = j > 0 ? round4((dens[j - 1] + d) / 2) : null;
+      const hi = j < dens.length - 1 ? round4((d + dens[j + 1]) / 2) : null;
+      const rows = lo == null ? [d, round4((d + hi) / 2), hi] : hi == null ? [lo, round4((lo + d) / 2), d] : [lo, d, hi];
+      if (rows[2] - rows[0] >= 0.02) {
+        out.push({ label: `${pct(rows[0])} to ${pct(rows[2])} moved`, view: { kind: "base", dens: rows, str: view.str } });
+      }
+      return out;
+    }
     if (view.kind === "1d" || view.kind === "base") {
       if (!inView) return [];
       const vals = ladder.rows[0].cells.map((r) => r.alpha);
@@ -667,8 +699,9 @@ export default function Merge() {
   // How many merges a zoom would add, so the offer says what it costs.
   const newIn = (v) => {
     const keys = new Set();
-    ladderFor(method, v, { steps, compare, grid, mid }).rows.forEach((row) => row.cells.forEach((r) => {
-      if (!endOf(r) && !cache.cells[recipeKey(r)]) keys.add(recipeKey(r));
+    ladderFor(method, v, { steps, compare, grid, mid, strength, graft }).rows.forEach((row) => row.cells.forEach((r) => {
+      const k = recipeKey(r, ladderBase, align);
+      if (!endOf(r, aligned) && !cache.cells[k]) keys.add(k);
     }));
     return keys.size;
   };
@@ -728,11 +761,10 @@ export default function Merge() {
           >
             <div className="bend-presets">
               <p className="sub preset-note mb-0">
-                A recipe keeps the mix and both models. Load one to see it on the ladder; in Create,
-                &ldquo;Merge with&rdquo; blends its B into whatever model is selected.
+                Load one here, or use it in Canvas with &ldquo;Merge with&rdquo;.
               </p>
               {recipes.length === 0 ? (
-                <p className="sub mb-0">Nothing saved yet. Pick a mix, then &ldquo;Save recipe&rdquo; below the ladder.</p>
+                <p className="sub mb-0">None yet. Pick a mix and choose Save recipe.</p>
               ) : (
                 <ul className="preset-rows">
                   {recipes.map((r) => (
@@ -768,7 +800,7 @@ export default function Merge() {
           )}
           {canAlign && (!related || aligned) && (
             <label className="merge-inline merge-toggle"
-              title="Reorder B's units to match A's before merging (re-basin, by activations). B still draws the same pictures; models trained apart blend more cleanly this way.">
+              title="Reorder B's units to match A's before merging. B's own pictures do not change; models trained apart blend more cleanly.">
               <input type="checkbox" checked={aligned} onChange={(e) => setAlign(e.target.checked ? "activations" : "none")} />
               Line up B with A first
             </label>
@@ -841,12 +873,7 @@ export default function Merge() {
         )}
         <p className="hint mb-0">
           {onto ? graftTip(onto) : METHOD_TIPS[method]}
-          {aligned && " B is lined up with A first, so its 100% end is sampled rather than reused."}
-        </p>
-        <p className="hint mb-0">
-          No bends here: merging blends the two models&rsquo; weights, while bends rewrite activations as an
-          image forms. The ladder renders A, B and the mixes without bends, and a saved merge carries none.
-          Add bends to the new model afterwards, in Create or Bend.
+          {aligned && " B is lined up with A first."}
         </p>
 
         {viewStack.length > 1 && (
@@ -913,13 +940,13 @@ export default function Merge() {
                 })}
               </div>
               <p className="sub mb-0">
-                {fromBase ? (onto ? `At 100% moved, strength 1 is ${onto === "A" ? "B" : "A"} itself; above 1 pushes past it.`
-                  : "Every cell is the base plus a mix of A's and B's changes from it.")
+                {fromBase ? (onto ? `At 100% moved, strength 1 is ${onto === "A" ? "B" : "A"} itself.`
+                  : "Each cell is the base plus a mix of A's and B's changes.")
                   : view.kind === "mid"
-                    ? "Encoder and decoder stay at the picked cell; only the mid stage moves."
+                    ? "Only the mid stage moves."
                     : mid === 0 || mid === 1
-                      ? `The mid stage is ${pct(mid)} B in every cell, so the matching corner is ${mid === 0 ? "A" : "B"} itself.`
-                      : `The mid stage is ${pct(mid)} B in every cell, so even the corners are mixes, not A or B themselves.`}
+                      ? `Mid stage at ${pct(mid)} B everywhere, so one corner is ${mid === 0 ? "A" : "B"} itself.`
+                      : `Mid stage at ${pct(mid)} B everywhere, so no corner is exactly A or B.`}
               </p>
             </aside>
           )}
@@ -929,7 +956,6 @@ export default function Merge() {
           <div className="merge-next" role="group" aria-label={isGrid ? "Refine around the pick" : "Zoom in around the pick"}>
             <div className="merge-next-head">
               <b>{isGrid ? "Refine around your pick" : "Zoom in around your pick"}</b>
-              <span className="sub">A closer look at the mixes next to the one you picked.</span>
             </div>
             <div className="merge-next-opts">
               {zooms.map((z) => {
@@ -945,8 +971,7 @@ export default function Merge() {
           </div>
         ) : (
           <p className="merge-next-empty mb-0">
-            Click a {isGrid || view.kind === "base" ? "cell" : "step"} to pick it{view.kind === "mid" || view.kind === "strength" || graft != null ? "." : `, then ${isGrid ? "refine around it" : "zoom in around it"}.`}
-            {" "}Double-click a picture, or use its <ExpandIcon size={12} aria-hidden="true" /> button, to see it large between A and B.
+            Click a picture to pick it. Double-click, or use <ExpandIcon size={12} aria-hidden="true" />, to see it large between A and B.
           </p>
         )}
       </section>
@@ -1006,7 +1031,7 @@ export default function Merge() {
                   )}
                 </div>
                 <p className="sub mb-0">
-                  Fine-tune in 1% steps. A mix that is not on the ladder needs a preview before it can be the thumbnail.
+                  Fine-tune in 1% steps. A mix off the ladder needs a preview to have a thumbnail.
                 </p>
               </div>
             </div>
@@ -1023,10 +1048,10 @@ export default function Merge() {
           <div className="merge-keep">
             <div className="merge-keep-opt">
               <div className="merge-keep-text">
-                <b>As a recipe</b>
+                <b>As a reusable recipe</b>
                 <span className="sub">
-                  The mix and both models, no file written. Load it here again, or blend it into any
-                  model in Create ▸ Canvas with &ldquo;Merge with&rdquo;.
+                  The mix and both models, no file. Load it here, or apply it to any model in Canvas
+                  with &ldquo;Merge with&rdquo;.
                 </span>
               </div>
               <button type="button" className="btn" disabled={!chosen || !ready || saving} onClick={saveRecipe}>
@@ -1037,12 +1062,11 @@ export default function Merge() {
               <div className="merge-keep-text">
                 <b>As a model</b>
                 <span className="sub">
-                  Writes <span className="mono">{outName}.pt</span> to the library: a model of its own for
-                  Create, Bend, Sweep and training.{" "}
+                  Writes <span className="mono">{outName}.pt</span> to the library, a model of its own.{" "}
                   {!chosen ? ""
-                    : slotKept ? `No thumbnail: the samples show ${sampledSlot === "ema" ? "EMA" : "raw"} weights, which this choice keeps from model A.`
+                    : slotKept ? `No thumbnail: the samples show ${sampledSlot === "ema" ? "EMA" : "raw"} weights, which this choice keeps from A.`
                       : chosenShot ? "The picked sample becomes its thumbnail."
-                        : "Preview this mix first to give it a thumbnail."}
+                        : "Preview the mix first to give it a thumbnail."}
                 </span>
                 {showWhich && (
                   <label className="merge-inline">Weights to merge
