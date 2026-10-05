@@ -556,7 +556,24 @@ body {
   width: 22px; height: 22px; flex: none; border-radius: 6px; background: var(--bg-3);
   display: grid; place-items: center; font-size: var(--fs-xs); font-weight: 700;
 }
+.merge-badge.wide { width: auto; padding: 0 6px; }
 .merge-reasons { margin: 0; padding-left: var(--s-5); color: var(--bad); font-size: var(--fs-sm); }
+.merge-family { font-size: var(--fs-xs); color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.06em; }
+.merge-default {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); margin: 0;
+  font-size: var(--fs-sm); color: var(--text-dim);
+}
+/* How related A and B are: raw figures in one wrapping line, a legend on demand. */
+.merge-related {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px var(--s-3);
+  font-size: var(--fs-sm); font-variant-numeric: tabular-nums;
+}
+.merge-related-head { color: var(--text-dim); font-weight: 600; }
+.merge-stat .sub { margin-right: 2px; }
+.merge-legend { flex-basis: 100%; color: var(--text-dim); }
+.merge-legend summary { cursor: pointer; color: var(--text-faint); font-size: var(--fs-xs); width: max-content; }
+.merge-legend summary:hover { color: var(--text); }
+.merge-legend ul { margin: var(--s-1) 0 0; padding-left: var(--s-5); display: flex; flex-direction: column; gap: 3px; max-width: 900px; }
 .merge-ladder { display: flex; flex-direction: column; gap: var(--s-3); }
 .merge-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2) var(--s-3); }
 .merge-bar .spacer, .merge-save .spacer { flex: 1; }

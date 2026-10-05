@@ -5,6 +5,15 @@
 // with". Recipes saved before they kept B have no model_b.
 
 export const STAGE_IDS = ["encoder", "mid", "decoder"];
+// The methods that merge A's and B's changes from a base model; they carry a
+// density and a strength as well as alpha, and need the base to mean anything.
+export const BASE_METHOD_IDS = ["task_arithmetic", "ties", "dare_ties"];
+export const isBaseMethod = (m) => BASE_METHOD_IDS.includes(m);
+const METHOD_LABELS = {
+  linear: "Linear", slerp: "Slerp", blockwise: "Block-wise",
+  task_arithmetic: "Task arithmetic", ties: "TIES", dare_ties: "DARE-TIES",
+};
+export const methodLabel = (m) => METHOD_LABELS[m] || m;
 
 export const round4 = (v) => Math.round(v * 1e4) / 1e4;
 export const pct = (v) => {
@@ -13,26 +22,34 @@ export const pct = (v) => {
 };
 
 /** A blend written the way the server's ladder.recipe writes it, so keys agree. */
-export function recipeOf(method, alpha, blocks) {
+export function recipeOf(method, alpha, blocks, density = 1, strength = 1) {
   if (method === "blockwise") {
     return {
       method,
       block_weights: Object.fromEntries(STAGE_IDS.map((s) => [s, round4(blocks?.[s] ?? 0.5)])),
     };
   }
+  if (isBaseMethod(method)) {
+    return {
+      method, alpha: round4(alpha ?? 0.5), density: round4(density ?? 1), strength: round4(strength ?? 1),
+    };
+  }
   return { method, alpha: round4(alpha ?? 0.5) };
 }
 
 /** The mix a saved recipe holds, in recipeOf's shape. */
-export const mixOf = (r) => recipeOf(r.method || "linear", r.alpha, r.block_weights);
+export const mixOf = (r) => recipeOf(r.method || "linear", r.alpha, r.block_weights, r.density, r.strength);
 
-/** "Slerp · 70% A / 30% B", or the three stages of a block-wise mix. */
+/** "Slerp · 70% A / 30% B", the three stages of a block-wise mix, or a merge
+ *  from a base with its density and strength. */
 export function describeMix(r) {
   if (r.method === "blockwise") {
     const w = r.block_weights;
     return `Block-wise · B ${pct(w.encoder)} encoder, ${pct(w.mid)} mid, ${pct(w.decoder)} decoder`;
   }
-  return `${r.method === "slerp" ? "Slerp" : "Linear"} · ${pct(1 - r.alpha)} A / ${pct(r.alpha)} B`;
+  const head = `${methodLabel(r.method)} · ${pct(1 - r.alpha)} A / ${pct(r.alpha)} B`;
+  if (!isBaseMethod(r.method)) return head;
+  return `${head} · ${r.method === "task_arithmetic" ? "" : `density ${pct(r.density)} · `}strength ${r.strength}`;
 }
 
 /** A model's name from its path, for models the list may not hold. */
