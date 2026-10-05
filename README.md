@@ -104,9 +104,10 @@ swept into an animation.
 
 ### Create ▸ Merge
 
-Blend two compatible models, with per-block weights for encoder, middle and decoder. Kiln samples
-both parents and the merge on the same seed so you can see what the blend did, and the result can
-be saved as a new library model.
+Blend two compatible models: linear, slerp, or with per-block weights for encoder, middle and
+decoder. Kiln samples both parents and a ladder of blends between them on the same seed, so you
+pick a ratio by looking at the whole range. Zoom in between two steps, refine a block-wise grid,
+fine-tune the pick, and save it as a new library model with its sample as the thumbnail.
 
 ### Create ▸ Sweep
 
@@ -329,7 +330,7 @@ Windows):
 ```bash
 python scripts/smoke_engine.py            # the engine layer, on CPU
 python scripts/smoke_craft.py             # layer introspection, bend ops, hooks
-python scripts/smoke_merge.py             # two-way merge through the API
+python scripts/smoke_merge.py             # two-way merge and the blend ladder, through the API
 python scripts/smoke_diffusers.py         # the Diffusers backend, on CPU
 python scripts/smoke_train.py             # training on both engines (xurdif needs CUDA)
 python scripts/smoke_datasets.py          # linked datasets, safe delete, augmentation sets

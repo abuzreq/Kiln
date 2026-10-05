@@ -353,27 +353,6 @@ def merge_ladder():
     return ok({"job": job.to_dict()})
 
 
-@bp.post("/merge/preview")
-def merge_preview():
-    """Write a temporary merge into the cache for same-seed A/B/merged compare."""
-    from app.core.config import workspace
-    from app.core.craft.merging import merge as do_merge
-
-    body = request.get_json(force=True, silent=True) or {}
-    (a, b) = require(body, "model_a", "model_b")
-    res = do_merge(
-        a, b, "_merge_preview",
-        method=body.get("method", "linear"),
-        alpha=float(body.get("alpha", 0.5)),
-        block_weights=body.get("block_weights") or {},
-        which=body.get("which", "both"),
-        out_dir=str(workspace.cache),
-    )
-    # only the preview file changed — keep other models warm on the GPU
-    manager.evict(res["path"])
-    return ok(res)
-
-
 def _thumbnail_mismatch(res: dict, card: dict) -> str | None:
     """Why a sample can't stand for the saved merge, or None if it can.
 
