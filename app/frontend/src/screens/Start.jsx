@@ -194,7 +194,7 @@ export default function Start() {
         >
           <img src={thumbUrl(featured.path)} alt="" />
           <span className="start-featured-body">
-            <span className="section-title">From your captures</span>
+            <span className="section-title">From your creations</span>
             <b>{featured.name}</b>
             <span className="sub">{cardLabel(featured.card) || "no recorded settings"}</span>
             <span className="start-featured-cta">Pick up where this left off →</span>
