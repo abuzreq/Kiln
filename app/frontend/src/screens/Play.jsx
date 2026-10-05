@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import CreatePanel from "../components/CreatePanel.jsx";
+import { cardModelPath, restoreSelection, restoredMessage } from "../createSelection.js";
 import { BendWorkspace } from "./Craft.jsx";
 import SweepPanel from "./Sweep.jsx";
 import Merge from "./Merge.jsx";
@@ -841,14 +842,17 @@ export default function Play() {
     toast("Canvas cleared", "success");
   }, [newCanvas, canvasSize.w, canvasSize.h, toast]);
 
-  /** Put an image's recorded recipe back into the sampler (and pick its model). */
+  /** Put an image's recorded recipe back: the sampler, its model, and the bend
+   *  preset and merge recipe it was made with. */
   const applyCard = useCallback((card) => {
     const params = paramsFromCard(card);
     if (!params) { toast("This image has no Kiln settings", "warn"); return false; }
     mergeSampleParams(params);
-    if (card.model_path && card.model_path !== modelPath) setModelPath(card.model_path);
+    const path = cardModelPath(card);
+    if (path && path !== modelPath) setModelPath(path);
     setPendingCard(null);
-    toast(`Settings restored — ${cardLabel(card) || "sampler updated"}`, "success");
+    restoreSelection(card).then((missing) => (
+      toast(restoredMessage(cardLabel(card), missing), missing.length ? "warn" : "success")));
     return true;
   }, [mergeSampleParams, modelPath, setModelPath, toast]);
 

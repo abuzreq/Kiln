@@ -6,6 +6,7 @@ import OpenFolder from "../components/OpenFolder.jsx";
 import { splitModels, tagStars } from "./ModelList.jsx";
 import { modelSubtitle } from "../components/modelMeta.jsx";
 import { cardLabel, mergeStoredSampleParams, paramsFromCard } from "../sampleSettings.jsx";
+import { cardModelPath, restoreSelection, restoredMessage } from "../createSelection.js";
 import { PLAY_TAB_IDS, PREPARE_TAB_IDS, anyBusy } from "../navTabs.js";
 
 const CYCLE_MS = 2000;     // one card re-rolls every two seconds
@@ -141,13 +142,14 @@ export default function Start() {
     toast(seed == null ? `${m.name} ready in Create` : `${m.name} · seed ${seed}`, "success");
   }, [openPlay, toast]);
 
-  const restoreCapture = useCallback((it) => {
+  const restoreCapture = useCallback(async (it) => {
     const params = paramsFromCard(it.card);
     if (!params) { toast("This image has no recorded settings", "warn"); return; }
     mergeStoredSampleParams(params);
-    if (it.card.model_path) setModelPath(it.card.model_path);
+    if (cardModelPath(it.card)) setModelPath(cardModelPath(it.card));
+    const missing = await restoreSelection(it.card);
     openPlay({ tab: "create" });
-    toast(`Settings restored — ${cardLabel(it.card) || "sampler updated"}`, "success");
+    toast(restoredMessage(cardLabel(it.card), missing), missing.length ? "warn" : "success");
   }, [openPlay, setModelPath, toast]);
 
   const prepareBusy = anyBusy(busyTabs, PREPARE_TAB_IDS);

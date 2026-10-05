@@ -203,8 +203,53 @@ def _apply_frame_to_job(job, frame, *, final=False, live=True):
         job.message = f"step {frame['step']}/{frame['total']}{suffix}"
 
 
+def _merge_from_body(body: dict) -> dict | None:
+    """The blend a run samples instead of its model, or None.
+
+    ``merge`` is ``{model_b, method, alpha, block_weights}``: B blended into the
+    run's model (``model_path``, which stays A), in memory, the way a ladder
+    rung is. ``merge_recipe`` only names the saved recipe it came from.
+    """
+    from app.core.craft import ladder
+    from utils.exceptions import ValidationError
+
+    m = body.get("merge")
+    if not m:
+        return None
+    if not isinstance(m, dict) or not m.get("model_b"):
+        raise ValidationError("merge needs model_b, the model to blend in")
+    return {"model_b": str(m["model_b"]),
+            **ladder.recipe(m.get("method") or "linear", m.get("alpha", 0.5),
+                            m.get("block_weights"))}
+
+
+def _merge_card(params, body, merge):
+    """What a run's card says about its blend: the recipe and both models."""
+    if not merge:
+        return {}
+    out = {"merge": {"model_a": params.model_path, **merge}}
+    if body.get("merge_recipe"):
+        out["merge_recipe"] = str(body["merge_recipe"])
+    return out
+
+
+def _blend_bundle(params, merge):
+    """A in memory with B blended in, ready for sampler.run(bundle=...)."""
+    from app.core.craft.ladder import shared_rig
+    from app.core.craft.merging import check_compat
+    from app.core.engine.sampler import pick_device
+    from utils.exceptions import IncompatibleModelError
+
+    compat = check_compat(params.model_path, merge["model_b"])
+    if not compat["compatible"]:
+        raise IncompatibleModelError("; ".join(compat["reasons"]))
+    rig = shared_rig(params.model_path, merge["model_b"], pick_device(params.device),
+                     ema=params.ema)
+    return rig.apply(merge["method"], merge.get("alpha", 0.5), merge.get("block_weights"))
+
+
 def _sample_worker(job, params, init_image, image_prompt, bends=None, mask=None,
-                   feather=8.0, live=True):
+                   feather=8.0, live=True, merge=None):
     """Run one sample or fill in its lane.
 
     The model is described here, not in the route: on a cache miss that reads
@@ -213,7 +258,7 @@ def _sample_worker(job, params, init_image, image_prompt, bends=None, mask=None,
     """
     from app.core.engine.inpaint import run_inpaint
 
-    meta = bend_runtime = None
+    meta = bend_runtime = bundle = None
 
     def _frames(p):
         if mask is not None:
@@ -225,14 +270,20 @@ def _sample_worker(job, params, init_image, image_prompt, bends=None, mask=None,
                 cancel=job.cancelled,
                 control=job,
                 mults=meta.mults,
+                bundle=bundle,
             )
         return sampler.run(
             p, init_image, image_prompt, bend_runtime,
-            cancel=job.cancelled, control=job,
+            cancel=job.cancelled, control=job, bundle=bundle,
         )
 
     try:
-        meta, backend = manager.describe(params.model_path)
+        if merge:
+            job.message = "blending"
+            bundle = _blend_bundle(params, merge)
+            meta, backend = bundle["meta"], bundle["backend"]
+        else:
+            meta, backend = manager.describe(params.model_path)
         bend_runtime = _build_bend_runtime(bends, meta, backend)
         if mask is not None:
             # Region fill works at the canvas's own size, not params.image_size.
@@ -308,6 +359,8 @@ def sample():
     init_image = from_data_url(body["init_image"]) if body.get("init_image") else None
     image_prompt = from_data_url(body["image_prompt"]) if body.get("image_prompt") else None
 
+    merge = _merge_from_body(body)
+
     job = registry.create("sample", status="queued")
     job.message = "queued"
     job.detail["total"] = 0
@@ -315,10 +368,12 @@ def sample():
         job, params,
         bends=body.get("bends"), bend_preset=body.get("bend_preset"),
         init_image=init_image is not None, kind="sample",
+        extra=_merge_card(params, body, merge) or None,
     )
-    enqueue(job, params.model_path, partial(
+    # A blend reads both models, so the run waits for both to be free.
+    enqueue(job, [params.model_path, merge["model_b"]] if merge else params.model_path, partial(
         _sample_worker, params=params, init_image=init_image, image_prompt=image_prompt,
-        bends=body.get("bends"), live=_wants_live(body)))
+        bends=body.get("bends"), live=_wants_live(body), merge=merge))
     return ok({"job": job.to_dict()})
 
 
@@ -340,15 +395,17 @@ def inpaint():
     # model's downsampling. Surfaced so the UI can stop implying that Sample
     # settings govern fills.
     job.detail["canvas_size"] = list(init_image.size)
+    merge = _merge_from_body(body)
     _publish_card(
         job, params,
         bends=body.get("bends"), bend_preset=body.get("bend_preset"),
         init_image=True, mask=True, kind="inpaint",
-        extra={"canvas_size": list(init_image.size)},
+        extra={"canvas_size": list(init_image.size), **_merge_card(params, body, merge)},
     )
-    enqueue(job, params.model_path, partial(
+    enqueue(job, [params.model_path, merge["model_b"]] if merge else params.model_path, partial(
         _sample_worker, params=params, init_image=init_image, image_prompt=None,
-        bends=body.get("bends"), mask=mask, feather=feather, live=_wants_live(body)))
+        bends=body.get("bends"), mask=mask, feather=feather, live=_wants_live(body),
+        merge=merge))
     return ok({"job": job.to_dict()})
 
 

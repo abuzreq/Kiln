@@ -55,14 +55,23 @@ def save_bend():
         "notes": body.get("notes", ""),
         "model_hint": body.get("model_hint", ""),
     }
-    # A small picture of what the stack does, made by the page from the render
-    # it was saved from. Kept in the entry itself; anything that is not a modest
-    # image data URL is left out rather than stored.
-    thumb = body.get("thumbnail")
-    if isinstance(thumb, str) and thumb.startswith("data:image/") and len(thumb) <= 100_000:
+    thumb = _small_thumb(body.get("thumbnail"))
+    if thumb:
         payload["thumbnail"] = thumb
     entry = library.save_entry("bends", name, payload)
     return ok(entry)
+
+
+def _small_thumb(thumb):
+    """A recipe's picture, or None.
+
+    Made by the page from the render the recipe was saved from, and kept in the
+    entry itself; anything that is not a modest image data URL is left out
+    rather than stored.
+    """
+    if isinstance(thumb, str) and thumb.startswith("data:image/") and len(thumb) <= 100_000:
+        return thumb
+    return None
 
 
 @bp.delete("/bends/<name>")
@@ -234,6 +243,44 @@ def merge_check():
     body = request.get_json(force=True, silent=True) or {}
     (a, b) = require(body, "model_a", "model_b")
     return ok(check_compat(a, b))
+
+
+def _recipe_entry(body: dict, model_a: str, model_b: str, thumbnail=None) -> dict:
+    """A merge recipe as the Library keeps it: the mix, and the two models.
+
+    Like a bend preset's ``model_hint``, ``model_a`` says what it was made on;
+    used from Create, the recipe blends into whatever model is selected.
+    ``model_b`` is the partner Create offers by default.
+    """
+    from app.core.craft import ladder
+
+    entry = {
+        "model_a": model_a,
+        "model_b": model_b,
+        **ladder.recipe(body.get("method") or "linear", body.get("alpha", 0.5),
+                        body.get("block_weights")),
+        "which": body.get("which", "both"),
+        "notes": body.get("notes", ""),
+    }
+    thumb = _small_thumb(thumbnail)
+    if thumb:
+        entry["thumbnail"] = thumb
+    return entry
+
+
+@bp.post("/merge/recipes")
+def save_merge_recipe():
+    """Keep a blend of two models as a recipe, without writing a model file.
+
+    Body: ``name``, ``model_a``, ``model_b``, ``method``, ``alpha`` or
+    ``block_weights``, optional ``notes`` and ``thumbnail`` (a small data URL
+    of the picked sample).
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    (name, a, b) = require(body, "name", "model_a", "model_b")
+    entry = library.save_entry("recipes", name,
+                               _recipe_entry(body, a, b, body.get("thumbnail")))
+    return ok(entry)
 
 
 @bp.post("/merge/ladder")
@@ -422,12 +469,12 @@ def merge():
                     res["thumbnail"] = str(png)
                 except Exception as e:  # noqa: BLE001
                     log.warning("merge thumbnail not saved: %s", e)
-    # optionally record a reusable recipe
+    # optionally record a reusable recipe, the same entry "Save as recipe" makes
     if body.get("save_recipe"):
-        library.save_entry("recipes", out_name, {
-            "method": res["method"], "alpha": res["alpha"],
-            "block_weights": res.get("block_weights", {}), "which": body.get("which", "both"),
-        })
+        library.save_entry("recipes", out_name, _recipe_entry(
+            {**body, "method": res["method"], "alpha": res["alpha"],
+             "block_weights": res.get("block_weights")},
+            a, b, body.get("recipe_thumbnail")))
     return ok(res)
 
 

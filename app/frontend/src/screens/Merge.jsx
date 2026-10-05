@@ -2,10 +2,15 @@ import React, { useEffect, useMemo, useState } from "react";
 import { api, pollJob } from "../api.js";
 import { useApp } from "../state.jsx";
 import { usePlay, usePlayState } from "./playContext.jsx";
-import { Modal, Seg, TipLabel } from "../components/ui.jsx";
-import { ExpandIcon } from "../components/icons.jsx";
+import { Modal, Popover, Seg, TipLabel } from "../components/ui.jsx";
+import { BookmarkIcon, ExpandIcon } from "../components/icons.jsx";
 import { selectOptions, tagStars } from "./ModelList.jsx";
 import { buildSamplePayload, parseSeed } from "../sampleSettings.jsx";
+import { presetThumb } from "../presetThumb.js";
+import {
+  MERGE_OPEN_EVENT, describeMix as describe, mixOf, pct, recipeOf, recipeSummary, round4,
+  takeMergeOpen,
+} from "../mergeRecipes.js";
 
 const METHODS = [
   { id: "linear", label: "Linear", tip: "A straight weighted average of A's and B's weights" },
@@ -31,26 +36,9 @@ const START_VIEWS = {
 const EMPTY_CACHE = { key: "", seed: null, refs: {}, cells: {} };
 const LIVE = ["queued", "running"];
 
-const round4 = (v) => Math.round(v * 1e4) / 1e4;
 const clamp01 = (v) => Math.min(1, Math.max(0, v));
 const linspace = (lo, hi, n) =>
   Array.from({ length: n }, (_, i) => round4(lo + (hi - lo) * (i / Math.max(n - 1, 1))));
-const pct = (v) => {
-  const p = round4(v * 100);
-  return `${Number.isInteger(p) ? p : p.toFixed(1)}%`;
-};
-
-/** A blend written the way the server's ladder.recipe writes it, so keys agree. */
-function recipeOf(method, alpha, blocks) {
-  if (method === "blockwise") {
-    return {
-      method,
-      block_weights: Object.fromEntries(STAGES.map((s) => [s.id, round4(blocks?.[s.id] ?? 0.5)])),
-    };
-  }
-  return { method, alpha: round4(alpha) };
-}
-
 const recipeKey = (r) => (r.method === "blockwise"
   ? `blockwise:${STAGES.map((s) => r.block_weights[s.id]).join("/")}`
   : `${r.method}:${r.alpha}`);
@@ -61,14 +49,6 @@ function endOf(r) {
   if (vals.every((v) => v === 0)) return "a";
   if (vals.every((v) => v === 1)) return "b";
   return null;
-}
-
-function describe(r) {
-  if (r.method === "blockwise") {
-    const w = r.block_weights;
-    return `Block-wise · B ${pct(w.encoder)} encoder, ${pct(w.mid)} mid, ${pct(w.decoder)} decoder`;
-  }
-  return `${r.method === "slerp" ? "Slerp" : "Linear"} · ${pct(1 - r.alpha)} A / ${pct(r.alpha)} B`;
 }
 
 function gridTag(r) {
@@ -322,6 +302,59 @@ export default function Merge() {
   const slotKept = showWhich && which !== "both" && which !== sampledSlot;
   const outName = name ?? (chosen ? autoName(modelA, modelB, chosen) : "merge");
 
+  // Saved merge recipes: the mix and both models, like a saved bend stack.
+  const [recipes, setRecipes] = useState([]);
+  const [recipesOpen, setRecipesOpen] = useState(false);
+  const loadRecipes = () => api.get("/library/recipes").then(setRecipes).catch(() => {});
+  useEffect(() => { loadRecipes(); }, []);
+
+  const saveRecipe = async () => {
+    if (!chosen) return;
+    try {
+      // The picked sample is of exactly this mix on these two models (the cache
+      // is only valid for them), so it can stand for the recipe.
+      const thumbnail = chosenShot ? await presetThumb(chosenShot.image) : null;
+      await api.post("/craft/merge/recipes", {
+        name: outName, model_a: modelPath, model_b: b, ...chosen, thumbnail,
+      });
+      toast(`Saved the recipe “${outName}”. Use it in Create with “Merge with”.`, "success");
+      loadRecipes();
+    } catch (e) { toast(e.message, "error"); }
+  };
+
+  /** Show a saved recipe: its models, method and mix, picked on the ladder. */
+  const loadRecipe = (r) => {
+    const mix = mixOf(r);
+    const got = [];
+    if (r.model_a && byPath[r.model_a] && r.model_a !== modelPath) { setModelPath(r.model_a); got.push(`A ${byPath[r.model_a].name}`); }
+    if (r.model_b && byPath[r.model_b] && r.model_b !== b) { setB(r.model_b); got.push(`B ${byPath[r.model_b].name}`); }
+    setMethod(mix.method);
+    setViews((prev) => ({ ...prev, [mix.method]: START_VIEWS[mix.method] }));
+    if (mix.method === "blockwise" && [0, 0.25, 0.5, 0.75, 1].includes(mix.block_weights.mid)) setMid(mix.block_weights.mid);
+    setPick(mix);
+    setFine(null);
+    setName(r.name);
+    setRecipesOpen(false);
+    const lost = r.model_b && !byPath[r.model_b] ? " Its model B is no longer in the library." : "";
+    toast(`Loaded “${r.name}”${got.length ? `: ${got.join(", ")}` : ""}.${lost}`, lost ? "warn" : "success");
+  };
+
+  // Library ▸ Merges ▸ Open in Merge leaves the recipe's name for this tab.
+  useEffect(() => {
+    if (!models.length) return undefined;
+    const open = async () => {
+      const name = takeMergeOpen();
+      if (!name) return;
+      const list = await api.get("/library/recipes").catch(() => []);
+      setRecipes(list);
+      const r = list.find((x) => x.name === name);
+      if (r) loadRecipe(r);
+    };
+    open();
+    window.addEventListener(MERGE_OPEN_EVENT, open);
+    return () => window.removeEventListener(MERGE_OPEN_EVENT, open);
+  }, [models.length]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const save = async () => {
     if (!chosen) return;
     setSaving(true);
@@ -332,7 +365,9 @@ export default function Merge() {
         block_weights: chosen.block_weights || {},
         which: showWhich ? which : "both", save_recipe: keepRecipe,
         thumbnail: chosenShot?.image || null, card: chosenShot?.card || null,
+        recipe_thumbnail: keepRecipe && chosenShot ? await presetThumb(chosenShot.image) : null,
       });
+      if (keepRecipe) loadRecipes();
       setResult(res);
       if (res.thumbnail_skipped) toast(`Saved ${res.name}. No thumbnail: ${res.thumbnail_skipped}`, "warn");
       else toast(`Saved ${res.name}${res.thumbnail ? " with the picked sample as its thumbnail" : ""}`, "success");
@@ -477,6 +512,37 @@ export default function Merge() {
       <section className="card merge-ladder" aria-label="Blend ladder">
         <div className="merge-bar">
           <h3 className="mb-0">Blend ladder</h3>
+          <Popover
+            label="Saved merge recipes"
+            triggerClass="btn sm"
+            trigger={<><BookmarkIcon /> Saved{recipes.length ? ` (${recipes.length})` : ""}</>}
+            open={recipesOpen}
+            onOpenChange={setRecipesOpen}
+            panelClass="bend-presets-pop merge-recipes-pop"
+          >
+            <div className="bend-presets">
+              <p className="sub preset-note mb-0">
+                A recipe keeps the mix and both models. Load one to see it on the ladder; in Create,
+                &ldquo;Merge with&rdquo; blends its B into whatever model is selected.
+              </p>
+              {recipes.length === 0 ? (
+                <p className="sub mb-0">Nothing saved yet. Pick a mix, then &ldquo;Save recipe&rdquo; below the ladder.</p>
+              ) : (
+                <ul className="preset-rows">
+                  {recipes.map((r) => (
+                    <li key={r.name} title={`${r.name}\n${recipeSummary(r, allModels)}`}>
+                      {r.thumbnail
+                        ? <img className="preset-row-thumb" src={r.thumbnail} alt="" loading="lazy" />
+                        : <span className="preset-row-thumb" aria-hidden="true" />}
+                      <span className="preset-row-name">{r.name}</span>
+                      <span className="sub preset-row-sum">{recipeSummary(r, allModels)}</span>
+                      <button type="button" className="btn xs" onClick={() => loadRecipe(r)}>Load</button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </Popover>
           <Seg tabs={methodTabs} value={method} onChange={setMethod} ariaLabel="Merge method" size="sm" />
           {!isGrid && (
             <label className="merge-inline">Steps
@@ -685,7 +751,7 @@ export default function Merge() {
         <section className="card merge-save" aria-label="Save">
           <h3>Save the picked mix</h3>
           <div className="merge-name">
-            <input type="text" aria-label="New model name" value={outName}
+            <input type="text" aria-label="Name for the new model or recipe" value={outName}
               onChange={(e) => setName(e.target.value)} />
             <span className="sub">.pt</span>
           </div>
@@ -700,10 +766,18 @@ export default function Merge() {
           )}
           <div className="row center gap-2 wrap mt-2">
             <label className="merge-inline">
-              <input type="checkbox" checked={keepRecipe} onChange={(e) => setKeepRecipe(e.target.checked)} />
-              Keep recipe
+              <TipLabel tip="Also keep this mix as a merge recipe under the same name, as “Save recipe” does.">
+                <input type="checkbox" checked={keepRecipe} onChange={(e) => setKeepRecipe(e.target.checked)} />
+                Keep recipe
+              </TipLabel>
             </label>
             <span className="spacer" />
+            <button type="button" className="btn"
+              title="Keep the mix and both models as a recipe, without writing a model file. Create can use it with “Merge with”."
+              disabled={!chosen || !ready || saving}
+              onClick={saveRecipe}>
+              Save recipe
+            </button>
             <button type="button"
               className={`btn ${chosenShot && newCount === 0 && !saving ? "primary" : ""}`}
               disabled={!chosen || !ready || saving}

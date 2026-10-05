@@ -10,6 +10,9 @@ import {
   liveEditLabels, joinLabels } from "../sampleSettings.jsx";
 import { compositePostprocWithMask } from "../contrastMask.js";
 import { bendPresetSynopsis, bendPresetSummary } from "../bendSynopsis.js";
+import { useCreateSelection } from "../createSelection.js";
+import { describeMix, mixOf, modelName, recipeSummary } from "../mergeRecipes.js";
+import { selectOptions } from "../screens/ModelList.jsx";
 
 const PANEL_KEY = "kiln.createPanelTab";
 
@@ -48,6 +51,14 @@ function resolveBends(presets, name) {
   return presets.find((b) => b.name === name)?.bends || null;
 }
 
+/** The blend a run asks for: a recipe's mix with the B chosen for it. */
+function resolveMerge(recipes, name, b) {
+  const r = name ? recipes.find((x) => x.name === name) : null;
+  if (!r) return null;
+  const modelB = b || r.model_b || "";
+  return modelB ? { model_b: modelB, ...mixOf(r) } : { missingB: true, name };
+}
+
 export default function CreatePanel() {
   const { toast, modelPath, models, ops } = useApp();
   const {
@@ -73,7 +84,11 @@ export default function CreatePanel() {
   const [ppOn, setPpOn] = useState(false);
   const [pp, setPp] = useState(DEFAULT_PP);
   const [bendPresets, setBendPresets] = useState([]);
-  const [genBendPreset, setGenBendPreset] = useState(() => loadStored("kiln.genBendPreset"));
+  const [mergeRecipes, setMergeRecipes] = useState([]);
+  // The whole canvas's bend preset, merge recipe and B, shared with Restore.
+  const [selection, setSelection] = useCreateSelection();
+  const genBendPreset = selection.bend;
+  const setGenBendPreset = (v) => setSelection({ bend: v });
   const [srFactor, setSrFactor] = useState(2);
   const [srSharpen, setSrSharpen] = useState(0.5);
   const [srBusy, setSrBusy] = useState(false);
@@ -102,6 +117,7 @@ export default function CreatePanel() {
   // already there at two. 1 is off, which is how fills used to work.
   const resample = sel.harmonize ?? 2;
   const regionBendPreset = sel.bendPreset ?? "";
+  const regionMergeRecipe = sel.mergeRecipe ?? "";
   const maskName = activeMask?.name || "the mask";
 
   // A fill on a blank canvas has to run the whole schedule. Change works by
@@ -133,6 +149,35 @@ export default function CreatePanel() {
   const setBendValue = (v) => (
     hasMask ? setMaskParam(activeMask?.id, "bendPreset", v) : setGenBendPreset(v)
   );
+  // A merge recipe blends its B into the selected model (A), in memory. Like the
+  // bend preset, a mask carries its own and the canvas has one; choosing a
+  // recipe offers its own B, which can be swapped for another model.
+  const libraryModels = useMemo(() => (models || []).filter((m) => m.role !== "checkpoint"), [models]);
+  const hasModel = (p) => libraryModels.some((m) => m.path === p);
+  const mergeValue = hasMask ? regionMergeRecipe : selection.merge;
+  const mergeBValue = hasMask ? (sel.mergeB ?? "") : selection.mergeB;
+  const mergeRecipe = mergeRecipes.find((r) => r.name === mergeValue) || null;
+  const mergeB = mergeBValue || (mergeRecipe && hasModel(mergeRecipe.model_b) ? mergeRecipe.model_b : "");
+  const setMergeValue = (name) => {
+    const r = mergeRecipes.find((x) => x.name === name);
+    const b = r && hasModel(r.model_b) ? r.model_b : "";
+    if (hasMask) {
+      setMaskParam(activeMask?.id, "mergeRecipe", name);
+      setMaskParam(activeMask?.id, "mergeB", b);
+    } else setSelection({ merge: name, mergeB: b });
+  };
+  const setMergeB = (b) => (
+    hasMask ? setMaskParam(activeMask?.id, "mergeB", b) : setSelection({ mergeB: b })
+  );
+  const [mergeCompat, setMergeCompat] = useState(null);
+  useEffect(() => {
+    setMergeCompat(null);
+    if (!mergeRecipe || !modelPath || !mergeB) return undefined;
+    let live = true;
+    api.post("/craft/merge/check", { model_a: modelPath, model_b: mergeB })
+      .then((c) => live && setMergeCompat(c)).catch(() => {});
+    return () => { live = false; };
+  }, [mergeRecipe, modelPath, mergeB]);
   const [variations, setVariations] = useState(1);
   // Job id -> the live settings it was started (or last resumed) with. Resume
   // sends only what differs, and with a queue each run has its own baseline.
@@ -144,9 +189,13 @@ export default function CreatePanel() {
   // Region fill runs at the canvas's own resolution, so the user needs to see it.
   const canvasSize = useFrameSize(frame);
 
+  // Fetched again whenever the tab comes back: presets and recipes are saved
+  // in Bend and Merge, which are other tabs of the same screen.
   useEffect(() => {
+    if (tab !== "create") return;
     api.get("/library/bends").then(setBendPresets).catch(() => {});
-  }, []);
+    api.get("/library/recipes").then(setMergeRecipes).catch(() => {});
+  }, [tab]);
 
   useEffect(() => {
     if (tab !== "create") return undefined;
@@ -199,10 +248,6 @@ export default function CreatePanel() {
     return () => window.removeEventListener("keydown", onKey);
   }, [tab, canUndo, undo, canRedo, redo, clearMask, invertMask, activeMask, maskTool, nudgeMask,
     shapeKind, polyCount, polygonRef]);
-
-  useEffect(() => {
-    localStorage.setItem("kiln.genBendPreset", genBendPreset);
-  }, [genBendPreset]);
 
   // Post-process reads the flattened stack and writes to a display slot beside
   // it, rather than editing the stack. So it can never feed on its own output,
@@ -331,6 +376,11 @@ export default function CreatePanel() {
     const bendName = regionBendPreset || genBendPreset || "";
     const genBends = resolveBends(bendPresets, regionBendPreset)
       || resolveBends(bendPresets, genBendPreset);
+    const mergeName = regionMergeRecipe || selection.merge || "";
+    const merge = regionMergeRecipe
+      ? resolveMerge(mergeRecipes, regionMergeRecipe, sel.mergeB)
+      : resolveMerge(mergeRecipes, selection.merge, selection.mergeB);
+    if (merge?.missingB) { toast(`Pick a model B for “${merge.name}” first`, "error"); return null; }
     // Change and Feather belong to the mask. Brush hardness does not: it is a
     // tool setting, and the first cut let a hard brush force full Change and
     // zero feather on a mask that may have been painted soft.
@@ -341,6 +391,8 @@ export default function CreatePanel() {
       mask,
       bends: genBends,
       bend_preset: bendName,
+      merge,
+      merge_recipe: merge ? mergeName : "",
       feather,
       overrides: { ...mapped, resample: canResample ? resample : 1 },
       batch_size: batchSize,
@@ -380,6 +432,8 @@ export default function CreatePanel() {
       await runFill({ init: frame, mask, batchSize });
       return;
     }
+    const merge = resolveMerge(mergeRecipes, selection.merge, selection.mergeB);
+    if (merge?.missingB) { toast(`Pick a model B for “${merge.name}” first`, "error"); return; }
     try {
       const genBends = resolveBends(bendPresets, genBendPreset);
       const mapped = changeToParams(genChange, sampleParams.steps, reworkCanvas);
@@ -387,6 +441,8 @@ export default function CreatePanel() {
         model_path: modelPath,
         bends: genBends,
         bend_preset: genBendPreset || "",
+        merge,
+        merge_recipe: merge ? selection.merge : "",
         init_image: reworkCanvas ? frame : null,
         postproc: ppOn ? pp : {},
         overrides: mapped,
@@ -644,6 +700,53 @@ export default function CreatePanel() {
           {bendValue && presetByName(bendValue) && (
             <p className="hint mb-0 mono-hint">
               {bendPresetSynopsis(presetByName(bendValue), ops)}
+            </p>
+          )}
+
+          {mergeRecipes.length > 0 && (
+            <div className="row gap-2 wrap">
+              <div className="grow">
+                <Select
+                  label={hasMask ? `Merge with · ${maskName}` : "Merge with"}
+                  value={mergeValue}
+                  onChange={setMergeValue}
+                  options={[
+                    { value: "", label: "— none —", title: "Sample the selected model as it is." },
+                    ...mergeRecipes.map((r) => ({
+                      value: r.name,
+                      label: `${r.name} — ${recipeSummary(r, models)}`,
+                    })),
+                  ]}
+                  tip={hasMask
+                    ? `A merge recipe saved in Create ▸ Merge: its model B is blended into the selected model, in memory, when filling ${maskName}. Remembered with it. Bend presets apply on top.`
+                    : "A merge recipe saved in Create ▸ Merge: its model B is blended into the selected model, in memory, for the whole canvas. No model file is written. Bend presets apply on top."}
+                />
+              </div>
+              {mergeRecipe && (
+                <div className="grow">
+                  <Select
+                    label="Model B"
+                    value={mergeB}
+                    onChange={setMergeB}
+                    options={[
+                      ...(mergeB ? [] : [{ value: "", label: "— pick model B —" }]),
+                      ...selectOptions(libraryModels).filter((o) => o.value !== modelPath),
+                    ]}
+                    tip="The model blended into the selected one. A recipe starts with the B it was saved with; any model that can merge with the selected one works."
+                  />
+                </div>
+              )}
+            </div>
+          )}
+          {mergeRecipe && (
+            <p className={`hint mb-0 ${mergeCompat && !mergeCompat.compatible ? "bad" : ""}`}>
+              {!mergeB
+                ? `Pick a model B: “${mergeRecipe.name}” does not record one, or it is no longer in the library.`
+                : mergeCompat && !mergeCompat.compatible
+                  ? `Can’t blend ${modelName(mergeB, models)} into ${modelName(modelPath, models)}: ${mergeCompat.reasons.join("; ")}`
+                  : `${describeMix(mixOf(mergeRecipe))}: ${modelName(modelPath, models)} as A, ${modelName(mergeB, models)} as B, blended in memory.`
+                    + (mergeRecipe.model_a && mergeRecipe.model_a !== modelPath
+                      ? ` Saved with ${modelName(mergeRecipe.model_a, models)} as A.` : "")}
             </p>
           )}
 

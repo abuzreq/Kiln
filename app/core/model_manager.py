@@ -347,8 +347,11 @@ class ModelManager:
         return len(keys)
 
     def clear_cache(self):
+        from app.core.craft.ladder import drop_shared_rig
+
         with self._lock:
             self._cache.clear()
+        drop_shared_rig()
         _free_cuda()
 
 

@@ -107,7 +107,10 @@ swept into an animation.
 Blend two compatible models: linear, slerp, or with per-block weights for encoder, middle and
 decoder. Kiln samples both parents and a ladder of blends between them on the same seed, so you
 pick a ratio by looking at the whole range. Zoom in between two steps, refine a block-wise grid,
-fine-tune the pick, and save it as a new library model with its sample as the thumbnail.
+fine-tune the pick, and save it as a new library model with its sample as the thumbnail. Or keep
+it as a recipe, the way a bend stack is kept as a preset: the mix and both models, without a
+model file. In Canvas, "Merge with" blends a recipe's model B into the selected model in memory,
+for the whole canvas or one mask, with any bend preset on top.
 
 ### Create ▸ Sweep
 
