@@ -563,11 +563,22 @@ def check_rebasin():
     assert all(torch.equal(back[k], plain[k]) for k in plain), "matching did not undo the shuffle"
     same = rebasin.match(plain, plain, spec)
     assert all(torch.equal(same[k], torch.arange(len(same[k]))) for k in same)
+
+    # activation matching: the shuffled copy responds identically, unit for unit
+    net.cpu()
+    other.cpu()
+    ab = torch.cumprod(1 - torch.linspace(1e-4, 0.02, 1000), 0)
+    xs, ts = rebasin.noised_inputs(torch.randn(4, 3, 32, 32, generator=g), ab)
+    acts = rebasin.match_activations(rebasin.activations(net, spec, xs, ts),
+                                     rebasin.activations(other, spec, xs, ts))
+    back = rebasin.apply(shuffled, spec, acts)
+    assert all(torch.equal(back[k], plain[k]) for k in plain), "activation matching missed the shuffle"
     # through a checkpoint's own key prefix, as merges see it
     pre = {f"denoise_fn.{k}": v for k, v in plain.items()}
     pspec = rebasin.spec_for(rebasin.ATTN3, pre, prefix="denoise_fn.")
     assert len(pspec.groups) == len(spec.groups) == 23
-    print("re-basin: the attn3 spec keeps the function; matching undoes a shuffle exactly")
+    print("re-basin: the attn3 spec keeps the function; weight and activation matching both "
+          "undo a shuffle exactly")
 
 
 check_rebasin()

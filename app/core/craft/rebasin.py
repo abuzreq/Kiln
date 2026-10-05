@@ -16,11 +16,21 @@ place is a segment ``(key, axis, offset, size)``; a FiLM projection's gamma and
 beta halves are two segments of the same group, and a decoder conv's input,
 [upsampled | skip], is two segments of two different groups.
 
-Weight matching (the paper's algorithm 1) needs no data: coordinate descent over
-the groups, each step a linear assignment that maximises the summed inner
-product of A's and B's weights in every segment, with every other group's
-current permutation applied. It is deterministic -- a fixed group order, no
-random restarts -- so a merge that aligns B saves and replays the same way.
+Two ways to find the permutations, both from the paper:
+
+- **Weight matching** (algorithm 1) needs no inputs: coordinate descent over the
+  groups, each step a linear assignment that maximises the summed inner product
+  of A's and B's weights in every segment, with every other group's current
+  permutation applied. On Kiln's narrow UNets trained apart it only finds
+  chance correlations -- it scores the same on two untrained networks -- and
+  made 50% merges worse in tests.
+- **Activation matching** correlates each unit's response in A with every
+  unit's in B, on the same inputs, and solves one assignment per group. The
+  inputs can be noised samples of A's and B's own outputs (``noised_inputs``),
+  so no dataset is needed. It was the only variant that changed what a merge of
+  unrelated models looks like.
+
+Both are deterministic, so a merge that aligns B saves and replays the same way.
 
 Specs exist for the xurdif ``tinyunet_with_attention3`` architecture, whose
 channel LayerNorm has no parameters and averages over channels, so it commutes
@@ -44,6 +54,9 @@ class Segment:
 class Spec:
     #: group name -> its segments, in a fixed order (the matching order)
     groups: dict = field(default_factory=dict)
+    #: group name -> the module(s) whose output carries its units, for
+    #: activation matching; several are concatenated along the samples
+    probes: dict = field(default_factory=dict)
 
     def add(self, group: str, key: str, axis: int, offset: int = 0, size: int | None = None,
             state: dict | None = None):
@@ -158,6 +171,18 @@ def _attn3_spec(state: dict, p: str) -> Spec:
         nxt = (f"{p}ups.{j + 1}.0.weight", 0) if j + 1 < levels else (f"{p}final_conv.weight", 1)
         s.add(g, nxt[0], nxt[1], size=n)
 
+    s.probes = {"time.hidden": ["time_mlp.0"], "time.out": ["time_mlp.2"], "init": ["init_conv"],
+                "mid1": ["mid_block1"], "attn.qk": ["mid_attn.q", "mid_attn.k"],
+                "attn.proj": ["mid_attn.proj"], "mid2": ["mid_block2"]}
+    for i in range(levels):
+        s.probes[f"down{i}.block"] = [f"downs.{i}.0"]
+        s.probes[f"down{i}.down"] = [f"downs.{i}.1"]
+    for j in range(levels):
+        s.probes[f"up{j}.up"] = [f"ups.{j}.0"]
+        s.probes[f"up{j}.block"] = [f"ups.{j}.1"]
+    if set(s.probes) != set(s.groups):
+        raise ValueError(f"re-basin spec: probes {sorted(set(s.probes) ^ set(s.groups))} unmatched")
+
     for g, segs in s.groups.items():
         sizes = {seg.size for seg in segs}
         if len(sizes) != 1:
@@ -245,3 +270,66 @@ def _only(spec: Spec, key: str) -> Spec:
             if seg.key == key:
                 sub.groups.setdefault(g, []).append(seg)
     return sub
+
+
+# --- activation matching ------------------------------------------------------
+
+def noised_inputs(x0, alphas_cumprod, timesteps=(20, 100, 250, 400, 550, 700, 850, 970),
+                  seed: int = 0):
+    """Probe inputs: ``x0`` noised to each timestep, as the network sees it while sampling.
+
+    ``x0`` is best a few samples of A's and B's own outputs -- the inputs these
+    models actually meet -- so matching needs no dataset.
+    """
+    import torch
+
+    g = torch.Generator(device=x0.device).manual_seed(seed)
+    xs, ts = [], []
+    for t in timesteps:
+        a = alphas_cumprod[t].to(x0.device)
+        xs.append(a.sqrt() * x0 + (1 - a).sqrt() * torch.randn(x0.shape, generator=g, device=x0.device))
+        ts.append(torch.full((x0.shape[0],), float(t), device=x0.device))
+    return torch.cat(xs), torch.cat(ts)
+
+
+def activations(net, spec: Spec, x, t) -> dict:
+    """Each group's units as rows, every input position as a column, for one forward pass."""
+    import torch
+
+    mods = dict(getattr(net, "wrapped", net).named_modules())
+    seen = {}
+    hooks = [mods[name].register_forward_hook(
+        lambda m, i, o, name=name: seen.__setitem__(name, o.detach()))
+        for name in {n for names in spec.probes.values() for n in names}]
+    try:
+        with torch.no_grad():
+            net(x, t)
+    finally:
+        for h in hooks:
+            h.remove()
+
+    def rows(o):
+        return o.transpose(0, 1).reshape(o.shape[1], -1) if o.dim() == 4 else o.T
+
+    return {g: torch.cat([rows(seen[n]) for n in names], 1) for g, names in spec.probes.items()}
+
+
+def match_activations(acts_a: dict, acts_b: dict) -> dict:
+    """Permutations of B's units that best correlate with A's, group by group.
+
+    ``acts_*`` come from ``activations`` on the same inputs. Each unit is
+    standardised over the inputs; one linear assignment per group maximises the
+    summed correlation of matched pairs.
+    """
+    import torch
+    from scipy.optimize import linear_sum_assignment
+
+    perms = {}
+    for g, a in acts_a.items():
+        b = acts_b[g]
+        a = (a - a.mean(1, keepdim=True)) / a.std(1, keepdim=True).clamp_min(1e-8)
+        b = (b - b.mean(1, keepdim=True)) / b.std(1, keepdim=True).clamp_min(1e-8)
+        corr = (a.double() @ b.double().T / a.shape[1]).cpu().numpy()
+        _, cols = linear_sum_assignment(corr, maximize=True)
+        perms[g] = torch.as_tensor(cols, dtype=torch.long)
+    return perms
