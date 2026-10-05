@@ -7,6 +7,7 @@ import Play from "./screens/Play.jsx";
 import LibraryDrawer from "./screens/Library.jsx";
 import WorkspaceModal from "./components/WorkspaceModal.jsx";
 import DiscoveriesDrawer from "./components/DiscoveriesDrawer.jsx";
+import KilnMark from "./components/KilnMark.jsx";
 import { Seg, SubNav, Tooltip } from "./components/ui.jsx";
 import { MODE_TABS, PREPARE_TABS, PLAY_TABS, PREPARE_TAB_IDS, PLAY_TAB_IDS, anyBusy } from "./navTabs.js";
 
@@ -81,6 +82,7 @@ function TrainingBadge() {
 function Shell() {
   const {
     appMode, setAppMode, prepareTab, setPrepareTab, playTab, setPlayTab, busyTabs,
+    models, modelsPartial,
   } = useApp();
   const [assets, setAssets] = useState(false);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
@@ -94,6 +96,11 @@ function Shell() {
     prepare: anyBusy(busyTabs, PREPARE_TAB_IDS),
     play: anyBusy(busyTabs, PLAY_TAB_IDS),
   };
+  // The mark is a status light: firing while anything runs, cold until the
+  // finished model list says there is nothing yet, warm otherwise.
+  const markState = Object.values(busyTabs).some(Boolean) ? "firing"
+    : models && !modelsPartial && models.length === 0 ? "cold"
+    : "warm";
 
   // Panes stay mounted once visited: unmounting Play threw away the canvas,
   // the mask, the init image and the whole Results history, so a quick look at
@@ -115,7 +122,7 @@ function Shell() {
             aria-label="Kiln — back to your hub"
             aria-current={onStart ? "page" : undefined}
           >
-            <span className="logo" />
+            <KilnMark state={markState} size={24} />
             <h1>Kiln</h1>
           </button>
         </Tooltip>

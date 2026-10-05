@@ -69,9 +69,24 @@ body {
   background: none; border: 0; padding: 0; font: inherit; color: inherit;
   cursor: pointer;
 }
-.brand .logo {
-  width: 20px; height: 20px; border-radius: 5px; flex-shrink: 0;
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+
+/* The mark (components/KilnMark.jsx). The skips flow left to right, encoder
+   to decoder: slowly when idle, fast while anything runs, not at all before
+   anything has been made. */
+.kiln-mark { display: block; flex-shrink: 0; overflow: visible; }
+.kiln-mark-blocks { fill: var(--text); }
+.kiln-mark-skip { animation: kiln-flow 2.6s linear infinite, kiln-heat 4s ease-in-out infinite; }
+.kiln-mark.small .kiln-mark-skip { animation-name: kiln-flow-small, kiln-heat; }
+.kiln-mark.firing { filter: drop-shadow(0 0 3px rgba(255, 122, 69, 0.6)); }
+.kiln-mark.firing .kiln-mark-skip { animation-duration: 0.8s, 1.4s; }
+.kiln-mark.cold .kiln-mark-blocks { fill: var(--text-faint); opacity: 0.55; }
+.kiln-mark.cold .kiln-mark-skip { stroke: var(--line); animation: none; }
+/* Two whole dash periods (dash + gap) per cycle, so the loop has no seam. */
+@keyframes kiln-flow { to { stroke-dashoffset: -4.4; } }
+@keyframes kiln-flow-small { to { stroke-dashoffset: -8.4; } }
+@keyframes kiln-heat { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .kiln-mark-skip { animation: none !important; }
 }
 .brand h1 { font-size: 14px; margin: 0; letter-spacing: 0.4px; font-weight: 700; }
 .brand:hover h1 { color: var(--accent); }
