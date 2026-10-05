@@ -622,7 +622,58 @@ body {
 .merge-shot-sq img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .merge-shot-sq img.live { opacity: 0.8; }
 .merge-shot-sq.small { width: 112px; flex: none; }
-.merge-zoom { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
+/* A cell's enlarge button sits on its picture; it shows on hover or focus, and
+   stays faintly visible so touch users can find it. */
+.merge-cell-wrap { position: relative; min-width: 0; }
+.merge-cell-wrap > .merge-cell { width: 100%; }
+.merge-cell-enlarge {
+  position: absolute; top: 8px; right: 8px; display: grid; place-items: center;
+  width: 26px; height: 26px; padding: 0; border-radius: 6px; cursor: pointer;
+  background: rgba(0, 0, 0, 0.55); color: #fff; border: 1px solid rgba(255, 255, 255, 0.25);
+  opacity: 0.35; transition: opacity 0.12s;
+}
+.merge-cell-wrap:hover .merge-cell-enlarge, .merge-cell-enlarge:focus-visible { opacity: 1; }
+.merge-enlarge-thumb { padding: 0; cursor: zoom-in; }
+.merge-enlarge-thumb:hover { border-color: var(--text-faint); }
+/* The zoom/refine offers are the next step after a pick, so they read as one. */
+.merge-next {
+  display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-3) var(--s-4);
+  background: var(--accent-soft); border: 1px solid var(--accent); border-radius: var(--radius-sm);
+}
+.merge-next-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px var(--s-3); }
+.merge-next-head b { font-size: var(--fs-lg); }
+.merge-next-opts { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+.merge-next-btn {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  padding: 10px 16px; min-width: 200px; background: var(--bg-1); text-align: left;
+}
+.merge-next-btn:hover { border-color: var(--accent); }
+.merge-next-label { font-size: var(--fs-card); font-weight: 600; }
+.merge-next-empty { font-size: var(--fs-card); color: var(--text-dim); }
+.merge-next-empty .ico { vertical-align: -1px; }
+/* Enlarged: A | merge | B, the merge biggest. */
+.modal.modal-wide:has(.merge-big) { width: min(1400px, 96vw); }
+.merge-big { display: grid; grid-template-columns: 1fr 1.6fr 1fr; gap: var(--s-4); align-items: center; }
+.merge-big figure { margin: 0; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.merge-big-shot {
+  aspect-ratio: 1; width: 100%; max-height: calc(92vh - 190px); margin: 0 auto;
+  border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-2);
+  border: 1px solid var(--line); display: grid; place-items: center;
+}
+.merge-big-shot.on { border: 2px solid var(--accent); }
+.merge-big-shot img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.merge-big figcaption {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  font-size: var(--fs-md); color: var(--text-dim); text-align: center; min-width: 0;
+}
+.merge-big-mid figcaption { color: var(--text); font-weight: 600; font-size: var(--fs-card); }
+.merge-big-side figcaption { overflow-wrap: anywhere; }
+.modal-foot .spacer { flex: 1; }
+.merge-big-count { align-self: center; font-variant-numeric: tabular-nums; }
+@media (max-width: 640px) {
+  .merge-big { grid-template-columns: 1fr 1fr; }
+  .merge-big-mid { grid-column: 1 / -1; order: -1; }
+}
 .merge-bottom { display: flex; flex-wrap: wrap; gap: var(--s-3); align-items: stretch; }
 .merge-picked { flex: 2 1 480px; min-width: 0; display: flex; flex-direction: column; gap: var(--s-3); }
 .merge-save { flex: 1 1 320px; min-width: 0; }
