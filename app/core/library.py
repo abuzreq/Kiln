@@ -458,7 +458,159 @@ def ensure_card(pt: str | Path, **fields) -> dict:
         if v is not None:
             card[k] = v
     card.setdefault("name", pt.stem)
+    _stamp_fingerprint(pt, card)
     return write_card(pt, card)
+
+
+# --- lineage ----------------------------------------------------------------
+# Where a model's weights came from: a lineage on its card names its parents,
+# each by path and by fingerprint. The path is how it was found; the fingerprint
+# (SHA-256 of the weights file) is how it is found again after a rename or a
+# copy. The Merge tab uses it to default a base; a lineage view will draw it.
+#
+# kind      how the weights came to be: scratch, continue, finetune, lora,
+#           merge, convert, copy, import
+# parents   [{role, path, name, fingerprint, size, step}], role being start
+#           (continue), base (finetune, lora, a merge's base), a / b (merge),
+#           or source (convert, copy)
+
+
+def weights_file(path: str | Path) -> Path | None:
+    """The file a model's weights live in: the .pt itself, or a Diffusers repo's UNet."""
+    p = Path(path)
+    if p.is_file():
+        return p
+    if p.is_dir():
+        for name in ("diffusion_pytorch_model.safetensors", "diffusion_pytorch_model.bin"):
+            for f in (p / name, p / "unet" / name):
+                if f.is_file():
+                    return f
+    return None
+
+
+def file_stamp(f: Path) -> list:
+    st = f.stat()
+    return [st.st_size, st.st_mtime_ns]
+
+
+def fingerprint(path: str | Path, card: dict | None = None) -> str | None:
+    """SHA-256 of a model's weights, from its card while the file is unchanged."""
+    f = weights_file(path)
+    if f is None:
+        return None
+    card = read_card(path) if card is None else card
+    if card.get("fingerprint") and card.get("fingerprint_stamp") == file_stamp(f):
+        return card["fingerprint"]
+    from app.core.sample_models import sha256_of
+
+    return sha256_of(f)
+
+
+def _stamp_fingerprint(pt: Path, card: dict):
+    """Keep a card's own fingerprint current; hashing only when the file changed."""
+    f = weights_file(pt)
+    if f is None:
+        return
+    stamp = file_stamp(f)
+    if card.get("fingerprint_stamp") != stamp or not card.get("fingerprint"):
+        card["fingerprint"] = fingerprint(pt, card={})
+        card["fingerprint_stamp"] = stamp
+
+
+def parent_ref(path: str | Path, role: str, step: int | None = None) -> dict:
+    """One parent as a lineage records it.
+
+    ``path`` may name something that is not a file -- a Diffusers base can be a
+    Hub id -- in which case it is recorded by name only, with no fingerprint.
+    """
+    p = Path(str(path))
+    card = read_card(p) if p.exists() else {}
+    f = weights_file(p)
+    return {
+        "role": role,
+        "path": str(path),
+        "name": card.get("name") or (p.name if p.is_dir() else p.stem),
+        "fingerprint": fingerprint(p, card) if f is not None else None,
+        "size": f.stat().st_size if f is not None else None,
+        "step": step if step is not None else card.get("step"),
+    }
+
+
+def lineage(kind: str, parents: list | None = None, **extra) -> dict:
+    return {"kind": kind, "parents": list(parents or []),
+            **{k: v for k, v in extra.items() if v is not None}}
+
+
+def run_lineage(run_dir: str | Path) -> dict | None:
+    """What a training run started from, read from its run.json.
+
+    xurdif records the file it loaded as ``resume``; a Diffusers run records
+    its ``mode`` and ``base_model``. None when the folder is not a run.
+    """
+    from app.core.engine.trainer import run_meta
+
+    run_dir = Path(run_dir)
+    if not (run_dir / "run.json").is_file():
+        return None
+    meta = run_meta(run_dir)
+    run = meta.get("name") or run_dir.name
+    if meta.get("backend") == "diffusers":
+        mode = meta.get("mode") or "scratch"
+        base = meta.get("base_model")
+        if mode in ("finetune", "lora") and base:
+            return lineage(mode, [parent_ref(base, "base")], run=run)
+        return lineage("scratch", run=run)
+    start = meta.get("resume")
+    if start:
+        return lineage("continue", [parent_ref(start, "start")], run=run)
+    return lineage("scratch", run=run)
+
+
+def lineage_of(path: str | Path) -> dict:
+    """A model's lineage: from its card, else from the run it is a snapshot of."""
+    recorded = read_card(path).get("lineage")
+    if recorded:
+        return recorded
+    return run_lineage(Path(path).parent) or lineage("unknown")
+
+
+def _library_model_paths() -> list[Path]:
+    folders = [workspace.models]
+    if workspace.projects.is_dir():
+        folders += [p / "models" for p in workspace.projects.iterdir() if p.is_dir()]
+    out = []
+    for folder in folders:
+        if folder.is_dir():
+            out += [f for f in folder.iterdir()
+                    if not f.name.startswith(".") and (f.suffix == ".pt" or f.is_dir())]
+    return out
+
+
+def resolve_parent(parent: dict, candidates: list | None = None) -> str | None:
+    """Where a recorded parent is now: its path, or a file with its fingerprint.
+
+    Candidates default to Kiln's model folders. A candidate's card fingerprint
+    is trusted while its file is unchanged; otherwise only files of the
+    parent's size are hashed, so a search reads few files.
+    """
+    fp = parent.get("fingerprint")
+    p = parent.get("path")
+    if p and weights_file(p) is not None and (not fp or fingerprint(p) == fp):
+        return str(p)
+    if not fp:
+        return None
+    for c in (_library_model_paths() if candidates is None else candidates):
+        f = weights_file(c)
+        if f is None:
+            continue
+        card = read_card(c)
+        if card.get("fingerprint_stamp") == file_stamp(f):
+            if card.get("fingerprint") == fp:
+                return str(c)
+            continue
+        if parent.get("size") in (None, f.stat().st_size) and fingerprint(c, {}) == fp:
+            return str(c)
+    return None
 
 
 def sibling_thumb(src: str | Path) -> Path | None:

@@ -226,6 +226,10 @@ class XurdifBackend(Backend):
     def load_slot(self, net, state: dict) -> None:
         net.load_state_dict(loader.unet_state_of(state), strict=False)
 
+    def net_state(self, state: dict) -> dict:
+        # GaussianDiffusion's schedule buffers sit outside denoise_fn.
+        return {k: v for k, v in state.items() if k.startswith(loader.DENOISE_PREFIX)}
+
     # --- training -----------------------------------------------------
     # "continue" is xurdif's own resume: same architecture, all weights, via
     # the trainer's --load. It is not a Diffusers-style fine-tune and is

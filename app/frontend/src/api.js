@@ -110,9 +110,19 @@ export const thumbUrl = (path) => `/api/thumb?path=${encodeURIComponent(path)}`;
 export async function pollJob(jobId, onUpdate, interval = 350, { delta = false } = {}) {
   let since = null;
   return new Promise((resolve, reject) => {
+    // A fetch the browser drops (a busy tab, a large poll) is not the job
+    // failing: try again a few times before giving up on it.
+    let misses = 0;
     const tick = async () => {
+      let job;
       try {
-        const job = await api.get(since == null ? `/jobs/${jobId}` : `/jobs/${jobId}?since=${since}`);
+        job = await api.get(since == null ? `/jobs/${jobId}` : `/jobs/${jobId}?since=${since}`);
+      } catch (e) {
+        if (e instanceof TypeError && ++misses <= 3) return setTimeout(tick, interval * 2 ** misses);
+        return reject(e);
+      }
+      misses = 0;
+      try {
         if (!job) return reject(new Error("job disappeared"));
         if (delta && job.detail?.rev != null) since = job.detail.rev;
         onUpdate && onUpdate(job);
