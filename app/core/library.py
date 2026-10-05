@@ -488,7 +488,7 @@ def weights_file(path: str | Path) -> Path | None:
     return None
 
 
-def _stamp(f: Path) -> list:
+def file_stamp(f: Path) -> list:
     st = f.stat()
     return [st.st_size, st.st_mtime_ns]
 
@@ -499,7 +499,7 @@ def fingerprint(path: str | Path, card: dict | None = None) -> str | None:
     if f is None:
         return None
     card = read_card(path) if card is None else card
-    if card.get("fingerprint") and card.get("fingerprint_stamp") == _stamp(f):
+    if card.get("fingerprint") and card.get("fingerprint_stamp") == file_stamp(f):
         return card["fingerprint"]
     from app.core.sample_models import sha256_of
 
@@ -511,7 +511,7 @@ def _stamp_fingerprint(pt: Path, card: dict):
     f = weights_file(pt)
     if f is None:
         return
-    stamp = _stamp(f)
+    stamp = file_stamp(f)
     if card.get("fingerprint_stamp") != stamp or not card.get("fingerprint"):
         card["fingerprint"] = fingerprint(pt, card={})
         card["fingerprint_stamp"] = stamp
@@ -604,7 +604,7 @@ def resolve_parent(parent: dict, candidates: list | None = None) -> str | None:
         if f is None:
             continue
         card = read_card(c)
-        if card.get("fingerprint_stamp") == _stamp(f):
+        if card.get("fingerprint_stamp") == file_stamp(f):
             if card.get("fingerprint") == fp:
                 return str(c)
             continue

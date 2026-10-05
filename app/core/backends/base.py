@@ -279,6 +279,15 @@ class Backend:
         """
         raise NotImplementedError
 
+    def net_state(self, state: dict) -> dict:
+        """The network's own tensors in one slot, keys unchanged.
+
+        Leaves out anything a checkpoint stores beside the network -- a fixed
+        noise schedule, say -- which is the same in every model and would make
+        any two look alike.
+        """
+        return state
+
     # --- training -----------------------------------------------------
     #: Training modes this backend understands, e.g. ("scratch", "finetune").
     training_modes: tuple[str, ...] = ()

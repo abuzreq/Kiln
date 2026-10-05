@@ -238,11 +238,30 @@ def bend_sweep():
 # --- 2-way merge ------------------------------------------------------
 @bp.post("/merge/check")
 def merge_check():
+    """Whether two models can merge; with ``stats``, how related they are.
+
+    ``stats`` adds the weight figures from ``relatedness.stats`` (per stage,
+    and against ``model_base`` when one is given) and ``suggested_base``, the
+    nearest model both descend from according to their lineage. Opt-in: it
+    reads both checkpoints, where the plain check reads only their metadata.
+    """
+    from app.core.craft import relatedness
     from app.core.craft.merging import check_compat
 
     body = request.get_json(force=True, silent=True) or {}
     (a, b) = require(body, "model_a", "model_b")
-    return ok(check_compat(a, b))
+    res = check_compat(a, b)
+    base = body.get("model_base") or None
+    if base:
+        for other in (a, b):
+            c = check_compat(other, base)
+            if not c["compatible"]:
+                res["compatible"] = False
+                res["reasons"] = res["reasons"] + [f"base: {r}" for r in c["reasons"]]
+    if body.get("stats") and res["compatible"]:
+        res["stats"] = relatedness.stats(a, b, base, ema=body.get("ema", True) is not False)
+        res["suggested_base"] = relatedness.suggest_base(a, b)
+    return ok(res)
 
 
 def _recipe_entry(body: dict, model_a: str, model_b: str, thumbnail=None) -> dict:

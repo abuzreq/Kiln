@@ -447,9 +447,89 @@ cell = check_ladder_route()
 check_save_from_ladder(cell)
 check_recipes(cell)
 
+
+def make_derived(name, base_path, seed, scale=0.05):
+    """A model trained on from ``base_path``: its weights plus a small seeded change."""
+    data = _t.load(base_path, map_location="cpu", weights_only=False)
+    g = torch.Generator().manual_seed(seed)
+    for slot in ("model", "ema"):
+        data[slot] = {k: (v + scale * v.std() * torch.randn(v.shape, generator=g)
+                          if v.is_floating_point() and v.numel() > 1 else v)
+                      for k, v in data[slot].items()}
+    p = workspace.models / f"{name}.pt"
+    _t.save(data, p)
+    return str(p)
+
+
+def check_relatedness():
+    """The figures tell derived pairs from independent ones, and lineage names the base."""
+    import numpy as np
+
+    from app.core import library
+    from app.core.craft import relatedness
+
+    base = make_two_slot("relBase", 21)
+    da, db = make_derived("relA", base, 22), make_derived("relB", base, 23)
+
+    near = relatedness.stats(da, db)
+    apart = relatedness.stats(ta, tb)
+    assert near["overall"]["cosine"] > 0.9, near["overall"]
+    assert abs(apart["overall"]["cosine"]) < 0.1, apart["overall"]
+    assert set(near["stages"]) == {"encoder", "mid", "decoder", "other"}, near["stages"]
+    n_net = sum(v.numel() for k, v in slots_of(da)["ema"].items() if k.startswith("denoise_fn."))
+    assert near["overall"]["params"] == n_net, "schedule buffers were counted as weights"
+    print(f"  cosine: derived pair {near['overall']['cosine']}, "
+          f"independent pair {apart['overall']['cosine']}")
+
+    with_base = relatedness.stats(da, db, base)["overall"]["base"]
+    assert with_base["drift_a"] < 0.1 and with_base["drift_b"] < 0.1, with_base
+    # sign agreement, counted again in numpy from the TIES trim's definition
+    sa, sb, sc = (slots_of(p)["ema"] for p in (da, db, base))
+    both = agree = 0
+    for k in sc:
+        if not k.startswith("denoise_fn."):
+            continue
+        av, bv, cv = (s[k].double().numpy().ravel() for s in (sa, sb, sc))
+        ta_, tb_ = av - cv, bv - cv
+        keep = max(1, round(ta_.size * 0.2))
+        ka = (np.abs(ta_) >= np.sort(np.abs(ta_))[-keep]) & (ta_ != 0)
+        kb = (np.abs(tb_) >= np.sort(np.abs(tb_))[-keep]) & (tb_ != 0)
+        both += int((ka & kb).sum())
+        agree += int((ka & kb & (np.sign(ta_) == np.sign(tb_))).sum())
+    assert with_base["agreement"] == round(agree / both, 4), (with_base, agree, both)
+    print(f"  with the base: drift {with_base['drift_a']} / {with_base['drift_b']}, "
+          f"sign agreement {with_base['agreement']} (numpy agrees)")
+
+    # lineage names the base: a shared parent, then one model descended from the other
+    assert relatedness.suggest_base(da, db) is None, "nothing is recorded yet"
+    for p in (da, db):
+        library.ensure_card(p, lineage=library.lineage("continue", [library.parent_ref(base, "start")]))
+    s = relatedness.suggest_base(da, db)
+    assert s and s["path"] == base and s["relation"] == "shared" and s["how"] == "lineage", s
+    dc = make_derived("relC", da, 24)
+    library.ensure_card(dc, lineage=library.lineage("continue", [library.parent_ref(da, "start")]))
+    s = relatedness.suggest_base(da, dc)
+    assert s and s["path"] == da and s["relation"] == "a_is_ancestor", s
+    assert relatedness.suggest_base(ta, tb) is None
+    print("  base from lineage: a shared parent, and an ancestor of the other")
+
+    r = c.post("/api/craft/merge/check", json={"model_a": da, "model_b": db, "stats": True,
+                                               "model_base": base}).get_json()["data"]
+    assert r["stats"]["overall"]["base"]["agreement"] == with_base["agreement"]
+    assert r["suggested_base"]["path"] == base
+    plain = c.post("/api/craft/merge/check", json={"model_a": da, "model_b": db}).get_json()["data"]
+    assert "stats" not in plain, "the plain check should stay metadata-only"
+    bad = c.post("/api/craft/merge/check", json={"model_a": da, "model_b": db, "stats": True,
+                                                 "model_base": d_bad}).get_json()["data"]
+    assert not bad["compatible"] and any(x.startswith("base:") for x in bad["reasons"]), bad
+    print("relatedness: derived and independent pairs apart, base from lineage, via /merge/check")
+
+
+check_relatedness()
+
 for n in ("mergeA", "mergeB", "mergeC", "merged_linear", "merged_slerp", "merged_blockwise",
           "confA", "confB", "confC", "merged_conf", "twoA", "twoB", "ends", "which",
-          "picked", "rawonly", "kept"):
+          "picked", "rawonly", "kept", "relBase", "relA", "relB", "relC"):
     (workspace.models / f"{n}.pt").unlink(missing_ok=True)
 for n in ("merged_blockwise", "half", "kept"):
     (workspace.recipes / f"{n}.json").unlink(missing_ok=True)
