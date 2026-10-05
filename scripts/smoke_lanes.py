@@ -184,6 +184,10 @@ def check_dispatch_after_error():
 
 def check_job_states():
     """What a queued job looks like to the rest of the app."""
+    # Imported before anything is held: on a cold start this import alone can
+    # take longer than a Stub will wait to be released.
+    from app.core.craft.explore import explorer
+
     lanes, log = Lanes(1, streams=False), []
     hold, waiting = Stub(log, "hold"), Stub(log, "waiting")
     jh = submit(lanes, "m1", hold, kind="other")    # not one the explorer yields to
@@ -196,7 +200,6 @@ def check_job_states():
     assert registry.get(jw.id) is not None, "prune dropped a queued job"
 
     # The explorer steps aside for a waiting generation, not only a running one.
-    from app.core.craft.explore import explorer
     assert explorer._yield_to() == "sample"
 
     hold.go.set()
