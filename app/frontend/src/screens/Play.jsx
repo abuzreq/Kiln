@@ -1038,7 +1038,7 @@ export default function Play() {
     create: runs.length > 0,
     // the compare and the parameter sweep are both long Bend runs
     bend: !!tabState["bend.busy"] || !!tabState["bend.sweep"]?.busy,
-    merge: !!tabState["merge.busy"],
+    merge: ["queued", "running"].includes(tabState["merge.job"]?.status) || !!tabState["merge.writing"],
     sweep: tabState["sweep.job"]?.status === "running",
   };
   useEffect(() => {

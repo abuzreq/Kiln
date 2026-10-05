@@ -114,6 +114,22 @@ def _merge_state(sa: dict, sb: dict, method: str, alpha: float, block_weights: d
     return out
 
 
+#: "Weights to merge": both slots, or one of xurdif's ema / model pair.
+WHICH = ("both", "ema", "model")
+
+
+def blended_slots(slots: dict, which: str) -> set:
+    """The slot names a merge blends; every other slot is copied from A.
+
+    ``which`` names xurdif's ema / model pair. A backend whose checkpoint has
+    neither (Diffusers' single ``unet`` set) blends everything it has, since
+    there is no second set to keep from A.
+    """
+    if which == "both" or which not in slots:
+        return set(slots)
+    return {which}
+
+
 def merge(
     path_a: str,
     path_b: str,
@@ -126,6 +142,8 @@ def merge(
 ) -> dict:
     if method not in ("linear", "slerp", "blockwise"):
         raise ValidationError(f"unknown merge method: {method}")
+    if which not in WHICH:
+        raise ValidationError(f"unknown weights choice: {which}")
     compat = check_compat(path_a, path_b)
     if not compat["compatible"]:
         raise IncompatibleModelError("; ".join(compat["reasons"]))
@@ -144,11 +162,12 @@ def merge(
                   "block_weights": block_weights, "which": which}
     merged_from = [_display_name(path_a), _display_name(path_b)]
 
+    blend = blended_slots(slots_a, which)
     slots = {}
     for slot, sa in slots_a.items():
         sb = slots_b.get(slot)
         slots[slot] = (_merge_state(sa, sb, method, alpha, block_weights, backend)
-                       if sb is not None else sa)
+                       if sb is not None and slot in blend else sa)
     if not slots:
         raise IncompatibleModelError("these models expose no weights to merge")
 
@@ -159,7 +178,8 @@ def merge(
         {"merged_from": merged_from, "merge": merge_info},
     )
     log.info("merged %s + %s -> %s", merged_from[0], merged_from[1], Path(dest).name)
-    return {"path": dest, "name": out_name, **merge_info, "merged_from": merged_from}
+    return {"path": dest, "name": out_name, **merge_info, "merged_from": merged_from,
+            "slots": sorted(slots), "blended": sorted(blend & set(slots_b))}
 
 
 def _display_name(locator: str) -> str:

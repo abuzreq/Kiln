@@ -216,6 +216,16 @@ class XurdifBackend(Backend):
         torch.save(out, str(dest))
         return str(dest)
 
+    def sampled_slot(self, slots: dict, ema: bool = True) -> str:
+        # load_net's choice, so a blended slot is the one a saved merge samples
+        which = "ema" if (ema and "ema" in slots) else "model"
+        if which not in slots:
+            which = "ema" if "ema" in slots else "model"
+        return which
+
+    def load_slot(self, net, state: dict) -> None:
+        net.load_state_dict(loader.unet_state_of(state), strict=False)
+
     # --- training -----------------------------------------------------
     # "continue" is xurdif's own resume: same architecture, all weights, via
     # the trainer's --load. It is not a Diffusers-style fine-tune and is

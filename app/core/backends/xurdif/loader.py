@@ -206,6 +206,15 @@ def describe(path: str | Path) -> ModelDescriptor:
     return meta
 
 
+def unet_state_of(raw: dict) -> dict:
+    """A checkpoint slot as the UNet's own state dict.
+
+    Strips the GaussianDiffusion ``denoise_fn.`` prefix and drops the scheduler
+    buffers that live outside it.
+    """
+    return {k[len(DENOISE_PREFIX):]: v for k, v in raw.items() if k.startswith(DENOISE_PREFIX)}
+
+
 def load_net(path: str, device: str = "cpu", ema: bool = True):
     """Build the UNet for one checkpoint and load its weights. Returns (net, descriptor)."""
     torch = _torch()
@@ -216,13 +225,7 @@ def load_net(path: str, device: str = "cpu", ema: bool = True):
         # A checkpoint with only one of the two slots: use whichever is there
         # rather than raising over a preference we cannot honour.
         which = "ema" if "ema" in data else "model"
-    raw = data[which]
-
-    # strip the GaussianDiffusion 'denoise_fn.' prefix; drop scheduler buffers
-    unet_state = {}
-    for k, v in raw.items():
-        if k.startswith(DENOISE_PREFIX):
-            unet_state[k[len(DENOISE_PREFIX):]] = v
+    unet_state = unet_state_of(data[which])
 
     model = build_unet(meta.mtype, meta.mults, attn_config=attn_spec.parse(meta.attn))
     missing, unexpected = model.load_state_dict(unet_state, strict=False)

@@ -230,6 +230,12 @@ class DiffusersBackend(Backend):
         loader.forget(str(dest))
         return str(dest)
 
+    def sampled_slot(self, slots: dict, ema: bool = True) -> str:
+        return "unet"
+
+    def load_slot(self, net, state: dict) -> None:
+        getattr(net, "wrapped", net).load_state_dict(state)
+
 
 def schedule_from_config(x: dict) -> BetaSchedule:
     """A ``BetaSchedule`` from a scheduler config, or from a model's ``extra``.

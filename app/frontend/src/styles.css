@@ -547,18 +547,98 @@ body {
 .play-body.solo { grid-template-columns: 1fr; }
 .play-solo { min-width: 0; }
 
-.merge-tri { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s-3); }
-@media (max-width: 900px) {
-  .merge-tri { grid-template-columns: 1fr; }
+/* Merge: the model row, the blend ladder, and the picked mix beside its save. */
+.merge-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2) var(--s-3); }
+.merge-title { margin: 0 var(--s-1) 0 0; font-size: var(--fs-lg); font-weight: 650; }
+.merge-pick { display: flex; align-items: center; gap: var(--s-2); flex: 0 1 300px; min-width: 0; }
+.merge-pick select { min-width: 0; }
+.merge-badge {
+  width: 22px; height: 22px; flex: none; border-radius: 6px; background: var(--bg-3);
+  display: grid; place-items: center; font-size: var(--fs-xs); font-weight: 700;
 }
-.merge-panel { min-width: 0; }
-.merge-shot {
-  aspect-ratio: 1; background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
-  display: flex; align-items: center; justify-content: center; overflow: hidden; margin: var(--s-2) 0;
+.merge-reasons { margin: 0; padding-left: var(--s-5); color: var(--bad); font-size: var(--fs-sm); }
+.merge-ladder { display: flex; flex-direction: column; gap: var(--s-3); }
+.merge-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2) var(--s-3); }
+.merge-bar .spacer, .merge-save .spacer { flex: 1; }
+.merge-inline { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-sm); color: var(--text-dim); }
+.merge-inline select { width: auto; }
+.merge-dot { display: inline-block; width: 9px; height: 9px; border-radius: 3px; flex: none; margin-right: 5px; }
+.merge-dot.stage-encoder { background: var(--stage-encoder); }
+.merge-dot.stage-mid { background: var(--stage-mid); }
+.merge-dot.stage-decoder { background: var(--stage-decoder); }
+.merge-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: var(--fs-sm); color: var(--text-dim); }
+.merge-crumbs button {
+  background: none; border: none; padding: 0; color: var(--accent); cursor: pointer;
+  font: inherit; text-decoration: underline; text-underline-offset: 2px;
 }
-.merge-shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.merge-result-mark { display: flex; flex-direction: column; align-items: center; gap: var(--s-1); padding: var(--s-4); text-align: center; }
-.empty-shot { border-style: dashed; }
+.merge-crumbs [aria-current] { color: var(--text); font-weight: 600; }
+/* One grid template for the header and every row, so steps line up in columns.
+   Narrow windows scroll the ladder sideways rather than squash the pictures. */
+.merge-rows { display: flex; flex-direction: column; gap: var(--s-2); overflow-x: auto; min-width: 0; padding-bottom: 2px; }
+.merge-row {
+  display: grid; gap: var(--s-2); align-items: center;
+  grid-template-columns: var(--label, 72px) repeat(var(--n), minmax(92px, 1fr));
+}
+.merge-heads > span {
+  display: flex; align-items: center; justify-content: center;
+  font-size: var(--fs-xs); color: var(--text-dim); font-variant-numeric: tabular-nums;
+}
+.merge-rowlabel { display: flex; align-items: center; font-size: var(--fs-sm); font-weight: 600; font-variant-numeric: tabular-nums; }
+.merge-rowlabel.dim { color: var(--text-faint); }
+.merge-cell {
+  display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 4px;
+  background: var(--bg-2); border: 2px solid var(--line); border-radius: var(--radius-sm);
+  color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.merge-cell:hover:not(:disabled) { border-color: var(--text-faint); }
+.merge-cell:disabled { cursor: default; }
+.merge-cell.src { border-style: dashed; }
+.merge-cell.on { border-color: var(--accent); border-style: solid; background: var(--accent-soft); }
+.merge-cell .shot {
+  aspect-ratio: 1; width: 100%; border-radius: 5px; overflow: hidden;
+  background: var(--bg-3); display: grid; place-items: center;
+}
+.merge-cell .shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.merge-cell .shot.live img { opacity: 0.8; }
+.merge-cell .wait { font-size: var(--fs-xs); color: var(--text-faint); }
+.merge-cell .tag {
+  font-size: var(--fs-xs); color: var(--text-faint); padding: 0 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.merge-cell.on .tag { color: var(--accent); font-weight: 600; }
+.merge-same {
+  aspect-ratio: 1; display: grid; place-items: center; padding: var(--s-2); text-align: center;
+  border: 2px dashed var(--line); border-radius: var(--radius-sm); font-size: var(--fs-xs); color: var(--text-faint);
+}
+.merge-grid-wrap { display: flex; flex-wrap: wrap; gap: var(--s-4); align-items: flex-start; }
+.merge-grid-wrap .merge-rows { flex: 1 1 480px; max-width: 780px; }
+.merge-refs { flex: 0 1 180px; min-width: 140px; display: flex; flex-direction: column; gap: var(--s-2); }
+.merge-refs-pair { display: flex; flex-direction: column; gap: var(--s-2); }
+.merge-refs figure { margin: 0; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.merge-shot-sq {
+  aspect-ratio: 1; width: 100%; border-radius: var(--radius-sm); overflow: hidden;
+  background: var(--bg-2); border: 1px solid var(--line); display: grid; place-items: center;
+}
+.merge-shot-sq img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.merge-shot-sq img.live { opacity: 0.8; }
+.merge-shot-sq.small { width: 112px; flex: none; }
+.merge-zoom { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
+.merge-bottom { display: flex; flex-wrap: wrap; gap: var(--s-3); align-items: stretch; }
+.merge-picked { flex: 2 1 480px; min-width: 0; display: flex; flex-direction: column; gap: var(--s-3); }
+.merge-save { flex: 1 1 320px; min-width: 0; }
+.merge-picked-body { display: flex; flex-wrap: wrap; gap: var(--s-3); align-items: flex-start; }
+.merge-fine { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: var(--s-2); }
+.merge-fine-row { display: flex; align-items: center; gap: var(--s-2); font-size: var(--fs-sm); }
+.merge-fine-row input[type="range"] { flex: 1; min-width: 80px; }
+.merge-fine-row .num { width: 52px; font-variant-numeric: tabular-nums; color: var(--text-dim); }
+.merge-fine-row .num:last-child { text-align: right; }
+.merge-fine-label { width: 84px; display: flex; align-items: center; font-weight: 600; }
+.merge-name {
+  display: flex; align-items: center; gap: 2px; padding-right: 8px;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
+}
+.merge-name:focus-within { border-color: var(--accent); }
+.merge-name input[type="text"] { border: none; background: transparent; }
 /* The Bend screen's header: what it is on the left, how to look at it on the
    right. A row, not a card -- it was a whole card for a title and a sentence. */
 .bend-toolbar {
