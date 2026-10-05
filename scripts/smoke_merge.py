@@ -144,6 +144,56 @@ bad = c.post("/api/craft/merge", json={"model_a": ta, "model_b": tb, "out_name":
 assert not bad["ok"], bad
 print("weights to merge: honoured, and an unknown choice is refused")
 
+
+def check_ladder_matches_saved(device):
+    """A rung blended in memory samples exactly like the merge saved to disk."""
+    import time
+
+    from app.core.craft.ladder import LadderRig
+    from app.core.engine.sampler import SampleParams, sampler
+    from app.core.model_manager import manager
+
+    def x0(path, bundle=None):
+        p = SampleParams(model_path=path, image_size=32, steps=6, seed=1234, device=device)
+        last = None
+        for last in sampler.run(p, bundle=bundle):
+            pass
+        return last._x.detach().cpu()
+
+    cached = manager.load(ta, device=device, ema=True)["model"]
+    before = {k: v.clone() for k, v in cached.state_dict().items()}
+    plain_a = x0(ta)
+    rig = LadderRig(ta, tb, device)
+    blocks = {"encoder": 0.2, "mid": 0.6, "decoder": 0.9}
+    for method in ("linear", "slerp", "blockwise"):
+        saved = do_merge(ta, tb, f"rung_{method}", method=method, alpha=0.3,
+                         block_weights=blocks)["path"]
+        want = x0(saved)
+        manager.evict(saved)
+        sync = (lambda: torch.cuda.synchronize()) if device == "cuda" else (lambda: None)
+        sync()
+        t0 = time.perf_counter()
+        bundle = rig.apply(method, 0.3, blocks)
+        sync()
+        t1 = time.perf_counter()
+        got = x0(ta, bundle)
+        sync()
+        t2 = time.perf_counter()
+        assert torch.equal(got, want), f"{device} {method}: rung differs from the saved merge"
+        assert not torch.equal(got, plain_a), f"{device} {method}: rung sampled plain A"
+        print(f"  {device:4s} {method:9s} rung == saved merge, bit for bit "
+              f"(blend+load {1000 * (t1 - t0):.0f} ms, sample {1000 * (t2 - t1):.0f} ms)")
+        (workspace.models / f"rung_{method}.pt").unlink(missing_ok=True)
+    after = cached.state_dict()
+    assert all(torch.equal(before[k], after[k]) for k in before), "the cached A was changed"
+    print(f"  {device:4s} the manager's cached model A is untouched")
+
+
+check_ladder_matches_saved("cpu")
+if torch.cuda.is_available():
+    check_ladder_matches_saved("cuda")
+print("ladder rungs: identical to saved merges")
+
 for n in ("mergeA", "mergeB", "mergeC", "merged_linear", "merged_slerp", "merged_blockwise",
           "confA", "confB", "confC", "merged_conf", "twoA", "twoB", "ends", "which"):
     (workspace.models / f"{n}.pt").unlink(missing_ok=True)

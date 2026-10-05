@@ -267,6 +267,18 @@ class Backend:
         """Persist blended slots in this backend's own format; return the path."""
         raise NotImplementedError
 
+    def sampled_slot(self, slots: dict, ema: bool = True) -> str:
+        """The slot ``load(..., ema=ema)`` would read out of these ``merge_slots``."""
+        raise NotImplementedError
+
+    def load_slot(self, net, state: dict) -> None:
+        """Copy one slot's tensors into a net ``load`` built, in place.
+
+        Lets a blend be sampled without a checkpoint on disk: the merge ladder
+        loads a net once and swaps each rung's weights in.
+        """
+        raise NotImplementedError
+
     # --- training -----------------------------------------------------
     #: Training modes this backend understands, e.g. ("scratch", "finetune").
     training_modes: tuple[str, ...] = ()

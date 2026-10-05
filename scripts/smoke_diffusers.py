@@ -310,6 +310,43 @@ def check_merge(a: Path, bdir: Path, out: Path):
     print("a merged model is written as a loadable repo and rediscovered by scan")
 
 
+def check_ladder_rung(a: Path, bdir: Path, out: Path):
+    """A merge-ladder rung, blended in memory, samples like the saved merge.
+
+    A saved UNet2DModel loads backed by safetensors' mmap, which picks other
+    conv kernels (see ``loader._detach_from_mmap``), while the rung's net owns
+    its weights. So the two agree to ~1e-5 as loaded, and bit for bit once the
+    saved merge's weights are detached the way a TinyUNet's always are.
+    """
+    from app.core.craft.ladder import LadderRig
+    from app.core.craft.merging import merge
+
+    def x0(path, bundle=None):
+        p = SampleParams(model_path=str(path), image_size=32, steps=4, seed=99, device="cpu")
+        last = None
+        for last in sampler.run(p, bundle=bundle):
+            pass
+        return last._x.detach()
+
+    blocks = {"encoder": 0.2, "mid": 0.6, "decoder": 0.9}
+    rig = LadderRig(str(a), str(bdir), "cpu")
+    for method in ("linear", "slerp", "blockwise"):
+        res = merge(str(a), str(bdir), "rung", method=method, alpha=0.3,
+                    block_weights=blocks, out_dir=str(out))
+        want = x0(res["path"])
+        got = x0(a, rig.apply(method, 0.3, blocks))
+        diff = (got - want).abs().max().item()
+        assert diff < 1e-4, f"ladder rung {method}: differs from the saved merge by {diff}"
+        loader._detach_from_mmap(manager.load(res["path"], device="cpu")["model"].wrapped)
+        assert torch.equal(got, x0(res["path"])), f"ladder rung {method}: not exact once detached"
+        assert not torch.equal(got, x0(a)), f"ladder rung {method}: sampled plain A"
+        print("  ladder rung %-9s == saved merge bit for bit once off the mmap "
+              "(%.1e as loaded)" % (method, diff))
+        manager.evict(res["path"])
+        shutil.rmtree(res["path"], ignore_errors=True)
+        loader.forget(res["path"])
+
+
 def check_cross_backend(diff_dir: Path, tmp: Path):
     """Two engines' checkpoints are never mergeable; say so plainly."""
     from app.core.craft.merging import check_compat
@@ -359,6 +396,7 @@ def main():
         check_craft(a)
         check_skips(a)
         check_merge(a, b, tmp / "out")
+        check_ladder_rung(a, b, tmp / "out")
         check_cross_backend(a, tmp)
         check_reference_repo()
     finally:

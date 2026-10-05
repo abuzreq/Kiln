@@ -555,8 +555,14 @@ class Sampler:
         control=None,
         height: int | None = None,
         width: int | None = None,
+        bundle: dict | None = None,
     ):
         """Generator yielding a ``Frame`` per denoise step.
+
+        ``bundle`` (optional) is a caller-owned model shaped like
+        ``ModelManager.load``'s, sampled instead of loading ``params.model_path``.
+        The merge ladder uses it for blends that exist only in memory;
+        ``model_path`` still names the model on the recipe card.
 
         A frame reads like the dict this used to yield --
         ``{step, total, batch, image, image_pp, images?, images_pp?}`` -- but its
@@ -587,7 +593,7 @@ class Sampler:
         warmup.wait_ready()  # never import diffusers alongside the launch warm-up
         torch = _torch()
         device = pick_device(params.device)
-        bundle = manager.load(params.model_path, device=device, ema=params.ema)
+        bundle = bundle or manager.load(params.model_path, device=device, ema=params.ema)
         model = bundle["model"]
         meta = bundle["meta"]
         backend = bundle["backend"]
