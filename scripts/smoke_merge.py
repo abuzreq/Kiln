@@ -375,13 +375,82 @@ def check_save_from_ladder(cell):
     print("save: raw-only weights skip an EMA sample as thumbnail:", res["thumbnail_skipped"])
 
 
+def check_recipes(cell):
+    """Merge recipes keep both models, and a Create run on one replays the rung."""
+    import time
+
+    from PIL import Image
+
+    from app.core.craft import ladder
+    from utils.imaging import data_url
+
+    def wait(job_id, limit=300):
+        t0 = time.time()
+        while True:
+            j = c.get(f"/api/jobs/{job_id}").get_json()["data"]
+            if j["status"] in ("done", "error", "cancelled"):
+                return j
+            assert time.time() - t0 < limit, f"job stuck: {j['status']} {j['message']}"
+            time.sleep(0.05)
+
+    r = cell["recipe"]
+    mix = {"method": r["method"], "alpha": r["alpha"]}
+    e = c.post("/api/craft/merge/recipes", json={
+        "name": "half", "model_a": ta, "model_b": tb, **mix, "thumbnail": cell["image"],
+    }).get_json()
+    assert e["ok"], e
+    kept = {x["name"]: x for x in c.get("/api/library/recipes").get_json()["data"]}
+    got = kept["half"]
+    assert (got["model_a"], got["model_b"], got["method"]) == (ta, tb, r["method"]), got
+    assert got["alpha"] == r["alpha"] and "block_weights" not in got and got["thumbnail"], got
+    res = c.post("/api/craft/merge", json={
+        "model_a": ta, "model_b": tb, **mix, "out_name": "kept", "save_recipe": True,
+        "recipe_thumbnail": cell["image"],
+    }).get_json()["data"]
+    got = {x["name"]: x for x in c.get("/api/library/recipes").get_json()["data"]}["kept"]
+    assert got["model_b"] == tb and got["thumbnail"] and Path(res["path"]).exists(), got
+    print("recipes: saved on their own or with a model, both keep A, B, the mix and a picture")
+
+    p = cell["card"]["params"]
+    run = {"model_path": ta, "image_size": p["image_size"], "steps": p["steps"],
+           "seed": p["seed"], "batch_size": 1,
+           "merge": {"model_b": tb, **mix}, "merge_recipe": "half"}
+    j = wait(c.post("/api/perform/sample", json=run).get_json()["data"]["job"]["id"])
+    assert j["status"] == "done", j["message"]
+    assert j["detail"]["frame"] == cell["image"], "a recipe run does not replay its ladder rung"
+    card = j["detail"]["card"]
+    assert card["model_path"] == ta and card["merge_recipe"] == "half", card
+    assert card["merge"] == {"model_a": ta, "model_b": tb, **mix}, card["merge"]
+    rig = ladder._shared[1]
+    j = wait(c.post("/api/perform/sample", json=run).get_json()["data"]["job"]["id"])
+    assert j["status"] == "done" and ladder._shared[1] is rig, "the rig was rebuilt"
+    print("recipes: a Create run with A selected replays the ladder rung pixel for pixel, "
+          "and the next run reuses the blend")
+
+    white = data_url(Image.new("L", (p["image_size"],) * 2, 255))
+    j = wait(c.post("/api/perform/inpaint", json={
+        **run, "init_image": cell["image"], "mask": white,
+    }).get_json()["data"]["job"]["id"])
+    assert j["status"] == "done" and j["detail"]["card"]["merge"]["model_b"] == tb, j["message"]
+    bad = wait(c.post("/api/perform/sample", json={
+        **run, "merge": {"model_b": d_bad, **mix}}).get_json()["data"]["job"]["id"])
+    assert bad["status"] == "error", bad["status"]
+    print("recipes: fills blend too; an incompatible B fails the run:", bad["message"][:60])
+
+    assert c.post("/api/gpu/free").get_json()["ok"] and ladder._shared is None
+    print("recipes: Free GPU lets the kept blend go")
+
+
 d_bad = d
 check_ladder_plan()
-check_save_from_ladder(check_ladder_route())
+cell = check_ladder_route()
+check_save_from_ladder(cell)
+check_recipes(cell)
 
 for n in ("mergeA", "mergeB", "mergeC", "merged_linear", "merged_slerp", "merged_blockwise",
           "confA", "confB", "confC", "merged_conf", "twoA", "twoB", "ends", "which",
-          "picked", "rawonly"):
+          "picked", "rawonly", "kept"):
     (workspace.models / f"{n}.pt").unlink(missing_ok=True)
-(workspace.recipes / "merged_blockwise.json").unlink(missing_ok=True)
+for n in ("merged_blockwise", "half", "kept"):
+    (workspace.recipes / f"{n}.json").unlink(missing_ok=True)
 print("OK")

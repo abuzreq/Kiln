@@ -67,6 +67,7 @@ def run_inpaint(
     cancel=None,
     control=None,
     mults=None,
+    bundle=None,
 ):
     if init_image is None:
         raise ValueError("inpaint needs an init image (the canvas)")
@@ -93,6 +94,7 @@ def run_inpaint(
         control=control,
         height=h,
         width=w,
+        bundle=bundle,
     ):
         # Deferred with the render: a step nobody looks at is never composited.
         yield frame.map_images(_merge)

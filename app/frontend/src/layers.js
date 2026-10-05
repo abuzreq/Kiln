@@ -59,7 +59,7 @@ export function newInpaintMask({ name } = {}) {
     // the pixels underneath).
     visible: true,
     strokes: [],
-    params: { change: 0.65, feather: 8, harmonize: 2, bendPreset: "" },
+    params: { change: 0.65, feather: 8, harmonize: 2, bendPreset: "", mergeRecipe: "", mergeB: "" },
   };
 }
 

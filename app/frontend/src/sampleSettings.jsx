@@ -273,6 +273,8 @@ export function cardLabel(card) {
   const bits = [];
   if (card.model) bits.push(card.model);
   if (card.params?.seed != null) bits.push(`seed ${card.params.seed}`);
+  if (card.merge_recipe) bits.push(`merged: ${card.merge_recipe}`);
+  else if (card.merge) bits.push("merged");
   if (card.bend_preset) bits.push(card.bend_preset);
   return bits.join(" · ");
 }
@@ -299,6 +301,8 @@ export function buildSamplePayload(params, opts = {}) {
     model_path,
     bends = null,
     bend_preset = "",
+    merge = null,
+    merge_recipe = "",
     init_image = null,
     postproc = {},
     overrides = {},
@@ -328,6 +332,8 @@ export function buildSamplePayload(params, opts = {}) {
   };
   if (bends) body.bends = bends;
   if (bend_preset) body.bend_preset = bend_preset;
+  if (merge) body.merge = merge;
+  if (merge_recipe) body.merge_recipe = merge_recipe;
   if (init_image) body.init_image = init_image;
   return body;
 }
@@ -340,6 +346,8 @@ export function buildInpaintPayload(params, opts = {}) {
     mask,
     bends = null,
     bend_preset = "",
+    merge = null,
+    merge_recipe = "",
     feather = 8,
     overrides = {},
     batch_size,
@@ -372,6 +380,8 @@ export function buildInpaintPayload(params, opts = {}) {
   };
   if (bends) body.bends = bends;
   if (bend_preset) body.bend_preset = bend_preset;
+  if (merge) body.merge = merge;
+  if (merge_recipe) body.merge_recipe = merge_recipe;
   return body;
 }
 

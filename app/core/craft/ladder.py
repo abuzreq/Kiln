@@ -8,6 +8,9 @@ checkpoints written, loaded and built.
 The blend is ``merging._merge_state``, the same arithmetic ``merge()`` saves, so
 a rung samples exactly like the model it would become.
 """
+import os
+import threading
+
 from app.core import backends
 from app.core.craft.merging import _merge_state
 from utils.exceptions import ValidationError
@@ -173,6 +176,7 @@ class LadderRig:
         net, meta = backend.load(ref_a, device=device, ema=ema)
         _own(net)
         self.bundle = {"model": net, "meta": meta, "backend": backend, "ref": ref_a}
+        self._loaded = None
 
     def apply(self, method: str, alpha: float = 0.5, block_weights: dict | None = None) -> dict:
         """Load one rung's blend into the net; returns the bundle to sample."""
@@ -180,11 +184,63 @@ class LadderRig:
 
         if method not in METHODS:
             raise ValidationError(f"unknown merge method: {method}")
+        # The same blend twice in a row (Generate again on one recipe) is
+        # already in the net.
+        key = (method, round(float(alpha), 6),
+               tuple(sorted((block_weights or {}).items())))
+        if key == self._loaded:
+            return self.bundle
         state = self.a if self.b is None else _merge_state(
             self.a, self.b, method, float(alpha), block_weights or {}, self.backend)
         with torch.no_grad():
             self.backend.load_slot(self.bundle["model"], state)
+        self._loaded = key
         return self.bundle
+
+
+# One rig kept between runs, for merge recipes used from Create: Generate on a
+# recipe again should not read two checkpoints and build a net each time. Lanes
+# never run two jobs on the same model at once, and a recipe run is queued on
+# both A and B, so no two runs share this rig's net. A ladder builds its own.
+_shared_lock = threading.Lock()
+_shared: tuple | None = None    # (key, LadderRig)
+
+
+def _stamp(path: str):
+    try:
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return None
+
+
+def shared_rig(path_a: str, path_b: str, device: str, ema: bool = True) -> LadderRig:
+    """The rig for A and B, reused while neither file changes."""
+    global _shared
+    key = (path_a, _stamp(path_a), path_b, _stamp(path_b), device, bool(ema))
+    with _shared_lock:
+        if _shared is not None and _shared[0] == key:
+            return _shared[1]
+        _shared = None              # let the old pair go before loading the new one
+        rig = LadderRig(path_a, path_b, device, ema=ema)
+        _settle(device)
+        _shared = (key, rig)
+        return rig
+
+
+def drop_shared_rig() -> bool:
+    """Forget the kept rig (Free GPU, cache clears). True if there was one."""
+    global _shared
+    with _shared_lock:
+        had, _shared = _shared is not None, None
+    return had
+
+
+def _settle(device: str):
+    """Finish building on this lane's stream: a later run may be on another lane."""
+    if str(device).startswith("cuda"):
+        import torch
+
+        torch.cuda.current_stream().synchronize()
 
 
 def _own(net):

@@ -5,6 +5,8 @@ import { ConfirmModal, DeleteBtn, Empty, Loading } from "../components/ui.jsx";
 import { RemoveModelModal, RenameModal } from "../components/modelMeta.jsx";
 import { ModelRows } from "./ModelList.jsx";
 import { cardLabel, mergeStoredSampleParams, paramsFromCard, paramLabel } from "../sampleSettings.jsx";
+import { cardModelPath, restoreSelection, restoredMessage } from "../createSelection.js";
+import { recipeSummary, requestMergeOpen } from "../mergeRecipes.js";
 
 function Models({ onPick }) {
   const {
@@ -46,8 +48,8 @@ function Models({ onPick }) {
   );
 }
 
-function NamedList({ kind, empty, subtitle }) {
-  const { toast } = useApp();
+function NamedList({ kind, empty, subtitle, onClose }) {
+  const { toast, models, setAppMode, setPlayTab } = useApp();
   const [items, setItems] = useState(null);
   const [pending, setPending] = useState(null);
   const load = () => api.get(`/library/${kind}`).then(setItems).catch(() => setItems([]));
@@ -60,14 +62,28 @@ function NamedList({ kind, empty, subtitle }) {
       {subtitle && <p className="hint mb-0">{subtitle}</p>}
       {items.map((it) => (
         <div key={it.name} className="asset-row static">
+          {it.thumbnail
+            ? <span className="thumb-sm"><img src={it.thumbnail} alt="" loading="lazy" /></span>
+            : kind === "recipes" && <span className="thumb-sm" aria-hidden="true" />}
           <div className="meta">
             <b>{it.name}</b>
             <span className="sub">
               {kind === "bends"
                 ? ((it.bends || []).map((b) => b.op).join(", ") || "empty")
-                : `${it.method}${it.method !== "blockwise" ? ` · α ${it.alpha}` : ""}`}
+                : recipeSummary(it, models)}
             </span>
           </div>
+          {kind === "recipes" && (
+            <button type="button" className="btn xs"
+              onClick={() => {
+                requestMergeOpen(it.name);
+                setAppMode("play");
+                setPlayTab("merge");
+                onClose?.();
+              }}>
+              Open in Merge
+            </button>
+          )}
           <DeleteBtn label={`Delete ${it.name}`} onClick={() => setPending(it)} />
         </div>
       ))}
@@ -103,14 +119,15 @@ function Saved({ onClose }) {
     .catch(() => setItems([]));
   useEffect(() => { load(); }, []);
 
-  const restore = (card) => {
+  const restore = async (card) => {
     const params = paramsFromCard(card);
     if (!params) { toast("This image has no recorded settings", "warn"); return; }
     mergeStoredSampleParams(params);
-    if (card.model_path) setModelPath(card.model_path);
+    if (cardModelPath(card)) setModelPath(cardModelPath(card));
+    const missing = await restoreSelection(card);
     setAppMode("play");
     setPlayTab("create");
-    toast(`Settings restored — ${cardLabel(card) || "sampler updated"}`, "success");
+    toast(restoredMessage(cardLabel(card), missing), missing.length ? "warn" : "success");
     onClose?.();
   };
 
@@ -184,14 +201,15 @@ function Sweeps({ onClose }) {
     .catch(() => setItems([]));
   useEffect(() => { load(); }, []);
 
-  const restore = (it) => {
+  const restore = async (it) => {
     const params = paramsFromCard(it.card);
     if (!params) { toast("This sweep has no recorded settings", "warn"); return; }
     mergeStoredSampleParams(params);
-    if (it.card.model_path) setModelPath(it.card.model_path);
+    if (cardModelPath(it.card)) setModelPath(cardModelPath(it.card));
+    const missing = await restoreSelection(it.card);
     setAppMode("play");
     setPlayTab("create");
-    toast(`Settings restored — ${cardLabel(it.card) || "sampler updated"}`, "success");
+    toast(restoredMessage(cardLabel(it.card), missing), missing.length ? "warn" : "success");
     onClose?.();
   };
 
@@ -317,7 +335,11 @@ export default function LibraryDrawer({ onClose }) {
         <div className="drawer-body">
           {tab === "models" && <Models onPick={onClose} />}
           {tab === "bends" && <NamedList kind="bends" empty="No saved bends. Create some in Create ▸ Bend, then use them in Create ▸ Canvas." />}
-          {tab === "merges" && <NamedList kind="recipes" empty="No saved merges yet." />}
+          {tab === "merges" && (
+            <NamedList kind="recipes" onClose={onClose}
+              subtitle="Merge recipes keep a mix and its two models. Create ▸ Canvas uses them with “Merge with”."
+              empty="No saved merge recipes. Pick a mix in Create ▸ Merge, then Save recipe." />
+          )}
           {tab === "saved" && <Saved onClose={onClose} />}
           {tab === "sweeps" && <Sweeps onClose={onClose} />}
         </div>

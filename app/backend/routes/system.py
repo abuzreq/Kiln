@@ -257,7 +257,9 @@ def resume_job(job_id):
 def free_gpu():
     """Release cached GPU memory, CUDA or Apple's MPS (best effort)."""
     from app.core import devices
+    from app.core.craft.ladder import drop_shared_rig
 
+    drop_shared_rig()   # a merge recipe's blend, kept between Create runs
     freed = False
     try:
         import torch
