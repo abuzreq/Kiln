@@ -155,23 +155,33 @@ export default function Start() {
 
   return (
     <div className="start-hub">
+      {motionAllowed && pageVisible && appMode === "start" && <Embers />}
       <div className="start-hero">
         <div className="start-hero-text">
           <h2>Your kiln</h2>
           <p className="hint mb-0">
-            Everything you have made lives here. Pick up a model, or head somewhere to make more.
+            Train diffusion models on images you choose, then make with them.
+            Everything you have made lives here.
           </p>
           <OpenFolder folder="root" label="Open workspace folder" className="mt-2" />
         </div>
         <div className="start-paths">
           <button type="button" className="start-path" onClick={() => openPrepare({ tab: "data" })}>
             <span className="start-path-name">Prepare</span>
-            <span className="start-path-sub">Build datasets, train models</span>
+            <span className="start-path-tabs">Data · Train · Models</span>
+            <span className="start-path-sub">
+              Turn folders of images into datasets, train models on them, and keep the
+              checkpoints worth keeping.
+            </span>
             {prepareBusy && <span className="tab-runbar" aria-hidden="true" />}
           </button>
           <button type="button" className="start-path primary" onClick={() => openPlay({ tab: "create" })}>
             <span className="start-path-name">Create</span>
-            <span className="start-path-sub">Generate, bend, merge, sweep</span>
+            <span className="start-path-tabs">Canvas · Bend · Merge · Sweep</span>
+            <span className="start-path-sub">
+              Generate and paint on a canvas, bend a model's layers, blend two models,
+              or sweep settings into a grid.
+            </span>
             {playBusy && <span className="tab-runbar" aria-hidden="true" />}
           </button>
         </div>
@@ -297,6 +307,41 @@ function ModelCard({ m, frames, index, onOpen, failure }) {
       </button>
       <b title={m.name}>{m.name}</b>
       <span className="sub">{modelSubtitle(m) || `${m.mtype} · ${m.size_mb} MB`}</span>
+    </div>
+  );
+}
+
+const EMBER_COUNT = 24;
+
+/** Sparks rising from the bottom of the window, behind the hub's content.
+ *  CSS does the motion; this only picks where and how fast each one goes,
+ *  once per mount. The caller mounts it only when motion is welcome. */
+function Embers() {
+  const embers = useMemo(() => Array.from({ length: EMBER_COUNT }, (_, i) => {
+    const rise = 14 + Math.random() * 14;          // seconds bottom to top
+    return {
+      key: i,
+      style: {
+        left: `${Math.random() * 100}%`,
+        // A negative delay starts each one partway up, so the field is
+        // already full when the page opens instead of filling from empty.
+        animationDuration: `${rise.toFixed(1)}s`,
+        animationDelay: `${(-Math.random() * rise).toFixed(1)}s`,
+        "--ember-size": `${(2 + Math.random() * 3).toFixed(1)}px`,
+        "--ember-drift": `${Math.round(Math.random() * 80 - 40)}px`,
+        "--ember-peak": (0.45 + Math.random() * 0.5).toFixed(2),
+      },
+      swayStyle: { animationDuration: `${(3 + Math.random() * 3).toFixed(1)}s` },
+    };
+  }), []);
+  return (
+    <div className="start-embers" aria-hidden="true">
+      <div className="start-embers-glow" />
+      {embers.map((e) => (
+        <span key={e.key} className="start-ember" style={e.style}>
+          <span className="start-ember-spark" style={e.swayStyle} />
+        </span>
+      ))}
     </div>
   );
 }
