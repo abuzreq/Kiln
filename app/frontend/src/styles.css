@@ -2060,37 +2060,87 @@ a { color: var(--accent); }
 /* --- Start hub (root is .start-hub: a bare .start is an existing
    align-items utility, and would shrink-wrap every child) ------------------------------------------------------- */
 .start-hub {
+  /* Above the embers, which sit behind it in the same stacking context. */
+  position: relative; z-index: 1;
   display: flex; flex-direction: column; gap: var(--s-5);
   max-width: 1200px; margin-inline: auto;
 }
 .start-hero {
-  display: flex; align-items: flex-end; justify-content: space-between;
-  flex-wrap: wrap; gap: var(--s-4);
-  padding: var(--s-3) 0 var(--s-4);
-  border-bottom: 1px solid var(--line);
+  display: flex; flex-direction: column; align-items: center; gap: var(--s-5);
+  padding: 56px 0 48px; text-align: center;
 }
 .open-folder { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.start-hero-text { display: flex; flex-direction: column; align-items: center; max-width: 560px; }
 .start-hero-text h2 {
-  margin: 0 0 var(--s-1); font-size: var(--fs-hero); font-weight: 700;
-  letter-spacing: -0.4px;
+  margin: 0 0 var(--s-2); font-size: clamp(34px, 4.5vw, 52px); font-weight: 800;
+  letter-spacing: -1px; line-height: 1.05;
 }
-.start-paths { display: flex; gap: var(--s-3); flex-wrap: wrap; }
+.start-hero-text .hint { font-size: var(--fs-lg); line-height: 1.55; }
+/* Two kiln doors. */
+.start-paths {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-4);
+  width: 100%; max-width: 680px;
+}
 .start-path {
   position: relative; overflow: hidden;
-  display: flex; flex-direction: column; gap: 2px; align-items: flex-start;
-  min-width: 190px; padding: var(--s-3) var(--s-4);
-  border: 1px solid var(--line); border-radius: var(--radius);
+  display: flex; flex-direction: column; align-items: center; gap: var(--s-1);
+  padding: 34px var(--s-5) var(--s-5);
+  border: 1px solid var(--line); border-radius: 160px 160px 20px 20px;
   background: var(--bg-1); color: var(--text); font: inherit; cursor: pointer;
-  text-align: left;
+  text-align: center;
+  transition: border-color 0.2s, box-shadow 0.3s;
 }
 .start-path:hover { border-color: var(--accent); }
-.start-path-name { font-size: var(--fs-display); font-weight: 700; }
-.start-path-sub { font-size: var(--fs-sm); color: var(--text-dim); }
+.start-path-name { font-size: 28px; font-weight: 800; letter-spacing: -0.4px; }
+.start-path-tabs {
+  font-size: var(--fs-xs); font-weight: 600; letter-spacing: 0.6px; text-transform: uppercase;
+  color: var(--accent);
+}
+.start-path-sub { font-size: var(--fs-sm); line-height: 1.5; color: var(--text-dim); margin-top: var(--s-1); }
 .start-path.primary {
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
   border-color: transparent; color: #1a1206;
+  box-shadow: 0 18px 50px -18px rgba(255, 110, 50, 0.7);
 }
-.start-path.primary .start-path-sub { color: rgba(26, 18, 6, 0.72); }
+.start-path.primary:hover { box-shadow: 0 18px 60px -12px rgba(255, 110, 50, 0.9); }
+.start-path.primary .start-path-tabs { color: rgba(26, 18, 6, 0.8); }
+.start-path.primary .start-path-sub { color: rgba(26, 18, 6, 0.78); }
+
+/* Sparks rising from the bottom of the window, behind the hub. Fixed, so they
+   rise through the viewport whatever the scroll; Start only mounts them while
+   it is open, visible and motion is allowed. */
+.start-embers {
+  position: fixed; left: 0; right: 0; bottom: 0; top: var(--topbar-h);
+  z-index: 0; overflow: hidden; pointer-events: none;
+}
+.start-embers-glow {
+  position: absolute; left: -10%; right: -10%; bottom: -220px; height: 380px;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(255, 122, 69, 0.22), rgba(255, 90, 40, 0.06) 60%, transparent);
+  animation: start-ember-breathe 9s ease-in-out infinite;
+}
+.start-ember {
+  position: absolute; bottom: -8px; opacity: 0;
+  animation-name: start-ember-rise; animation-timing-function: linear; animation-iteration-count: infinite;
+}
+.start-ember-spark {
+  display: block; width: var(--ember-size); height: var(--ember-size); border-radius: 50%;
+  background: #ffd08a; box-shadow: 0 0 8px 2px rgba(255, 122, 69, 0.75);
+  animation: start-ember-sway 4s ease-in-out infinite alternate;
+}
+@keyframes start-ember-rise {
+  0% { transform: translate3d(0, 0, 0); opacity: 0; }
+  8% { opacity: var(--ember-peak); }
+  60% { opacity: calc(var(--ember-peak) * 0.6); }
+  /* Gone before the top, so a topbar that wraps to two rows stays clear. */
+  86%, 100% { opacity: 0; }
+  100% { transform: translate3d(var(--ember-drift), -100vh, 0); }
+}
+@keyframes start-ember-sway { from { transform: translateX(-6px); } to { transform: translateX(6px); } }
+@keyframes start-ember-breathe { 0%, 100% { opacity: 0.6; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .start-embers { display: none; }
+}
 
 .start-featured {
   display: flex; align-items: stretch; gap: var(--s-4); width: 100%;
@@ -2185,9 +2235,8 @@ a { color: var(--accent); }
 .start-capture:hover { border-color: var(--accent); }
 
 @media (max-width: 720px) {
-  .start-hero { align-items: flex-start; }
-  .start-paths { width: 100%; }
-  .start-path { flex: 1 1 100%; }
+  .start-hero { padding: 32px 0 28px; }
+  .start-paths { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* Reduced motion: the cycling timer never starts (Start.jsx checks the same
