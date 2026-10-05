@@ -48,6 +48,8 @@ opencv-python>=4.8
 # Left uncapped: NumPy 2.x is verified working against the torch/opencv floors
 # above. If you hit an ABI error from a compiled wheel, pin numpy<2 here.
 numpy>=1.24
+# Re-basin's linear assignment (merging two models trained apart).
+scipy>=1.10
 
 # Utilities
 tqdm>=4.66

@@ -78,11 +78,16 @@ def _figures(acc: dict, with_base: bool) -> dict:
 
 
 def _measure(path_a: str, path_b: str, base: str | None, ema: bool) -> dict:
-    import torch
-
     backend, sa = _slot(path_a, ema)
     _, sb = _slot(path_b, ema)
     sc = _slot(base, ema)[1] if base else None
+    return {**measure(backend, sa, sb, sc), "base": base}
+
+
+def measure(backend, sa: dict, sb: dict, sc: dict | None = None) -> dict:
+    """The figures for two network states already in memory (and a base's)."""
+    import torch
+
     acc = {s: _new() for s in (*STAGES, "overall")}
     for k, ta in sa.items():
         tb = sb.get(k)
@@ -107,8 +112,7 @@ def _measure(path_a: str, path_b: str, base: str | None, ema: bool) -> dict:
             for f, v in figs.items():
                 row[f] += v
     out = {s: _figures(acc[s], sc is not None) for s in STAGES if acc[s]["n"]}
-    return {"overall": _figures(acc["overall"], sc is not None),
-            "stages": out, "base": base}
+    return {"overall": _figures(acc["overall"], sc is not None), "stages": out}
 
 
 _CACHE: "OrderedDict[tuple, dict]" = OrderedDict()

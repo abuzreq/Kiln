@@ -1,0 +1,247 @@
+"""Re-basin: reorder one model's units so they line up with another's.
+
+Two models trained apart learn similar features in different channel orders --
+hidden units are interchangeable, so each run settles on its own permutation.
+Averaging them pairs unrelated features. Git Re-Basin (Ainsworth, Hayase and
+Srinivasa, ICLR 2023) finds, for every layer, the permutation of B's units that
+best matches A's, and applies it everywhere that layer's units are read, so
+B computes exactly the same function in A's order. Only then does a blend mean
+"this feature of A with the same feature of B".
+
+A *spec* lists the permutation groups of one architecture. A group is one set
+of interchangeable units -- a conv's output channels, say -- and names every
+place they appear: the conv's own weight rows and bias, the FiLM rows that
+scale and shift them, and the input columns of whatever reads them next. Each
+place is a segment ``(key, axis, offset, size)``; a FiLM projection's gamma and
+beta halves are two segments of the same group, and a decoder conv's input,
+[upsampled | skip], is two segments of two different groups.
+
+Weight matching (the paper's algorithm 1) needs no data: coordinate descent over
+the groups, each step a linear assignment that maximises the summed inner
+product of A's and B's weights in every segment, with every other group's
+current permutation applied. It is deterministic -- a fixed group order, no
+random restarts -- so a merge that aligns B saves and replays the same way.
+
+Specs exist for the xurdif ``tinyunet_with_attention3`` architecture, whose
+channel LayerNorm has no parameters and averages over channels, so it commutes
+with any permutation. Diffusers' GroupNorm does not, which is why Diffusers
+models are out of scope here.
+"""
+from dataclasses import dataclass, field
+
+ATTN3 = "tinyunet_with_attention3"
+
+
+@dataclass
+class Segment:
+    key: str
+    axis: int
+    offset: int
+    size: int
+
+
+@dataclass
+class Spec:
+    #: group name -> its segments, in a fixed order (the matching order)
+    groups: dict = field(default_factory=dict)
+
+    def add(self, group: str, key: str, axis: int, offset: int = 0, size: int | None = None,
+            state: dict | None = None):
+        n = size if size is not None else state[key].shape[axis] - offset
+        self.groups.setdefault(group, []).append(Segment(key, axis, offset, n))
+
+    def size_of(self, group: str) -> int:
+        return self.groups[group][0].size
+
+    def by_key(self) -> dict:
+        """key -> [(group, segment)], for applying permutations tensor by tensor."""
+        out = {}
+        for g, segs in self.groups.items():
+            for s in segs:
+                out.setdefault(s.key, []).append((g, s))
+        return out
+
+
+def supports(mtype: str | None) -> bool:
+    return mtype == ATTN3
+
+
+def spec_for(mtype: str, state: dict, prefix: str = "") -> Spec:
+    """The permutation groups of one architecture, sized from ``state`` itself."""
+    if mtype != ATTN3:
+        raise ValueError(f"no re-basin spec for {mtype}")
+    return _attn3_spec(state, prefix)
+
+
+def _attn3_spec(state: dict, p: str) -> Spec:
+    """``tinyunet_with_attention3`` (vendor/xurdif/alt_models/tinyunet_with_attn3.py).
+
+    Forward: init_conv -> per level, ConvBlock (conv, channel LayerNorm, FiLM,
+    SiLU), kept as the skip, then a stride-2 conv -> mid_block1 -> attention,
+    ``proj(attn(q, k) v + x)`` -> mid_block2 -> per level, a transposed conv,
+    concat with the matching skip, ConvBlock -> final_conv. Time: sinusoidal
+    embedding -> time_mlp (Linear, SiLU, Linear) -> every FiLM's Linear.
+    """
+    s = Spec()
+    levels = 0
+    while f"{p}downs.{levels}.0.conv.weight" in state:
+        levels += 1
+
+    def block(group, name):
+        """A ConvBlock's output units: conv rows and bias, and both FiLM halves."""
+        n = state[f"{p}{name}.conv.weight"].shape[0]
+        s.add(group, f"{p}{name}.conv.weight", 0, size=n)
+        s.add(group, f"{p}{name}.conv.bias", 0, size=n)
+        for half in (0, n):
+            s.add(group, f"{p}{name}.film.mlp.1.weight", 0, half, n)
+            s.add(group, f"{p}{name}.film.mlp.1.bias", 0, half, n)
+        return n
+
+    s.add("time.hidden", f"{p}time_mlp.0.weight", 0, state=state)
+    s.add("time.hidden", f"{p}time_mlp.0.bias", 0, state=state)
+    s.add("time.hidden", f"{p}time_mlp.2.weight", 1, state=state)
+    s.add("time.out", f"{p}time_mlp.2.weight", 0, state=state)
+    s.add("time.out", f"{p}time_mlp.2.bias", 0, state=state)
+    # ... read by every block's FiLM projection, through a SiLU (elementwise).
+    for key in state:
+        if key.startswith(p) and key.endswith(".film.mlp.1.weight"):
+            s.add("time.out", key, 1, state=state)
+
+    s.add("init", f"{p}init_conv.weight", 0, state=state)
+    s.add("init", f"{p}init_conv.bias", 0, state=state)
+    s.add("init", f"{p}downs.0.0.conv.weight", 1, state=state)
+
+    skip_into = {}  # down level -> (up conv key, offset of the skip in its input)
+    for j in range(levels):
+        i = levels - 1 - j
+        up_out = state[f"{p}ups.{j}.0.weight"].shape[1]
+        skip_into[i] = (f"{p}ups.{j}.1.conv.weight", up_out)
+
+    for i in range(levels):
+        g = f"down{i}.block"
+        n = block(g, f"downs.{i}.0")
+        s.add(g, f"{p}downs.{i}.1.weight", 1, size=n)
+        key, off = skip_into[i]
+        s.add(g, key, 1, off, n)
+        g = f"down{i}.down"
+        s.add(g, f"{p}downs.{i}.1.weight", 0, state=state)
+        s.add(g, f"{p}downs.{i}.1.bias", 0, state=state)
+        nxt = f"{p}downs.{i + 1}.0.conv.weight" if i + 1 < levels else f"{p}mid_block1.conv.weight"
+        s.add(g, nxt, 1, state=state)
+
+    # mid_block1's units are also the attention's residual stream: v must keep
+    # them, because the block adds v's output straight back onto its input.
+    n = block("mid1", "mid_block1")
+    for k in ("q", "k", "v"):
+        s.add("mid1", f"{p}mid_attn.{k}.weight", 1, size=n)
+    s.add("mid1", f"{p}mid_attn.v.weight", 0, size=n)
+    s.add("mid1", f"{p}mid_attn.v.bias", 0, size=n)
+    s.add("mid1", f"{p}mid_attn.proj.weight", 1, size=n)
+    # q and k only meet in q . k, so they share one free order of their own.
+    for k in ("q", "k"):
+        s.add("attn.qk", f"{p}mid_attn.{k}.weight", 0, state=state)
+        s.add("attn.qk", f"{p}mid_attn.{k}.bias", 0, state=state)
+    s.add("attn.proj", f"{p}mid_attn.proj.weight", 0, state=state)
+    s.add("attn.proj", f"{p}mid_attn.proj.bias", 0, state=state)
+    s.add("attn.proj", f"{p}mid_block2.conv.weight", 1, state=state)
+    n = block("mid2", "mid_block2")
+    s.add("mid2", f"{p}ups.0.0.weight", 0, size=n)   # ConvTranspose2d: (in, out, kh, kw)
+
+    for j in range(levels):
+        g = f"up{j}.up"
+        n = state[f"{p}ups.{j}.0.weight"].shape[1]
+        s.add(g, f"{p}ups.{j}.0.weight", 1, size=n)
+        s.add(g, f"{p}ups.{j}.0.bias", 0, size=n)
+        s.add(g, f"{p}ups.{j}.1.conv.weight", 1, 0, n)
+        g = f"up{j}.block"
+        n = block(g, f"ups.{j}.1")
+        nxt = (f"{p}ups.{j + 1}.0.weight", 0) if j + 1 < levels else (f"{p}final_conv.weight", 1)
+        s.add(g, nxt[0], nxt[1], size=n)
+
+    for g, segs in s.groups.items():
+        sizes = {seg.size for seg in segs}
+        if len(sizes) != 1:
+            raise ValueError(f"re-basin spec: group {g} has segments of sizes {sorted(sizes)}")
+    return s
+
+
+def identity(spec: Spec) -> dict:
+    import torch
+
+    return {g: torch.arange(spec.size_of(g)) for g in spec.groups}
+
+
+def apply(state: dict, spec: Spec, perms: dict, skip: tuple | None = None) -> dict:
+    """``state`` with each group's permutation applied wherever its units appear.
+
+    ``perms[g][i]`` is the unit of the input that lands at position ``i``. With
+    ``skip = (key, axis)``, that one axis of that one tensor is left as it is
+    (weight matching reads a tensor with every axis but its own permuted).
+    """
+    import torch
+
+    out = dict(state)
+    for key, segs in spec.by_key().items():
+        t = state[key]
+        axes = {}
+        for g, seg in segs:
+            if skip == (key, seg.axis):
+                continue
+            idx = axes.setdefault(seg.axis, torch.arange(t.shape[seg.axis]))
+            idx[seg.offset:seg.offset + seg.size] = seg.offset + perms[g]
+        for axis, idx in axes.items():
+            t = t.index_select(axis, idx)
+        out[key] = t
+    return out
+
+
+def random_perms(spec: Spec, seed: int = 0) -> dict:
+    import torch
+
+    g = torch.Generator().manual_seed(seed)
+    return {name: torch.randperm(spec.size_of(name), generator=g) for name in spec.groups}
+
+
+def match(state_a: dict, state_b: dict, spec: Spec, max_sweeps: int = 50) -> dict:
+    """Permutations of B's units that best line them up with A's (weight matching).
+
+    Returns ``perms`` for ``apply(state_b, spec, perms)``. Each step solves one
+    group as a linear assignment over the summed inner products of its
+    segments, with every other group's current order applied; sweeps repeat
+    until a whole sweep changes nothing.
+    """
+    import torch
+    from scipy.optimize import linear_sum_assignment
+
+    perms = identity(spec)
+    keys = spec.by_key()
+    a64 = {k: state_a[k].double() for k in keys}
+    b64 = {k: state_b[k].double() for k in keys}
+    for _ in range(max_sweeps):
+        changed = False
+        for g, segs in spec.groups.items():
+            n = spec.size_of(g)
+            cost = torch.zeros(n, n, dtype=torch.float64)
+            for seg in segs:
+                wa = a64[seg.key].narrow(seg.axis, seg.offset, n)
+                wb = apply({seg.key: b64[seg.key]}, _only(spec, seg.key), perms,
+                           skip=(seg.key, seg.axis))[seg.key].narrow(seg.axis, seg.offset, n)
+                cost += wa.movedim(seg.axis, 0).reshape(n, -1) @ wb.movedim(seg.axis, 0).reshape(n, -1).T
+            _, cols = linear_sum_assignment(cost.numpy(), maximize=True)
+            new = torch.as_tensor(cols, dtype=torch.long)
+            if not torch.equal(new, perms[g]):
+                perms[g] = new
+                changed = True
+        if not changed:
+            break
+    return perms
+
+
+def _only(spec: Spec, key: str) -> Spec:
+    """The part of ``spec`` that touches one tensor, so applying it costs one tensor."""
+    sub = Spec()
+    for g, segs in spec.groups.items():
+        for seg in segs:
+            if seg.key == key:
+                sub.groups.setdefault(g, []).append(seg)
+    return sub

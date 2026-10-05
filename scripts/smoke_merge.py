@@ -527,6 +527,51 @@ def check_relatedness():
 
 check_relatedness()
 
+
+def check_rebasin():
+    """The attn3 permutation spec keeps a network's function, and matching finds it."""
+    from app.core.craft import rebasin
+
+    torch.manual_seed(31)
+    net = build_unet("tinyunet_with_attention3", [1, 2, 2, 2]).eval()
+    plain = {k: v.clone() for k, v in net.state_dict().items()}
+    spec = rebasin.spec_for(rebasin.ATTN3, plain)
+    touched = {s.key for segs in spec.groups.values() for s in segs}
+    assert set(plain) - touched == {"final_conv.bias"}, set(plain) - touched
+
+    perms = rebasin.random_perms(spec, seed=5)
+    shuffled = rebasin.apply(plain, spec, perms)
+    assert not torch.equal(shuffled["mid_attn.q.weight"], plain["mid_attn.q.weight"])
+    other = build_unet("tinyunet_with_attention3", [1, 2, 2, 2]).eval()
+    other.load_state_dict(shuffled)
+    g = torch.Generator().manual_seed(0)
+    x, t = torch.randn(2, 3, 32, 32, generator=g), torch.tensor([30.0, 900.0])
+    # cuDNN's default TF32 convolutions round to ~10 bits, so reordered sums
+    # differ by ~2e-4 there; the function itself is compared in full fp32.
+    tf32 = torch.backends.cudnn.allow_tf32
+    torch.backends.cudnn.allow_tf32 = False
+    for device in ("cpu", "cuda") if torch.cuda.is_available() else ("cpu",):
+        n1, n2 = net.to(device), other.to(device)
+        with torch.no_grad():
+            d = (n1(x.to(device), t.to(device)) - n2(x.to(device), t.to(device))).abs().max().item()
+        assert d < 1e-5, f"{device}: a permuted copy computes something else (max |d eps| {d})"
+        print(f"  {device}: a randomly permuted copy computes the same function (max |d eps| {d:.1e})")
+    torch.backends.cudnn.allow_tf32 = tf32
+
+    found = rebasin.match(plain, shuffled, spec)
+    back = rebasin.apply(shuffled, spec, found)
+    assert all(torch.equal(back[k], plain[k]) for k in plain), "matching did not undo the shuffle"
+    same = rebasin.match(plain, plain, spec)
+    assert all(torch.equal(same[k], torch.arange(len(same[k]))) for k in same)
+    # through a checkpoint's own key prefix, as merges see it
+    pre = {f"denoise_fn.{k}": v for k, v in plain.items()}
+    pspec = rebasin.spec_for(rebasin.ATTN3, pre, prefix="denoise_fn.")
+    assert len(pspec.groups) == len(spec.groups) == 23
+    print("re-basin: the attn3 spec keeps the function; matching undoes a shuffle exactly")
+
+
+check_rebasin()
+
 for n in ("mergeA", "mergeB", "mergeC", "merged_linear", "merged_slerp", "merged_blockwise",
           "confA", "confB", "confC", "merged_conf", "twoA", "twoB", "ends", "which",
           "picked", "rawonly", "kept", "relBase", "relA", "relB", "relC"):
