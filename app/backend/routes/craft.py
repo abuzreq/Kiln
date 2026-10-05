@@ -242,8 +242,9 @@ def merge_ladder():
 
     Body: ``model_a``, ``model_b``, ``method``, ``fixed`` (``alpha``,
     ``block_weights``), up to two ``axes`` of ``{param, values}``, ``sample``
-    (Create's sampling fields) and ``refs`` (default true: also sample A and B,
-    which a zoom that already has them skips). A blank seed is resolved here,
+    (Create's sampling fields), ``refs`` (default true: also sample A and B,
+    which a zoom that already has them skips) and ``known`` (recipes the client
+    already holds samples of, which are not sampled again). A blank seed is resolved here,
     once, so every cell and both references share it; ``detail.seed`` says
     which. Cells are published as they finish -- see ``ladder.plan`` for their
     shape -- and blends are never written to disk.
@@ -261,7 +262,8 @@ def merge_ladder():
 
     body = request.get_json(force=True, silent=True) or {}
     (a, b) = require(body, "model_a", "model_b")
-    cells = ladder.plan(body.get("method", "linear"), body.get("fixed"), body.get("axes"))
+    cells = ladder.plan(body.get("method", "linear"), body.get("fixed"), body.get("axes"),
+                        body.get("known"))
     compat = check_compat(a, b)
     if not compat["compatible"]:
         raise IncompatibleModelError("; ".join(compat["reasons"]))

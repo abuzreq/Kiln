@@ -210,6 +210,15 @@ def check_ladder_plan():
     assert [c["recipe"]["method"] for c in two if c["order"] in (0, 1)] == ["slerp", "linear"]
     dup = plan("linear", {}, [{"param": "alpha", "values": [0.5, 0.3, 0.5]}])
     assert dup[2]["same_as"] == 0 and dup[2]["order"] is None, dup
+    zoom = plan("linear", {}, [{"param": "alpha", "values": [0.25, 0.3125, 0.375, 0.4375, 0.5]}],
+                known=[{"method": "linear", "alpha": 0.25}, {"method": "linear", "alpha": 0.5}])
+    assert [c["same_as"] for c in zoom] == ["known", None, None, None, "known"], zoom
+    refine = plan("blockwise", {"block_weights": {"mid": 0.5}},
+                  [{"param": "encoder", "values": [0, 0.25, 0.5]},
+                   {"param": "decoder", "values": [0.5, 0.75, 1]}],
+                  known=[{"method": "blockwise",
+                          "block_weights": {"encoder": 0.25, "mid": 0.5, "decoder": 0.75}}])
+    assert refine[4]["same_as"] == "known" and sum(c["order"] is not None for c in refine) == 8
     grid = plan("linear", {"block_weights": {"mid": 0.5}},
                 [{"param": "encoder", "values": [0, 0.5, 1]},
                  {"param": "decoder", "values": [0, 0.5, 1]}])
@@ -231,7 +240,8 @@ def check_ladder_plan():
         except ValidationError:
             continue
         raise AssertionError(f"plan accepted {bad}")
-    print("ladder plan: ends reuse A and B, duplicates collapse, middle first, bad axes refused")
+    print("ladder plan: ends reuse A and B, known and duplicate cells collapse, middle first, "
+          "bad axes refused")
 
 
 def check_ladder_route():

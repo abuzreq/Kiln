@@ -50,17 +50,20 @@ def end_of(r: dict) -> str | None:
     return None
 
 
-def plan(method: str, fixed: dict | None, axes: list) -> list[dict]:
+def plan(method: str, fixed: dict | None, axes: list, known: list | None = None) -> list[dict]:
     """The cells of one ladder, in the order they should be sampled.
 
     ``axes`` holds up to two ``{"param", "values"}``; with two, the first runs
     down the rows and the second across the columns. A stage axis makes the
     ladder block-wise; ``method`` as an axis compares linear and slerp.
 
+    ``known`` lists recipes the caller already has samples of, on this seed and
+    these settings -- a zoom's end steps, a refined grid's centre.
+
     Returns every cell as ``{x, y, recipe, same_as, order}``: ``same_as`` is
-    "a", "b" or the index of an earlier identical cell, for cells that need no
-    sample of their own, and ``order`` ranks the rest middle-out, so the steps
-    most likely to be picked land first.
+    "a", "b", "known" or the index of an earlier identical cell, for cells that
+    need no sample of their own, and ``order`` ranks the rest middle-out, so the
+    steps most likely to be picked land first.
     """
     fixed = fixed or {}
     axes = list(axes or [])
@@ -94,6 +97,8 @@ def plan(method: str, fixed: dict | None, axes: list) -> list[dict]:
         raise ValidationError(
             f"a ladder of {len(ys) * len(xs)} cells is too large; the most is {MAX_CELLS}")
 
+    have = {_key(recipe(k.get("method", method), k.get("alpha", 0.5), k.get("block_weights")))
+            for k in (known or [])}
     cells, seen = [], {}
     for y, vy in enumerate(ys):
         for x, vx in enumerate(xs):
@@ -113,8 +118,8 @@ def plan(method: str, fixed: dict | None, axes: list) -> list[dict]:
                 else:
                     blocks[p] = v
             r = recipe(m, alpha, blocks)
-            key = repr(sorted(r.items()))
-            same = end_of(r)
+            key = _key(r)
+            same = end_of(r) or ("known" if key in have else None)
             if same is None and key in seen:
                 same = seen[key]
             seen.setdefault(key, len(cells))
@@ -131,6 +136,10 @@ def plan(method: str, fixed: dict | None, axes: list) -> list[dict]:
     for rank, c in enumerate(todo):
         c["order"] = rank
     return cells
+
+
+def _key(r: dict) -> str:
+    return repr(sorted((k, sorted(v.items()) if isinstance(v, dict) else v) for k, v in r.items()))
 
 
 def _unit(v, name: str) -> float:
