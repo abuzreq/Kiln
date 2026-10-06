@@ -49,6 +49,14 @@ def shot(page, name, wait_ms=1500):
     print("  " + name)
 
 
+def set_drawer(page, open_):
+    """Open or close the Discoveries drawer, whichever state it is in now."""
+    bar = page.locator(".disc-bar")
+    if (bar.get_attribute("aria-expanded") == "true") != open_:
+        bar.click()
+        page.wait_for_timeout(500)
+
+
 def click_text(page, text):
     page.get_by_text(text, exact=True).first.click()
 
@@ -88,6 +96,14 @@ def main():
         shot(page, "data", 5000)
         click_text(page, "Train")
         page.wait_for_timeout(1500)
+        click_text(page, "Train new model")
+        page.wait_for_timeout(1500)
+        page.locator(".disclose-head", has_text="Advanced").first.click()
+        page.wait_for_timeout(800)
+        # The presets at the top, the start of Advanced below them.
+        page.get_by_text("Quick 256", exact=False).first.evaluate(
+            "e => e.scrollIntoView({block: 'start'})")
+        shot(page, "train-new", 1500)
         click_text(page, "View previous runs")
         shot(page, "train", 5000)
         click_text(page, "Models")
@@ -111,8 +127,32 @@ def main():
         page.get_by_role("button", name="Load", exact=True).nth(2).click()
         page.wait_for_timeout(1000)
         page.get_by_role("button", name="Generate with bends").first.click()
+        page.mouse.move(5, 450)
+        # The compare renders plain, then bent: two jobs, with a gap between
+        # them that looks idle. Its button comes back only after both.
+        page.wait_for_timeout(3000)
+        page.get_by_role("button", name="Generate with bends").first.wait_for(timeout=240_000)
         wait_idle(page, url)
         shot(page, "bend", 2500)
+
+        # The Discoveries drawer along the bottom, on this model's finds, then
+        # its map. The finds come from the explorer: run Find novel bends on
+        # the model for a few minutes first, or the drawer is empty.
+        set_drawer(page, True)
+        page.wait_for_timeout(2500)
+        click_text(page, "This model")
+        click_text(page, "Most novel")
+        page.mouse.move(5, 300)
+        page.wait_for_timeout(1500)
+        shot(page, "discoveries", 1500)
+        page.locator("button", has_text="Explore").first.click()
+        page.wait_for_timeout(1500)
+        click_text(page, "Map")
+        page.mouse.move(5, 5)
+        shot(page, "discoveries-map", 3000)
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(500)
+        set_drawer(page, False)  # the drawer's state is remembered
 
         click_text(page, "Merge")
         page.wait_for_timeout(2000)

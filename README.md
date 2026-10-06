@@ -11,17 +11,18 @@ two models into a third, and lay a setting out across a grid to see what it does
 
 Nothing leaves your machine. Your images, models and pictures stay in one folder you can open.
 
-![Bending a model: the same seed with and without the bend, side by side](screenshots/bend.webp)
+![The Start hub: Create and Prepare, your latest capture, and your models](screenshots/start.webp)
 
-Kiln has two halves, and the usual path runs from one to the other:
+Kiln has two halves:
 
+* **Create**: generate and paint on a **canvas**, **bend** a model's layers, **merge** two
+  models, and **sweep** a setting across a grid. Meanwhile **Discoveries** hunts for strange
+  bends in the background.
 * **Prepare**: collect images into a **dataset**, **train** a model on it, and keep the good ones
   in your **model library**.
-* **Create**: generate and paint on a **canvas**, **bend** a model's layers, **merge** two
-  models, and **sweep** a setting across a grid.
 
-No dataset yet? Kiln can fetch seven ready-made sample models in one click, so you can start in
-Create on day one. It is inspired by [Autolume](https://metacreation-lab.github.io/autolume/).
+You don't need a model of your own to start. Kiln fetches seven ready-made sample models in one
+click, so you can be in Create on day one, and come to Prepare when you want your own. It is inspired by [Autolume](https://metacreation-lab.github.io/autolume/).
 
 ---
 
@@ -43,75 +44,19 @@ Python 3.12 for you with `winget`. Details for each system are under [Install](#
 
 ---
 
-## A tour
+## Start
 
-### Start
+The hub you land on (pictured at the top of this page). **Create** and **Prepare** lead into the
+two halves, and a bar shows any job running in either. Your latest capture is there to pick up
+where you left off. Every model in your library appears as a card that cycles through pictures
+Kiln made with it in the background. Click one to open it in Create at that picture's seed.
 
-![The Start hub: Prepare and Create, your latest capture, and your models](screenshots/start.webp)
+## Create
 
-The hub you land on. **Prepare** and **Create** lead into the two halves, and a bar shows any job
-running in either. Your latest capture is there to pick up where you left off. Every model in
-your library appears as a card that cycles through pictures Kiln made with it in the
-background. Click one to open it in Create at that picture's seed.
+Create is where you make pictures with a model. Its four tabs are **Canvas**, **Bend**, **Merge**
+and **Sweep**, and the **Discoveries** drawer runs along the bottom of all of them.
 
-### Prepare ▸ Data: a folder becomes a dataset
-
-![A dataset of 207 galaxy images, with framing and augmentation settings](screenshots/data.webp)
-
-A dataset is Kiln's record of images you already have, not a copy of them.
-
-* **Add a folder or file** by path and it is read where it lives, subfolders included. New files
-  dropped into that folder join the dataset on their own. **Upload…** is the one exception: files
-  sent from the browser are copied in, since they have nowhere else to live.
-* **Videos** are turned into frames on request, at a rate you choose.
-* **Remove** an image and it leaves the dataset but stays on disk; "Show removed" and **Restore
-  all** undo it. Removing a source folder never touches the folder.
-* **Framing and augmentation** decide what training sees:
-  * a size, and how images are fitted to it: center crop, stretch, or pad;
-  * which augmentations to use: H flip, V flip, Rotate, Brightness, Contrast.
-
-  The augmentations combine, so the recipe says exactly how big the training set is: *H flip ×2 ·
-  Rotate ×4 = 8 versions of each image.* Nothing is random, and no augmented copies are written to
-  disk.
-* **Train on this dataset** carries it straight to a new run.
-
-### Prepare ▸ Train: teach a model
-
-![A training run with its snapshots, each one a model you can keep](screenshots/train.webp)
-
-**Train new model** sets up a run: a dataset, a name, and whether to start from scratch or from a
-model in your library.
-
-* **Presets** suit the run to your GPU, and Kiln estimates peak memory before you start.
-* **Under Advanced:** image size, batch, learning rate, architecture, attention layout and
-  snapshot frequency.
-* **While a run goes:** live samples, a loss curve, the exact command in use, and the log.
-* **Stop and continue:** a run can be stopped and continued later from its latest checkpoint.
-* **Snapshots** are checkpoints along the way. **Save** the ones you like into the library under a
-  name.
-
-**View previous runs** lists everything you have trained.
-
-### Prepare ▸ Models: your library
-
-![The model library and the seven sample models](screenshots/models.webp)
-
-Your library, plus five ways to add to it:
-
-* **Sample models**: seven models to start from, fetched in one click (see
-  [Getting models](#getting-models)).
-* **Import a model**: a `.pt` you already have. Drop it in, or give its path.
-* **Get a model**: download a checkpoint from a URL.
-* **Re-home a model**: convert a xurdif `.pt` into the Diffusers format, leaving the original
-  alone.
-* **From Hugging Face**: check a repo for compatibility and import it. Unconditional pixel-space
-  models only; text-to-image models such as Stable Diffusion are not supported.
-
-Model cards show a sample, the architecture and training step, and offer **Use in Create**,
-**Train**, rename and pin. Models inside Kiln's folder can be deleted. Models Kiln only found
-elsewhere are hidden instead, and the file stays where it is.
-
-### Create ▸ Canvas: make and paint
+### Canvas: make and paint
 
 ![The canvas with a freshly generated picture, its results and layers](screenshots/canvas.webp)
 
@@ -134,23 +79,79 @@ pause or stop it and keep it as it is.
 Shortcuts: `Ctrl+Z` / `Ctrl+Shift+Z` undo and redo, `Ctrl+D` clears the mask, `Ctrl+Shift+I`
 inverts it, and space-drag pans the canvas.
 
-### Create ▸ Bend: reach inside the model
+### Bend: reach inside the model
 
-![Kiln's starter bends, each pictured with and without](screenshots/bend-presets.webp)
+![Bending: the model map, a bend stack, and the same seed with and without it](screenshots/bend.webp)
 
 Bending rewrites the network's activations while a picture forms. It changes the output, never
 the model file.
 
-* **Pick where:** choose layers on a map of the model.
-* **Stack operations:** multiply, shift, add noise, clamp, and more. Each has its own amount and a
-  window of the run to act in.
-* **Compare:** see the bent picture against the plain one on the same seed (the picture at the top
-  of this page).
-* **Start from a preset:** the six starters show what each kind of bend does.
+* **Pick where:** choose layers on a map of the model:
+  * the encoder, which reads the image;
+  * the bottleneck, which holds it at its coarsest;
+  * the decoder, which paints detail back in.
+* **Stack operations:** multiply, shift, add noise, clamp, edge filters and more. Each has its own
+  amount and a window of the run to act in, from the first noisy steps to the last.
+* **Compare:** the bent picture sits against the plain one on the same seed, in a wipe, flip or
+  side-by-side view.
 * **Keep and share:** setups save as presets and export as JSON.
 * **Animate:** sweep one bend setting into a GIF or video loop.
 
-### Create ▸ Merge: blend two models
+![Kiln's six starter bends, each pictured with and without](screenshots/bend-presets.webp)
+
+Not sure where to begin? **Presets** opens six starters. Each one changes one thing and shows it
+on a sample model, with the unbent picture in the corner:
+
+| Starter | What it does |
+| --- | --- |
+| *soft-focus* | Damps the encoder |
+| *etched* | Mixes the decoder's own edges back in |
+| *bottleneck-flare* | Amplifies the middle of the network |
+| *grain-storm* | Injects noise into the decoder |
+| *poster* | Clamps the decoder into flat bands |
+| *drift* | Slides the encoder's features sideways |
+
+Load one, generate, then edit it.
+
+### Discoveries: let Kiln look for bends
+
+![The Discoveries drawer open along the bottom of Create](screenshots/discoveries.webp)
+
+Bending has a huge space of settings, and most of it is unexplored. **Find novel bends** sets a
+background explorer loose on the model you have picked. It:
+
+1. builds a random stack of up to three bends,
+2. renders it on three fixed seeds at a small size,
+3. measures how the pictures look with a vision model, **CLIP** or **DINOv2**, and
+4. keeps the bend only if it looks unlike every bend it has kept so far.
+
+This is a search for the new and strange, not for good pictures. (Researchers call it *novelty
+search*.) Most finds are odd, and a few are worth a closer look. The bar for "new" adjusts itself
+as the collection grows.
+
+The two judges disagree in an interesting way. CLIP groups pictures by what a caption would say;
+DINOv2 groups them by structure and texture.
+
+The explorer steps aside whenever you generate, so it never slows your own work. Its finds
+collect in the drawer, which you open by clicking the **Discoveries** bar:
+
+* **Filter and sort:** show **All models** or just **This model**, **Newest** or **Most novel**
+  first.
+* **Use a find:** click it to load its bend stack into **Bend**, ready to generate with and edit.
+* **Keep or clear:** save the ones you like as presets, and delete the rest.
+
+![The Discoveries map: finds laid out by similarity](screenshots/discoveries-map.webp)
+
+**Explore…** opens a bigger view with three layouts:
+
+* **Grid:** every find.
+* **Map:** finds that look alike sit near each other.
+* **Similar:** the nearest neighbours of one find.
+
+It is a way to wander the space of bends by eye, from something interesting to the things that
+resemble it.
+
+### Merge: blend two models
 
 ![A merge ladder: five steps from model A to model B on one seed](screenshots/merge.webp)
 
@@ -166,7 +167,7 @@ arithmetic).
 * **Merge with**, on the Canvas, blends a recipe into the selected model in memory, for the whole
   canvas or one mask.
 
-### Create ▸ Sweep: see what a setting does
+### Sweep: see what a setting does
 
 ![The sweep screen with three example grids](screenshots/sweep.webp)
 
@@ -174,12 +175,108 @@ Lay a setting out across a grid, one axis or two: seed, steps, sampler or image 
 samples every cell, and you can download the contact sheet. Three worked examples are one click
 away.
 
-### Discoveries
+## Prepare
 
-A strip along the bottom of Create runs a background explorer. Given a model, it tries random bends
-and keeps the ones that look new to it, judged by CLIP or DINOv2. It yields to your own
-generations. Any discovery can be loaded into Bend, saved as a preset, or opened in a map that
-walks between similar results.
+Prepare is where models come from: turn a folder of pictures into a **dataset**, **train** a
+model on it, and keep the results in your **model library**.
+
+### Data: a folder becomes a dataset
+
+![A dataset of 207 galaxy images, with framing and augmentation settings](screenshots/data.webp)
+
+A dataset is Kiln's record of images you already have, not a copy of them.
+
+* **Add a folder or file** by path and it is read where it lives, subfolders included. New files
+  dropped into that folder join the dataset on their own. **Upload…** is the one exception: files
+  sent from the browser are copied in, since they have nowhere else to live.
+* **Videos** are turned into frames on request, at a rate you choose.
+* **Remove** an image and it leaves the dataset but stays on disk; "Show removed" and **Restore
+  all** undo it. Removing a source folder never touches the folder.
+* **Framing and augmentation** decide what training sees:
+  * a size, and how images are fitted to it: center crop, stretch, or pad;
+  * which augmentations to use: H flip, V flip, Rotate, Brightness, Contrast.
+
+  The augmentations combine, so the recipe says exactly how big the training set is: *H flip ×2 ·
+  Rotate ×4 = 8 versions of each image.* Nothing is random, and no augmented copies are written to
+  disk.
+* **Train on this dataset** carries it straight to a new run.
+
+### Train: teach a model
+
+![Setting up a new run: dataset, presets, and the Advanced settings opened](screenshots/train-new.webp)
+
+**Train new model** sets up a run: a dataset, a name, and where to start:
+
+* **from scratch**, or
+* **from a model in your library**, to keep training it or to fine-tune it on new pictures.
+
+**Presets** pick the size of the run. Kiln estimates the peak GPU memory of each before you start,
+and marks the one that suits your card:
+
+| Preset | Image size | Batch | Steps | Good for |
+| --- | --- | --- | --- | --- |
+| **Quick 256** | 256 | 8 | 120,000 | Finding out whether a dataset works at all, fast |
+| **Standard 512** | 512 | 4 | 280,000 | The default: good detail without a long wait |
+| **Detailed 512** | 512 | 2 | 400,000 | A deeper, wider network: most detail, slowest, needs a bigger GPU |
+
+You do not have to wait for the end. Kiln saves a snapshot every 1,000 steps, so a model is
+usable long before the step count runs out.
+
+**Advanced** holds everything a preset sets, and a few things it does not. The defaults are the
+ones the presets are measured against. Change them to get a different *kind* of model, not to fix
+a slow or poor run.
+
+* **Run size:** image size, batch, iterations, and how often to save a snapshot. A smaller batch
+  uses less memory. **Grad accum** adds several small batches together, for a bigger effective
+  batch on a small GPU.
+* **Learning rate and schedule:** how big each update is, and how it falls over the run. Lowering
+  it once the model has the general idea sharpens detail without the model drifting from what it
+  learned. You can edit the schedule point by point.
+* **Engine:**
+  * **xurdif**, the compact models Kiln started with;
+  * **Diffusers**, Hugging Face models, which can also be fine-tuned or trained as a LoRA.
+* **Network shape:** these three are fixed for the life of a model, and two models can only be
+  merged if they match.
+  * **Architecture:** which kind of network to build.
+  * **Channel multipliers:** its width at each level. `1,2,2,2` is small and fast, `1,2,2,4` is
+    Standard, and `1,2,2,4,4` is Detailed.
+  * **Attention layout:** where attention sits. Attention helps overall composition.
+* **Prediction:** `x0` predicts the finished image and settles faster on small datasets. `eps`
+  predicts the noise, the classic formulation.
+* **Fit:** non-square pictures are squashed to fit (`resize`) or cropped from a random spot each
+  time (`crop`).
+* **Loss:** the edge-aware loss keeps lines and texture crisp instead of averaging them out.
+  **SSIM weight** mixes in structural similarity.
+
+**Snapshot thumbnails** sets how many pictures Kiln draws at each snapshot, and from which seed.
+
+![A training run with its snapshots, each one a model you can keep](screenshots/train.webp)
+
+While a run goes you see live samples, a loss curve, the exact command in use, and the log:
+
+* **Stop and continue:** a run can be stopped and continued later from its latest checkpoint.
+* **Snapshots** are checkpoints along the way. **Save** the ones you like into the library under a
+  name.
+* **View previous runs** lists everything you have trained.
+
+### Models: your library
+
+![The model library and the seven sample models](screenshots/models.webp)
+
+Your library, plus five ways to add to it:
+
+* **Sample models**: seven models to start from, fetched in one click (see
+  [Getting models](#getting-models)).
+* **Import a model**: a `.pt` you already have. Drop it in, or give its path.
+* **Get a model**: download a checkpoint from a URL.
+* **Re-home a model**: convert a xurdif `.pt` into the Diffusers format, leaving the original
+  alone.
+* **From Hugging Face**: check a repo for compatibility and import it. Unconditional pixel-space
+  models only; text-to-image models such as Stable Diffusion are not supported.
+
+Model cards show a sample, the architecture and training step, and offer **Use in Create**,
+**Train**, rename and pin. Models inside Kiln's folder can be deleted. Models Kiln only found
+elsewhere are hidden instead, and the file stays where it is.
 
 ---
 
@@ -458,7 +555,8 @@ Three scripts make the shipped pictures:
 * `scripts/make_icon.py` draws the app icon in `app/assets/` from the mark's geometry.
 * `scripts/make_example_media.py` renders the Sweep examples and the starter-bend pictures.
 * `scripts/make_readme_shots.py` takes this README's screenshots from a running Kiln. It needs
-  `pip install playwright pillow`.
+  `pip install playwright pillow`, the sample models, and a few minutes of **Find novel bends**
+  on `txplsa-200` so the Discoveries drawer has something in it.
 
 ### Smoke tests
 
