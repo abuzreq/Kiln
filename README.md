@@ -9,6 +9,12 @@ trains a compact image model on them, on your own computer. Then you make pictur
 model, and go further than "generate": paint into them, *bend* the network while it works, blend
 two models into a third, and lay a setting out across a grid to see what it does.
 
+**Small** means small. The models Kiln trains are under 100 MB (the sample models are 29–81 MB),
+where Stable Diffusion runs to several gigabytes. So a picture takes seconds, not minutes, and you
+don't need the newest graphics card: training fits in about 2–4 GB of GPU memory, so a laptop GPU
+or a card a few generations old will do. Small models also learn from small datasets, a few hundred of
+*your* pictures rather than millions of other people's.
+
 Nothing leaves your machine. Your images, models and pictures stay in one folder you can open.
 
 ![The Start hub: Create and Prepare, your latest capture, and your models](screenshots/start.webp)
@@ -22,7 +28,9 @@ Kiln has two halves:
   in your **model library**.
 
 You don't need a model of your own to start. Kiln fetches seven ready-made sample models in one
-click, so you can be in Create on day one, and come to Prepare when you want your own. It is inspired by [Autolume](https://metacreation-lab.github.io/autolume/).
+click, so you can be in Create on day one, and come to Prepare when you want your own.
+
+Kiln is inspired by [Autolume](https://metacreation-lab.github.io/autolume/).
 
 ---
 
@@ -222,6 +230,9 @@ and marks the one that suits your card:
 You do not have to wait for the end. Kiln saves a snapshot every 1,000 steps, so a model is
 usable long before the step count runs out.
 
+<details>
+<summary><b>What the Advanced settings do</b></summary>
+
 **Advanced** holds everything a preset sets, and a few things it does not. The defaults are the
 ones the presets are measured against. Change them to get a different *kind* of model, not to fix
 a slow or poor run.
@@ -247,6 +258,8 @@ a slow or poor run.
   time (`crop`).
 * **Loss:** the edge-aware loss keeps lines and texture crisp instead of averaging them out.
   **SSIM weight** mixes in structural similarity.
+
+</details>
 
 **Snapshot thumbnails** sets how many pictures Kiln draws at each snapshot, and from which seed.
 
@@ -289,6 +302,9 @@ can use Kiln too. Start Kiln as usual, or headless with `--no-window`, and send 
 Every reply has the form `{"ok": true, "data": …}`, or `{"ok": false, "error": "…"}` with an HTTP
 error status. Anything that takes GPU time is a **job**: the request returns at once with a job
 id, and you poll that until it is done.
+
+<details>
+<summary><b>A worked example in Python</b></summary>
 
 This makes one bent picture and keeps it. It needs `requests`, which Kiln's own `.venv` already
 has:
@@ -333,7 +349,12 @@ saved = call("POST", "/perform/capture", json={"image": image, "card": job["deta
 print("\nsaved to", saved["path"])
 ```
 
+</details>
+
 Jobs you start this way show up in the open window as well, so you can watch them.
+
+<details>
+<summary><b>The main calls</b></summary>
 
 | To | Call |
 | --- | --- |
@@ -346,6 +367,8 @@ Jobs you start this way show up in the open window as well, so you can watch the
 | Merge | `POST /craft/merge` with `model_a`, `model_b`, `out_name`, `method`, `alpha` — writes a new model and returns its path |
 | Datasets | `POST /datasets` with `name`, then `POST /datasets/<name>/link` with a folder `path` |
 | Train | `POST /train` with `dataset`, `run_name` — a job; stop it with `/jobs/<id>/cancel` |
+
+</details>
 
 The routes live in [`app/backend/routes/`](app/backend/routes), one file per area. The scripts in
 [`scripts/`](scripts) exercise most of them, and are good worked examples.
@@ -375,11 +398,16 @@ The repository ships no weights. Five ways to get some:
 4. **Hugging Face**, under **Prepare ▸ Models ▸ From Hugging Face**.
 5. **Train your own**, which is what the rest of Prepare is for.
 
+<details>
+<summary><b>Models from older installs, and files that will not load</b></summary>
+
 Older installs kept models in the install's own `models/pretrained` and `models/fine_tuned`. Kiln
 no longer ships those folders, but if yours still has them it scans them, and a recipe naming a
 model there finds the same file once it has been moved into the workspace. Kiln will only ever
 hide a model outside the workspace, never delete it. A file Kiln finds but cannot read is listed
 under **Not loading** with the reason, instead of quietly not appearing.
+
+</details>
 
 ---
 
@@ -388,7 +416,7 @@ under **Not loading** with the reason, instead of quietly not appearing.
 ### Requirements
 
 * **Python 3.10+.** On Windows, `kiln.bat` offers to install it through `winget` if none is found.
-* **A GPU:** an NVIDIA card with CUDA, or a Mac with Apple Silicon (see [macOS](#macos)).
+* **A GPU:** an NVIDIA card with CUDA, or a Mac with Apple Silicon (see *macOS* under [Install](#install)).
   Training xurdif models needs NVIDIA. Diffusers models train on either GPU, or slowly on the CPU.
 * **About 6 GB of disk** for PyTorch and the rest of the dependencies.
 * **Internet on first use of some features.** Steering with words downloads OpenAI's CLIP weights
@@ -425,7 +453,8 @@ trust.
 Kiln keeps everything it makes in one workspace folder, `~/kiln` by default. The **Workspace**
 button in the top bar shows what is in it and can move it somewhere else.
 
-### Linux notes
+<details>
+<summary><b>Linux notes</b></summary>
 
 Two things have to come from your distribution first. Kiln says which one is missing when it hits
 it, but installing them up front saves the round trip:
@@ -441,7 +470,10 @@ Without the WebKit packages everything still works: Kiln prints its URL and you 
 browser, which is what `./kiln.sh --no-window` does anyway. If the launcher lost its executable
 bit (downloading a zip rather than cloning does that), `chmod +x kiln.sh` restores it.
 
-### macOS
+</details>
+
+<details>
+<summary><b>macOS: Apple Silicon and what runs on it</b></summary>
 
 Kiln uses the GPU on Apple Silicon Macs (M1 and later) through PyTorch's Metal backend (MPS):
 
@@ -463,7 +495,10 @@ If a model misbehaves on the GPU, run it on the CPU with `KILN_DEVICE=cpu ./kiln
 Kiln sets `PYTORCH_ENABLE_MPS_FALLBACK=1`, so the few operations Metal lacks run on the CPU
 instead of failing. Intel Macs run Kiln on the CPU, with training turned off.
 
-### Setting up by hand
+</details>
+
+<details>
+<summary><b>Setting up by hand</b></summary>
 
 ```bash
 python install.py                 # system Python; builds .venv and installs everything
@@ -472,7 +507,10 @@ python install.py                 # system Python; builds .venv and installs eve
 .venv/bin/python start.py           # macOS / Linux
 ```
 
-### If it says CPU but you have a GPU
+</details>
+
+<details>
+<summary><b>If it says CPU but you have a GPU</b></summary>
 
 The installer reads your NVIDIA driver version and picks the newest PyTorch build that driver can
 run. Installing a build *newer* than the driver is the usual cause of a GPU that PyTorch cannot
@@ -500,7 +538,10 @@ To pick one by hand, find your driver with `nvidia-smi` and use the matching ind
 .venv/bin/python -m pip install --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu126
 ```
 
-### Command line options
+</details>
+
+<details>
+<summary><b>Command line options</b></summary>
 
 * `--no-window` — run headless and print the URL.
 * `--port <int>` — backend port (default `8777`, or `$KILN_PORT`).
@@ -509,11 +550,16 @@ To pick one by hand, find your driver with `nvidia-smi` and use the matching ind
   `$KILN_HOST`).
 * `KILN_WORKSPACE` — workspace folder (default `~/kiln`).
 
+</details>
+
 ---
 
 ## Engines
 
 Kiln runs two backends, and the screens work the same way for both.
+
+<details>
+<summary><b>xurdif and Diffusers compared</b></summary>
 
 | | xurdif | Diffusers |
 | --- | --- | --- |
@@ -533,6 +579,8 @@ pixel-space models.
 `TinyUNet2DModel` is a reimplementation of xurdif's architecture inside Diffusers. At 512×512 it
 samples about 4× faster and trains about 7× faster than a standard `UNet2DModel`, at half the
 VRAM. **Prepare ▸ Models ▸ Re-home a model** converts a `.pt` into it without precision loss.
+
+</details>
 
 ---
 
@@ -558,7 +606,8 @@ Three scripts make the shipped pictures:
   `pip install playwright pillow`, the sample models, and a few minutes of **Find novel bends**
   on `txplsa-200` so the Discoveries drawer has something in it.
 
-### Smoke tests
+<details>
+<summary><b>Smoke tests</b></summary>
 
 `scripts/` holds runnable checks rather than a unit-test suite. None of them touches your own
 workspace: each builds a throwaway one (or uses `$KILN_WORKSPACE` if you set it) and prints
@@ -580,7 +629,10 @@ python scripts/smoke_mac.py               # macOS decisions, simulated (any mach
 python scripts/smoke_mac.py --real        # on an Apple Silicon Mac: sample and train on MPS
 ```
 
-### Layout
+</details>
+
+<details>
+<summary><b>Repository layout</b></summary>
 
 ```
 app/
@@ -596,6 +648,8 @@ vendor/xurdif/     # vendored xurdif engine
 ```
 
 Models, datasets, runs and images are not in the repository; they live in the workspace.
+
+</details>
 
 ---
 
