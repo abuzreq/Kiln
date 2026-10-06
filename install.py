@@ -129,6 +129,8 @@ def _read_stamp() -> dict:
 def _write_stamp(torch_build: str | None = None, driver=None):
     STAMP_FILE.parent.mkdir(parents=True, exist_ok=True)
     STAMP_FILE.write_text(json.dumps({
+        # Kept across reinstalls: shortcuts someone deleted stay deleted.
+        "shortcuts_made": _read_stamp().get("shortcuts_made", False),
         "fingerprint": _fingerprint(),
         "python": sys.version.split()[0],
         # Which CUDA the installed torch was built for, and the driver it was
@@ -408,8 +410,6 @@ def install_requirements(force: bool = False):
         _write_stamp(torch_build=_torch_build(py)[1], driver=cuda_pick.driver_version())
         return
 
-    _require_git_on_mac()
-
     # Only bump pip on a real install; not on every launch.
     run([str(py), "-m", "pip", "install", "--upgrade", "pip"])
 
@@ -464,28 +464,6 @@ def install_requirements(force: bool = False):
         )
 
 
-def _require_git_on_mac():
-    """pip needs git for the CLIP requirement, and a fresh Mac has none.
-
-    Without the Command Line Tools, ``git`` is a stub that opens an install
-    dialog and fails, so pip dies midway with an error that never says git.
-    """
-    import shutil
-
-    if not platform_mac.is_mac():
-        return
-    try:
-        ok = bool(shutil.which("git")) and subprocess.run(
-            ["git", "--version"], capture_output=True, timeout=20).returncode == 0
-    except Exception:  # noqa: BLE001
-        ok = False
-    if not ok:
-        raise SystemExit(
-            "\nKiln's install needs git, which comes with Apple's Command Line Tools.\n"
-            "Install them with:\n    xcode-select --install\n"
-            "then run this launcher again.\n")
-
-
 def _check_native_libs(py: Path):
     """One real import of OpenCV, once, after a fresh install.
 
@@ -508,6 +486,85 @@ def _check_native_libs(py: Path):
             "    sudo apt install libgl1 libglib2.0-0\n"
             "  Dataset prep from video and the post-processing chain need it."
         )
+
+
+ICON_DIR = ROOT / "app" / "assets"
+
+
+def _windows_shortcuts() -> list[str]:
+    """Kiln.lnk in the Start menu and on the desktop, with Kiln's icon.
+
+    A .bat cannot carry an icon, so this is what gives Kiln one. Made through
+    WScript.Shell from PowerShell: nothing to install. The console opens
+    normally, not minimized: after a requirements change it shows a pip pass
+    that can take minutes, and on a failure kiln.bat pauses there with the
+    reason -- neither should be hidden in a taskbar button.
+    """
+    bat = ROOT / "kiln.bat"
+    icon = ICON_DIR / "kiln.ico"
+    # Single quotes are PowerShell's literal strings; double any in the paths.
+    q = lambda p: "'" + str(p).replace("'", "''") + "'"  # noqa: E731
+    script = (
+        "$sh = New-Object -ComObject WScript.Shell\n"
+        "foreach ($f in 'Programs', 'Desktop') {\n"
+        "  $dir = [Environment]::GetFolderPath($f)\n"
+        "  $lnk = $sh.CreateShortcut((Join-Path $dir 'Kiln.lnk'))\n"
+        "  $lnk.TargetPath = $env:ComSpec\n"
+        f"  $lnk.Arguments = '/c \"' + {q(bat)} + '\"'\n"
+        f"  $lnk.WorkingDirectory = {q(ROOT)}\n"
+        f"  $lnk.IconLocation = {q(icon)} + ',0'\n"
+        "  $lnk.WindowStyle = 1\n"
+        "  $lnk.Description = 'Kiln'\n"
+        "  $lnk.Save()\n"
+        "  Write-Output $lnk.FullName\n"
+        "}\n"
+    )
+    out = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-Command", script],
+        capture_output=True, text=True, timeout=60,
+    )
+    if out.returncode != 0:
+        raise RuntimeError((out.stderr or out.stdout).strip() or "PowerShell failed")
+    return [line.strip() for line in out.stdout.splitlines() if line.strip()]
+
+
+def _linux_shortcut() -> list[str]:
+    """A desktop entry, so Kiln shows up in the application menu."""
+    apps = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "applications"
+    apps.mkdir(parents=True, exist_ok=True)
+    entry = apps / "kiln.desktop"
+    entry.write_text(
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=Kiln\n"
+        "Comment=Train, bend and merge small diffusion models\n"
+        f"Exec=\"{ROOT / 'kiln.sh'}\"\n"
+        f"Path={ROOT}\n"
+        f"Icon={ICON_DIR / 'kiln.png'}\n"
+        "Terminal=true\n"
+        "Categories=Graphics;\n",
+        encoding="utf-8",
+    )
+    return [str(entry)]
+
+
+def make_shortcuts() -> bool:
+    """Put Kiln where people look for apps. Returns True when it did."""
+    system = platform.system()
+    try:
+        if system == "Windows":
+            made = _windows_shortcuts()
+        elif system == "Linux":
+            made = _linux_shortcut()
+        else:
+            # A .command cannot take an icon without an app bundle around it.
+            return False
+    except Exception as e:  # noqa: BLE001
+        print(f"Could not create shortcuts ({e}). Kiln still starts from the launcher.")
+        return False
+    print("Created shortcuts:\n" + "".join(f"  {p}\n" for p in made), end="")
+    return True
 
 
 def build_frontend():
@@ -555,7 +612,15 @@ def main():
     ap.add_argument("--reinstall", action="store_true", help="run pip even if the fingerprint matches")
     ap.add_argument("--fix-torch", action="store_true",
                     help="reinstall the PyTorch build this machine's driver can run, then exit")
+    ap.add_argument("--shortcuts", action="store_true",
+                    help="(re)create the Kiln shortcuts in the Start menu and on the desktop, "
+                         "or the Linux menu entry, then exit")
     args, extra = ap.parse_known_args()
+
+    if args.shortcuts:
+        make_shortcuts()
+        if not args.launch:
+            return
 
     if platform_mac.under_rosetta():
         # Checked before the venv exists: one made from this Python would hold
@@ -586,6 +651,15 @@ def main():
     if not args.skip_frontend:
         build_frontend()
     warn_if_torch_mismatch()
+    stamp = _read_stamp()
+    if stamp and not stamp.get("shortcuts_made"):
+        # Once, after the first install that worked: from then on the shortcut
+        # is how Kiln starts, and one someone deleted is not put back.
+        made = make_shortcuts()
+        stamp["shortcuts_made"] = True
+        STAMP_FILE.write_text(json.dumps(stamp, indent=2), encoding="utf-8")
+        if made:
+            print("Next time, start Kiln from the Kiln shortcut.")
     if args.launch:
         launch(extra)
     else:

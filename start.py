@@ -128,6 +128,76 @@ def pick_port(preferred: int, tries: int = 20, host: str = LOCAL_HOST) -> int:
     )
 
 
+def running_kiln(url: str) -> bool:
+    """Is Kiln itself already serving at this URL?
+
+    Opening Kiln a second time used to start another server on the next port.
+    That is a different origin, so the second window came up without the first
+    one's saved presets, and the two servers shared one GPU.
+    """
+    import json
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(url.rstrip("/") + "/api/health", timeout=2) as r:
+            body = json.loads(r.read().decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return False
+    data = body.get("data", body) if isinstance(body, dict) else {}
+    return isinstance(data, dict) and data.get("app") == "kiln"
+
+
+def app_icon():
+    """The icon for the window: .ico for Windows, PNG for GTK/Qt."""
+    import platform
+
+    name = "kiln.ico" if platform.system() == "Windows" else "kiln.png"
+    path = ROOT / "app" / "assets" / name
+    return str(path) if path.exists() else None
+
+
+def set_windows_app_id():
+    """Give Kiln its own taskbar button instead of grouping it with Python."""
+    import platform
+
+    if platform.system() != "Windows":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Kiln.Desktop")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def open_window(url: str):
+    """The native window on ``url``; returns False when there is none to open."""
+    try:
+        import webview  # pywebview
+
+        set_windows_app_id()
+        webview.create_window("Kiln", url, width=1440, height=920, min_size=(1024, 680))
+        # pywebview's docstring says GTK/Qt only, but its WinForms backend
+        # takes an .ico too (since 5.x).
+        webview.start(icon=app_icon())
+        return True
+    except Exception as e:  # noqa: BLE001
+        import platform
+
+        log.warning("Native window unavailable (%s).", e)
+        if platform.system() == "Linux":
+            # pywebview installs from pip, but its Linux backend is system GTK +
+            # WebKit, which pip cannot provide. Everything works without it --
+            # the window is the only thing missing -- so say how to get it and
+            # carry on rather than treating this as an error.
+            log.info(
+                "On Linux the desktop window needs a WebKit runtime: "
+                "sudo apt install python3-gi gir1.2-webkit2-4.1 "
+                "(Fedora: python3-gobject webkit2gtk4.1). "
+                "Or pass --no-window to skip it.")
+        return False
+
+
 def wait_for_server(url: str, timeout: float = 20.0) -> bool:
     import urllib.request
 
@@ -155,6 +225,15 @@ def main():
     args = ap.parse_args()
 
     host = ALL_INTERFACES if args.lan else args.host
+
+    # Already open? Show another window on that server rather than starting a
+    # second one. Not for --lan: that asks for a server bound differently.
+    if not args.lan and running_kiln(local_url(host, args.port)):
+        url = local_url(host, args.port)
+        log.info("Kiln is already running at %s — not starting another.", url)
+        if args.no_window or not open_window(url):
+            log.info("Open Kiln in your browser at %s.", url)
+        return
 
     ensure_frontend()
 
@@ -200,25 +279,7 @@ def main():
         except KeyboardInterrupt:
             return
 
-    try:
-        import webview  # pywebview
-
-        webview.create_window("Kiln", url, width=1440, height=920, min_size=(1024, 680))
-        webview.start()
-    except Exception as e:  # noqa: BLE001
-        import platform
-
-        log.warning("Native window unavailable (%s).", e)
-        if platform.system() == "Linux":
-            # pywebview installs from pip, but its Linux backend is system GTK +
-            # WebKit, which pip cannot provide. Everything works without it --
-            # the window is the only thing missing -- so say how to get it and
-            # carry on rather than treating this as an error.
-            log.info(
-                "On Linux the desktop window needs a WebKit runtime: "
-                "sudo apt install python3-gi gir1.2-webkit2-4.1 "
-                "(Fedora: python3-gobject webkit2gtk4.1). "
-                "Or pass --no-window to skip it.")
+    if not open_window(url):
         log.info("Open Kiln in your browser at %s — Ctrl+C to stop.", url)
         try:
             while True:

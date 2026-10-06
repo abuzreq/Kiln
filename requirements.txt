@@ -33,14 +33,14 @@ kornia>=0.7
 huggingface_hub>=0.23
 safetensors>=0.4
 
-# CLIP guidance (OpenAI CLIP).
-# NOTE: this line makes `git` a prerequisite for installing Kiln -- pip shells
-# out to it. The repo is archived upstream, so the commit is pinned: an
-# unpinned `main` on an archived project is a build that can change or vanish
-# under you.
+# CLIP guidance (OpenAI CLIP). Not on PyPI, so it comes from GitHub -- as the
+# source archive of one commit rather than `git+https://`, which would make git
+# a prerequisite for installing Kiln. The repo is archived upstream, so the
+# commit is pinned: an unpinned `main` on an archived project is a build that
+# can change or vanish under you.
 ftfy
 regex
-git+https://github.com/openai/CLIP.git@d05afc436d78f1c48dc0dbf8e5980a9d471f35f6
+clip @ https://github.com/openai/CLIP/archive/d05afc436d78f1c48dc0dbf8e5980a9d471f35f6.zip
 
 # Image / media
 Pillow>=10.0

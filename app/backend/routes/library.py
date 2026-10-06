@@ -354,6 +354,12 @@ def download_samples():
             job.detail["saved"] = saved
             if saved:
                 manager.clear_cache()
+                # Sample the new models' previews now, in the background, so
+                # their library cards have a picture by the time anyone looks.
+                from app.core import previews
+
+                for f in saved:
+                    previews.enqueue(str(workspace.models / f))
 
     t = threading.Thread(target=worker, daemon=True)
     job.thread = t

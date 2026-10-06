@@ -251,6 +251,16 @@ class ModelManager:
                 d["original_name"] = d["name"]
                 d["trained_as"] = []
             d["renamable"] = rights["renamable"]
+            if not d.get("thumbnail"):
+                # No picture of its own -- a sample model, an import, a Hub
+                # repo: the Start hub's first cached preview stands in, so the
+                # card is not just two letters. Imported here, not at the top:
+                # previews imports the sampler, which imports this module.
+                from app.core import previews
+
+                shown = previews.list_previews(m.path)
+                if shown:
+                    d["thumbnail"] = shown[0]
             try:
                 mtime = Path(m.path).stat().st_mtime
             except OSError:
