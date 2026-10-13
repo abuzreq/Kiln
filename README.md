@@ -656,19 +656,19 @@ Models, datasets, runs and images are not in the repository; they live in the wo
 ## License
 
 Kiln is source-available under the Functional Source License, version 1.1, with an MIT future
-license ([FSL-1.1-MIT](LICENSE.md)):
+license: [FSL-1.1-MIT](LICENSE.md).
 
-* **Use it, change it, share it.** Run Kiln for anything, study and modify it, and pass your
-  changes on. Hosting Kiln for others free of charge is welcome.
-* **Ask before selling Kiln itself.** Offering Kiln to others as a paid product or service, such as
-  a paid hosted version, needs my permission first:
-  [open an issue](https://github.com/abuzreq/Kiln/issues).
-* **What you make is yours.** Images, trained models, bend presets, merge recipes: use, sell and
-  license them freely. See [YOUR-WORK.md](YOUR-WORK.md).
-* **Every release becomes MIT** two years after it is published.
+**TL;DR**
 
-Versions published before this change (up to commit `1721167`) were released under the MIT
-License and stay under it.
+* **Free to do:** run Kiln, study it, change it and share your changes. Host it for others free of
+  charge. Own, sell and license what you make with it (images, trained models, bend presets,
+  merge recipes), including paid work such as prints and commissions.
+* **Needs permission:** offering Kiln to others as a paid product or service, such as a paid hosted
+  version. [Ask first](https://github.com/abuzreq/Kiln/issues).
+* **Becomes MIT:** each release, two years after it is published.
+
+This summary is not the license; [LICENSE.md](LICENSE.md) is. Versions published before this
+change (up to commit `1721167`) were released under the MIT License and stay under it.
 
 Kiln vendors [xurdif](https://github.com/htoyryla/xurdif) by Hannu Töyrylä, which is MIT-licensed
 ([vendor/xurdif/LICENSE](vendor/xurdif/LICENSE)), at upstream commit `a566214`. Kiln's changes to
