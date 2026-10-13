@@ -1,8 +1,8 @@
 # Third-party notices
 
-Kiln is MIT-licensed (see `LICENSE`). It ships the following third-party code, under the
-licences below. Python and npm dependencies that you install yourself are not shipped with
-Kiln and carry their own licences.
+Kiln is licensed under FSL-1.1-MIT (see `LICENSE.md`). It ships the following third-party
+code, under the licences below. Python and npm dependencies that you install yourself are not
+shipped with Kiln and carry their own licences.
 
 ## Vendored source
 
